@@ -10,8 +10,9 @@ export interface Paths {
 }
 
 export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
-  const configDir =
-    env.MARVIN_DRIVE_CONFIG_DIR ?? path.join(os.homedir(), '.config', 'google-handler');
+  const configDir = path.resolve(
+    env.MARVIN_DRIVE_CONFIG_DIR || path.join(os.homedir(), '.config', 'google-handler'),
+  );
   return {
     configDir,
     clientSecret: path.join(configDir, 'client_secret.json'),

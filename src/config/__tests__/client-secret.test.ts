@@ -31,6 +31,13 @@ describe('loadClientSecret', () => {
     await expect(loadClientSecret(file)).rejects.toThrow(file);
   });
 
+  it('does not claim "not found" for other read errors', async () => {
+    const err = await loadClientSecret(dir).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(/Cannot read .*EISDIR/);
+    expect((err as Error).message).not.toMatch(/not found/);
+  });
+
   it('rejects invalid JSON and wrong shapes', async () => {
     const bad = path.join(dir, 'bad.json');
     await writeFile(bad, 'not json');

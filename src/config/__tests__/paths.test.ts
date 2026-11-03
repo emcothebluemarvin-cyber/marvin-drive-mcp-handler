@@ -16,6 +16,14 @@ describe('resolvePaths', () => {
     });
   });
 
+  it('treats an empty MARVIN_DRIVE_CONFIG_DIR as unset and resolves relative paths', () => {
+    const dir = path.join(os.homedir(), '.config', 'google-handler');
+    expect(resolvePaths({ MARVIN_DRIVE_CONFIG_DIR: '' }).configDir).toBe(dir);
+    expect(resolvePaths({ MARVIN_DRIVE_CONFIG_DIR: 'rel/dir' }).configDir).toBe(
+      path.resolve('rel/dir'),
+    );
+  });
+
   it('honours MARVIN_DRIVE_CONFIG_DIR', () => {
     const p = resolvePaths({ MARVIN_DRIVE_CONFIG_DIR: '/tmp/x' });
     expect(p.configDir).toBe('/tmp/x');

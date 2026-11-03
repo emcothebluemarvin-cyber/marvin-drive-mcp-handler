@@ -1,9 +1,11 @@
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { AccountNotFoundError, ConfigError, ValidationError, hasErrorCode } from '../errors.js';
 
 export const ALIAS_PATTERN = /^[a-z0-9-]{1,32}$/;
+
+const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+$/;
 
 export interface AccountRecord {
   alias: string;
@@ -115,6 +117,9 @@ export class AccountRegistry {
     if (!ALIAS_PATTERN.test(alias)) {
       throw new ValidationError(`Alias must match ${ALIAS_PATTERN.source} (got "${input.alias}")`);
     }
+    if (!EMAIL_PATTERN.test(email)) {
+      throw new ValidationError(`"${input.email}" is not a valid email address`);
+    }
     const data = await this.read();
     const sameEmail = data.accounts.find((a) => a.email === email);
     if (sameEmail) {
@@ -153,10 +158,17 @@ export class AccountRegistry {
   }
 
   private async write(data: RegistryData): Promise<void> {
-    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const dir = path.dirname(this.file);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
     const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-    await rename(tmp, this.file);
+    try {
+      await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+      await rename(tmp, this.file);
+    } catch (err) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
     this.cache = null;
   }
 }

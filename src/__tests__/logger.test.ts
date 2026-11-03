@@ -31,7 +31,24 @@ describe('redact', () => {
   });
 });
 
+describe('scrubText coverage', () => {
+  it('redacts bare Google tokens and JSON-style pairs', () => {
+    expect(redact('tok ya29.abc-def end')).toBe('tok [REDACTED] end');
+    expect(redact('rt 1//0gXyz end')).toBe('rt [REDACTED] end');
+    expect(redact('body {"refresh_token": "1//x", "keep": "v"}')).toBe(
+      'body {"refresh_token":"[REDACTED]", "keep": "v"}',
+    );
+  });
+});
+
 describe('createLogger', () => {
+  it('scrubs secrets from the message', () => {
+    const lines: string[] = [];
+    createLogger((line) => lines.push(line)).warn('failed ?token=abc');
+    const entry = JSON.parse(lines[0] ?? '') as Record<string, unknown>;
+    expect(entry.msg).toBe('failed ?token=[REDACTED]');
+  });
+
   it('writes one redacted JSON line per call', () => {
     const lines: string[] = [];
     const log = createLogger((line) => lines.push(line));

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { ConfigError } from '../errors.js';
+import { ConfigError, hasErrorCode } from '../errors.js';
 
 const clientSecretSchema = z.object({
   installed: z.object({
@@ -19,6 +19,15 @@ export async function loadClientSecret(file: string): Promise<ClientCredentials>
   try {
     raw = await readFile(file, 'utf8');
   } catch (err) {
+    if (!hasErrorCode(err, 'ENOENT')) {
+      const reason =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code: unknown }).code)
+          : err instanceof Error
+            ? err.message
+            : 'unknown error';
+      throw new ConfigError(`Cannot read ${file}: ${reason}`, { cause: err });
+    }
     throw new ConfigError(
       `OAuth client file not found at ${file}. Save the Google Cloud "Desktop app" client JSON there (chmod 600).`,
       { cause: err },

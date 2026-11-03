@@ -1,4 +1,4 @@
-import { mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -52,6 +52,20 @@ describe('AccountRegistry', () => {
     await expect(registry.add({ alias: 'emco', email: 'new@example.com' })).rejects.toThrow(
       /Alias "emco" is already used/,
     );
+  });
+
+  it('rejects emails without a valid shape before writing', async () => {
+    await expect(registry.add({ alias: 'a', email: 'nope' })).rejects.toThrow(ValidationError);
+    await expect(registry.add({ alias: 'a', email: 'a@b@c' })).rejects.toThrow(ValidationError);
+    await expect(registry.read()).resolves.toEqual({ default: null, accounts: [] });
+  });
+
+  it('tightens an existing config dir to 0700', async () => {
+    const dir = path.dirname(file);
+    await mkdir(dir, { mode: 0o755 });
+    await chmod(dir, 0o755);
+    await registry.add({ alias: 'emco', email: 'emco@example.com' }, NOW);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 
   it('resolves by alias, email, default, or single account', async () => {

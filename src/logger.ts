@@ -4,11 +4,18 @@ const MAX_DEPTH = 8;
 
 const SECRET_IN_TEXT =
   /\b(token|access_token|refresh_token|id_token|code|client_secret)=[^&\s"']+/gi;
+const BARE_GOOGLE_TOKEN = /\b(ya29\.[\w.-]+|1\/\/[\w.-]+)/g;
+const JSON_SECRET_PAIR =
+  /"(access_token|refresh_token|id_token|client_secret|code)"\s*:\s*"[^"]*"/gi;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 
 /** Removes `token=…`-style query values and bearer tokens from free text (e.g. error messages). */
 export function scrubText(text: string): string {
-  return text.replace(SECRET_IN_TEXT, '$1=[REDACTED]').replace(BEARER, 'Bearer [REDACTED]');
+  return text
+    .replace(JSON_SECRET_PAIR, '"$1":"[REDACTED]"')
+    .replace(SECRET_IN_TEXT, '$1=[REDACTED]')
+    .replace(BEARER, 'Bearer [REDACTED]')
+    .replace(BARE_GOOGLE_TOKEN, '[REDACTED]');
 }
 
 /** Deep-copies `value`, replacing secret-looking keys with "[REDACTED]" and scrubbing strings. */
@@ -45,7 +52,7 @@ export function createLogger(
     const entry = {
       ts: new Date().toISOString(),
       level,
-      msg,
+      msg: scrubText(msg),
       ...(meta ? { meta: redact(meta) } : {}),
     };
     write(`${JSON.stringify(entry)}\n`);
