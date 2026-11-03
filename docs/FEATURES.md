@@ -14,7 +14,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 ### 2. File management
 - ⬜ list, search, get metadata
 - ⬜ download (+ Google-native export)
-- ⬜ upload (resumable > 5 MB)
+- ⬜ upload (streaming multipart; resumable deferred)
 - ⬜ create folder, move, rename, copy
 - ⬜ delete (trash default / permanent), restore
 
@@ -26,4 +26,5 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 ## Later
 - ⬜ 4. Content processing (Docs/Sheets/PDF)
 - ⬜ 5. Sync (local ↔ Drive)
+- ⬜ Resumable upload for large files
 - ⬜ OAuth app → production (GitHub Pages homepage + privacy policy)

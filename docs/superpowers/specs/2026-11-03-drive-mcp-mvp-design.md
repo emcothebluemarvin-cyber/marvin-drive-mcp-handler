@@ -22,7 +22,7 @@ Let Claude Code operate on one or more Google Drive accounts (first: `emcotheblu
 
 | Topic | Decision |
 |---|---|
-| Language / runtime | TypeScript (strict), Node.js 22 LTS |
+| Language / runtime | TypeScript ~6.0 (strict), Node.js ≥ 22.12 (developed on 24 LTS) |
 | Libraries | `@modelcontextprotocol/sdk`, `googleapis`, `zod`; Keychain access via a maintained native binding (e.g. `@napi-rs/keyring`), chosen at plan time |
 | MCP transport | stdio (Claude Code spawns `marvin-drive serve`) |
 | Architecture | Layered (single user, no DB, one integration) |
@@ -85,7 +85,7 @@ General rules:
 | `drive_search` | `query?`, `mimeType?`, `modifiedAfter?` (ISO date), `rawQuery?`, `pageSize?` (default 50, max 200), `pageToken?` | At least one of `query`/`mimeType`/`modifiedAfter`/`rawQuery` required. Clauses AND-ed: `query` → `(name contains 'q' or fullText contains 'q')`; `mimeType` → `mimeType = 'm'`; `modifiedAfter` → `modifiedTime > 'iso'`; `rawQuery` → `(raw)` verbatim. String values escaped: `\` → `\\` first, then `'` → `\'`. `trashed = false` is appended unless `rawQuery` matches `/\btrashed\b/i` |
 | `drive_get_metadata` | `fileId` | `FILE_FIELDS` |
 | `drive_download` | `fileId`, `destPath?`, `exportFormat?` | See "Download rules" below. Returns absolute path, size, source mimeType, export format used |
-| `drive_upload` | `localPath`, `parentId?` (default root), `name?` (default basename), `convertToGoogle?` (default false) | MIME type from file extension (`mime-types`), fallback `application/octet-stream`. `convertToGoogle` mapping: doc/docx/odt/rtf/txt/html/md → Doc; xls/xlsx/ods/csv/tsv → Sheet; ppt/pptx/odp → Slides; other types with `convertToGoogle=true` → `ValidationError`. Multipart for ≤ 5 MB, resumable above. Missing/unreadable/directory `localPath` → `ValidationError` |
+| `drive_upload` | `localPath`, `parentId?` (default root), `name?` (default basename), `convertToGoogle?` (default false) | MIME type from file extension (`mime-types`), fallback `application/octet-stream`. `convertToGoogle` mapping: doc/docx/odt/rtf/txt/html/md → Doc; xls/xlsx/ods/csv/tsv → Sheet; ppt/pptx/odp → Slides; other types with `convertToGoogle=true` → `ValidationError`. Streaming multipart upload for all sizes (`googleapis` has no built-in resumable upload; resumable is deferred past MVP). Missing/unreadable/directory `localPath` → `ValidationError` |
 | `drive_create_folder` | `name`, `parentId?` (default root) | mimeType `application/vnd.google-apps.folder`; returns folder metadata |
 | `drive_move` | `fileId`, `newParentId` | 1) `files.get fields=parents`; 2) `files.update addParents=newParentId, removeParents=<all old parents except newParentId>`. No-op if already only in `newParentId` |
 | `drive_rename` | `fileId`, `newName` | `files.update { name }` |
@@ -163,7 +163,7 @@ Runtime: access tokens kept in memory only; refreshed by the `googleapis` OAuth2
 
 **Retry policy:** exponential backoff with jitter, max 3 retries.
 - Idempotent operations (`list`, `search`, `get_metadata`, `download`, `move`, `rename`, `delete`, `restore`, token refresh): retry on rate-limit errors and 5xx.
-- Non-idempotent creates (`upload`, `create_folder`, `copy`): retry **only** on rate-limit errors (the request was rejected, not processed). A 5xx is surfaced immediately with a hint to check for a duplicate. MVP does not resume interrupted resumable uploads; a failed upload is surfaced and can be re-run by the caller.
+- Non-idempotent creates (`upload`, `create_folder`, `copy`): retry **only** on rate-limit errors (the request was rejected, not processed). A 5xx is surfaced immediately with a hint to check for a duplicate. A failed upload is surfaced and can be re-run by the caller.
 - Retry-after-success guards: a 404 on a retry of `delete permanent` counts as success; `move` re-reads `parents` before each retry and recomputes `removeParents` (no-op if already done).
 
 Rules: stdout is reserved for MCP protocol — all logs go to stderr. Tokens, secrets, and auth codes are never logged; logger redacts known keys.
