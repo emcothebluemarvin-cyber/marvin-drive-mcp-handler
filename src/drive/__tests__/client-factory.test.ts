@@ -101,4 +101,18 @@ describe('DriveClientFactory', () => {
     await tokens.delete('emco@example.com');
     await expect(factory.run(undefined, async () => 'x')).rejects.toThrow(ReauthRequiredError);
   });
+
+  it('rejects concurrent invalid_grant calls with ReauthRequiredError', async () => {
+    const fail = async (): Promise<never> => {
+      throw invalidGrant();
+    };
+    const results = await Promise.allSettled([
+      factory.run(undefined, fail),
+      factory.run(undefined, fail),
+    ]);
+    for (const r of results) {
+      expect(r.status).toBe('rejected');
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ReauthRequiredError);
+    }
+  });
 });

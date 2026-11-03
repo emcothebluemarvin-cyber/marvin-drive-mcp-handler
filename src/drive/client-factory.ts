@@ -39,8 +39,8 @@ export class DriveClientFactory implements DriveRunner {
     } catch (err) {
       if (!isInvalidGrant(err)) throw err;
       let lastErr: unknown = err;
-      this.cache.delete(ctx.account.email);
-      const latest = await this.auth.readRefreshToken(ctx.account.email);
+      this.evict(ctx);
+      const latest = await this.auth.readRefreshToken(ctx.account.email).catch(() => null);
       if (latest && latest !== ctx.refreshToken) {
         const retryCtx = await this.context(ctx.account.alias);
         try {
@@ -50,12 +50,17 @@ export class DriveClientFactory implements DriveRunner {
         } catch (retryErr) {
           if (!isInvalidGrant(retryErr)) throw retryErr;
           lastErr = retryErr;
-          this.cache.delete(ctx.account.email);
+          this.evict(retryCtx);
         }
       }
       this.auth.markReauthRequired(ctx.account.email);
       throw new ReauthRequiredError(ctx.account.alias, { cause: lastErr });
     }
+  }
+
+  /** Removes the cache entry only if it is still the one this call used. */
+  private evict(ctx: CachedContext): void {
+    if (this.cache.get(ctx.account.email) === ctx) this.cache.delete(ctx.account.email);
   }
 
   private async context(accountRef: string | undefined): Promise<CachedContext> {

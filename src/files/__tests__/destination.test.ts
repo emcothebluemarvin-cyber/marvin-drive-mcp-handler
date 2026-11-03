@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -98,5 +98,22 @@ describe('writeUnique', () => {
       }),
     ).rejects.toThrow('403');
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('does not overwrite a final file that appears after reservation', async () => {
+    const res = await writeUnique({ dir, name: 'report.pdf' }, async () => {
+      await writeFile(path.join(dir, 'report.pdf'), 'raced');
+      return Readable.from(['new']);
+    });
+    expect(path.basename(res.path)).toBe('report (1).pdf');
+    expect(await readFile(path.join(dir, 'report.pdf'), 'utf8')).toBe('raced');
+    expect(await readFile(res.path, 'utf8')).toBe('new');
+    expect((await readdir(dir)).sort()).toEqual(['report (1).pdf', 'report.pdf']);
+  });
+
+  it('treats a dangling symlink as a taken name', async () => {
+    await symlink(path.join(dir, 'nowhere'), path.join(dir, 'link.txt'));
+    const res = await writeUnique({ dir, name: 'link.txt' }, async () => Readable.from(['x']));
+    expect(path.basename(res.path)).toBe('link (1).txt');
   });
 });

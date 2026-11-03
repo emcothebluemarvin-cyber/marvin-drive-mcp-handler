@@ -1,5 +1,4 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { link, lstat, mkdir, open, rm, stat, unlink, type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
@@ -44,7 +43,7 @@ async function isDirectory(p: string): Promise<boolean> {
 
 async function exists(p: string): Promise<boolean> {
   try {
-    await stat(p);
+    await lstat(p); // lstat: a dangling symlink counts as taken
     return true;
   } catch (err) {
     if (hasErrorCode(err, 'ENOENT')) return false;
@@ -76,7 +75,13 @@ export function assertInside(dir: string, target: string): void {
   }
 }
 
-async function reserve(dest: Destination): Promise<{ finalPath: string; partPath: string }> {
+interface Reservation {
+  handle: FileHandle;
+  partPath: string;
+  index: number;
+}
+
+async function reserve(dest: Destination): Promise<Reservation> {
   for (let i = 0; i < MAX_COLLISIONS; i++) {
     const finalPath = path.join(dest.dir, candidateName(dest.name, i));
     assertInside(dest.dir, finalPath);
@@ -84,8 +89,7 @@ async function reserve(dest: Destination): Promise<{ finalPath: string; partPath
     const partPath = `${finalPath}.part`;
     try {
       const handle = await open(partPath, 'wx', 0o644);
-      await handle.close();
-      return { finalPath, partPath };
+      return { handle, partPath, index: i };
     } catch (err) {
       if (hasErrorCode(err, 'EEXIST')) continue;
       throw err;
@@ -94,22 +98,43 @@ async function reserve(dest: Destination): Promise<{ finalPath: string; partPath
   throw new ValidationError(`Too many files named like "${dest.name}" in ${dest.dir}`);
 }
 
+/** Hard-links the part file to the first free final name (never overwrites), then drops the part. */
+async function publish(dest: Destination, partPath: string, start: number): Promise<string> {
+  for (let i = start; i < MAX_COLLISIONS; i++) {
+    const finalPath = path.join(dest.dir, candidateName(dest.name, i));
+    assertInside(dest.dir, finalPath);
+    try {
+      await link(partPath, finalPath);
+    } catch (err) {
+      if (hasErrorCode(err, 'EEXIST')) continue;
+      throw err;
+    }
+    await unlink(partPath);
+    return finalPath;
+  }
+  throw new ValidationError(`Too many files named like "${dest.name}" in ${dest.dir}`);
+}
+
 /**
  * Reserves a non-colliding `<name>.part` (exclusive create), streams `openSource()` into it,
- * then renames to the final name. Never overwrites; removes the partial file on failure.
+ * then publishes via link+unlink. Never overwrites; removes the partial file on failure.
  */
 export async function writeUnique(
   dest: Destination,
   openSource: () => Promise<Readable>,
 ): Promise<WrittenFile> {
   await mkdir(dest.dir, { recursive: true });
-  const { finalPath, partPath } = await reserve(dest);
+  const { handle, partPath, index } = await reserve(dest);
+  let streamCreated = false;
   try {
     const source = await openSource();
-    await pipeline(source, createWriteStream(partPath));
-    await rename(partPath, finalPath);
+    const out = handle.createWriteStream();
+    streamCreated = true;
+    await pipeline(source, out);
+    const finalPath = await publish(dest, partPath, index);
     return { path: finalPath, size: (await stat(finalPath)).size };
   } catch (err) {
+    if (!streamCreated) await handle.close().catch(() => undefined);
     await rm(partPath, { force: true });
     throw err;
   }

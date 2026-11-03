@@ -36,6 +36,16 @@ export interface DriveAdapter {
   deleteFile(fileId: string): Promise<void>;
 }
 
+/** Only https URLs on google.com / googleapis.com (and subdomains) may receive the bearer token. */
+export function isAllowedExportUrl(url: string): boolean {
+  try {
+    const { hostname, protocol } = new URL(url);
+    return protocol === 'https:' && /(^|\.)(google\.com|googleapis\.com)$/.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function createDriveAdapter(auth: Auth.OAuth2Client): DriveAdapter {
   const drive = google.drive({ version: 'v3', auth });
   const allDrives = { supportsAllDrives: true } as const;
@@ -72,16 +82,24 @@ export function createDriveAdapter(auth: Auth.OAuth2Client): DriveAdapter {
     },
 
     async fetchExportLink(url) {
-      // Only ever send the bearer token to Google hosts.
-      const { hostname, protocol } = new URL(url);
-      if (protocol !== 'https:' || !/(^|\.)(google\.com|googleapis\.com)$/.test(hostname)) {
-        throw new Error(`Refusing to send credentials to ${hostname}`);
+      if (!isAllowedExportUrl(url)) {
+        throw new Error('Refusing to send credentials to a non-Google export link');
       }
       const { token } = await auth.getAccessToken();
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token ?? ''}` },
-        signal: AbortSignal.timeout(5 * 60_000),
-      });
+      if (!token) throw new Error('No access token available for export link request');
+      // Timeout only covers waiting for response headers, not the body download.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
+      timer.unref();
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (!res.ok || !res.body) {
         await res.body?.cancel();
         throw Object.assign(new Error(`Export link request failed with ${res.status}`), {
