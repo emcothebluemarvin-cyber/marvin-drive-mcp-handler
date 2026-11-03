@@ -445,7 +445,7 @@ export class FileService {
           target,
           alias: ctx.account.alias,
           logger: this.log,
-          createOp: retryClass === 'create',
+          kind: retryClass,
         });
       }
     });
