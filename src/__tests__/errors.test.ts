@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ApiDisabledError,
   AppError,
+  ConflictError,
   DriveApiError,
   ExportTooLargeError,
   NotFoundError,
@@ -41,5 +43,33 @@ describe('errors', () => {
     expect(hasErrorCode(Object.assign(new Error('x'), { code: 'ENOENT' }), 'ENOENT')).toBe(true);
     expect(hasErrorCode(new Error('x'), 'ENOENT')).toBe(false);
     expect(hasErrorCode('ENOENT', 'ENOENT')).toBe(false);
+  });
+});
+
+describe('content API errors', () => {
+  it('ConflictError names the file and the re-read tool', () => {
+    const e = new ConflictError('"Plan"', 'docs_read');
+    expect(e.code).toBe('CONFLICT');
+    expect(e.message).toBe(
+      '"Plan" changed since it was read (or the revisionId expired); re-read it with docs_read and retry with the new revisionId.',
+    );
+  });
+
+  it('ApiDisabledError names the API', () => {
+    const e = new ApiDisabledError('sheets');
+    expect(e.code).toBe('API_DISABLED');
+    expect(e.message).toBe(
+      'The Google Sheets API is not enabled for this OAuth project. Enable it in Cloud Console → APIs & Services, then retry.',
+    );
+  });
+
+  it('DriveApiError keeps the Drive prefix by default and labels other APIs', () => {
+    expect(new DriveApiError(400, 'bad').message).toBe('Drive API error (400): bad');
+    expect(new DriveApiError(400, 'bad', { api: 'drive' }).message).toBe(
+      'Drive API error (400): bad',
+    );
+    expect(new DriveApiError(400, 'bad', { api: 'slides' }).message).toBe(
+      'Google Slides API error (400): bad',
+    );
   });
 });

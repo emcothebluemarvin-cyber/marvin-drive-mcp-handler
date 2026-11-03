@@ -6,6 +6,9 @@ import { FileAuditLog } from './audit/audit-log.js';
 import { AccountRegistry } from './config/account-registry.js';
 import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
 import { resolvePaths, type Paths } from './config/paths.js';
+import { DocsService } from './content/docs-service.js';
+import { SheetsService } from './content/sheets-service.js';
+import { SlidesService } from './content/slides-service.js';
 import { DriveClientFactory } from './drive/client-factory.js';
 import { FileService } from './files/file-service.js';
 
@@ -13,6 +16,9 @@ export interface App {
   paths: Paths;
   auth: AuthService;
   files: FileService;
+  docs: DocsService;
+  sheets: SheetsService;
+  slides: SlidesService;
 }
 
 /** Composition root: wires real implementations together. */
@@ -36,10 +42,11 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
         },
       }),
   });
-  const files = new FileService({
-    runner: new DriveClientFactory(auth),
-    audit: new FileAuditLog(paths.audit),
-    downloadsDir: paths.downloadsDir,
-  });
-  return { paths, auth, files };
+  const runner = new DriveClientFactory(auth);
+  const audit = new FileAuditLog(paths.audit);
+  const files = new FileService({ runner, audit, downloadsDir: paths.downloadsDir });
+  const docs = new DocsService({ runner, audit });
+  const sheets = new SheetsService({ runner, audit });
+  const slides = new SlidesService({ runner, audit });
+  return { paths, auth, files, docs, sheets, slides };
 }

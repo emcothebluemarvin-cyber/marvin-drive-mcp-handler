@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   AbusiveFileError,
+  ApiDisabledError,
+  ConflictError,
   DriveApiError,
   ExportTooLargeError,
   NotFoundError,
@@ -10,7 +12,13 @@ import {
   ValidationError,
 } from '../../errors.js';
 import { createLogger } from '../../logger.js';
-import { isRateLimit, mapDriveError, reasonOf, statusOf } from '../drive-errors.js';
+import {
+  isRateLimit,
+  isRevisionMismatch,
+  mapDriveError,
+  reasonOf,
+  statusOf,
+} from '../drive-errors.js';
 
 const gaxios = (status: number, reason?: string, asString = false): Error => {
   const body = { error: { code: status, message: 'x', errors: reason ? [{ reason }] : [] } };
@@ -20,7 +28,7 @@ const gaxios = (status: number, reason?: string, asString = false): Error => {
   });
 };
 const silent = createLogger(() => {});
-const ctx = { target: 'file-1', alias: 'emco', logger: silent };
+const ctx = { target: 'file-1', alias: 'emco', logger: silent, kind: 'idempotent' as const };
 
 describe('statusOf / reasonOf', () => {
   it('reads gaxios shapes', () => {
@@ -49,6 +57,17 @@ describe('isRateLimit', () => {
     expect(isRateLimit(403, 'userRateLimitExceeded')).toBe(true);
     expect(isRateLimit(403, 'rateLimitExceeded')).toBe(true);
     expect(isRateLimit(403, 'forbidden')).toBe(false);
+  });
+});
+
+describe('mapDriveError rate limit wording', () => {
+  it('names the API that was throttled', () => {
+    expect(mapDriveError(gaxios(429), ctx).message).toBe(
+      'Google Drive rate limit exceeded; try again shortly',
+    );
+    expect(mapDriveError(gaxios(429), { ...ctx, api: 'sheets' }).message).toBe(
+      'Google Sheets rate limit exceeded; try again shortly',
+    );
   });
 });
 
@@ -87,11 +106,151 @@ describe('mapDriveError', () => {
   });
 
   it('adds a duplicate hint for failed creates', () => {
-    expect(mapDriveError(gaxios(503), { ...ctx, createOp: true }).message).toMatch(/duplicate/);
+    expect(mapDriveError(gaxios(503), { ...ctx, kind: 'create' as const }).message).toMatch(
+      /duplicate/,
+    );
   });
 
   it('passes AppErrors through unchanged', () => {
     const own = new ValidationError('mine');
     expect(mapDriveError(own, ctx)).toBe(own);
+  });
+});
+
+const errorInfo = (status: number, reason: string, message: string): Error =>
+  Object.assign(new Error(message), {
+    status,
+    response: {
+      status,
+      data: {
+        error: {
+          code: status,
+          message,
+          status: 'PERMISSION_DENIED',
+          details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason }],
+        },
+      },
+    },
+  });
+
+const withMessage = (status: number, reason: string, message: string): Error =>
+  Object.assign(new Error(message), { status, errors: [{ reason }] });
+
+const MISMATCH = "The required revision ID 'abc' does not match the latest revision.";
+
+describe('content API error mapping', () => {
+  it('reads ErrorInfo reasons from the newer error format', () => {
+    expect(reasonOf(errorInfo(403, 'SERVICE_DISABLED', 'x'))).toBe('SERVICE_DISABLED');
+  });
+
+  it('maps a disabled API before the 403 permission branch', () => {
+    const disabled = mapDriveError(
+      errorInfo(
+        403,
+        'SERVICE_DISABLED',
+        'Google Docs API has not been used in project 1 before or it is disabled.',
+      ),
+      { ...ctx, api: 'docs' },
+    );
+    expect(disabled).toBeInstanceOf(ApiDisabledError);
+    expect(disabled.message).toContain('Google Docs API');
+    expect(mapDriveError(gaxios(403, 'accessNotConfigured'), ctx)).toBeInstanceOf(ApiDisabledError);
+    const byMessage = mapDriveError(
+      withMessage(
+        403,
+        'forbidden',
+        'Google Sheets API has not been used in project 9 before or it is disabled.',
+      ),
+      { ...ctx, api: 'sheets' },
+    );
+    expect(byMessage).toBeInstanceOf(ApiDisabledError);
+    expect(mapDriveError(withMessage(403, 'forbidden', 'nope'), ctx).constructor.name).toBe(
+      'PermissionDeniedError',
+    );
+  });
+
+  it('maps a revision mismatch to ConflictError for docs and slides only', () => {
+    expect(isRevisionMismatch(withMessage(400, 'badRequest', MISMATCH))).toBe(true);
+    expect(isRevisionMismatch(withMessage(400, 'badRequest', 'Invalid range'))).toBe(false);
+    const docs = mapDriveError(withMessage(400, 'badRequest', MISMATCH), {
+      ...ctx,
+      kind: 'mutate',
+      api: 'docs',
+      name: 'Plan',
+    });
+    expect(docs).toBeInstanceOf(ConflictError);
+    expect(docs.message).toContain('"Plan" changed since it was read');
+    expect(docs.message).toContain('docs_read');
+    const slides = mapDriveError(withMessage(400, 'badRequest', MISMATCH), {
+      ...ctx,
+      api: 'slides',
+    });
+    expect(slides.message).toContain('file-1 changed');
+    expect(slides.message).toContain('slides_read');
+    expect(mapDriveError(withMessage(400, 'badRequest', MISMATCH), ctx)).toBeInstanceOf(
+      DriveApiError,
+    );
+  });
+
+  it('labels non-Drive errors and keeps up to 500 chars of their message', () => {
+    const long = 'x'.repeat(450);
+    const sheets = mapDriveError(withMessage(400, 'badRequest', long), { ...ctx, api: 'sheets' });
+    expect(sheets.message).toBe(`Google Sheets API error (400): ${long}`);
+    const drive = mapDriveError(withMessage(400, 'badRequest', long), ctx);
+    expect(drive.message).toBe(`Drive API error (400): ${'x'.repeat(200)}`);
+  });
+
+  it('warns that a failed edit may still have been applied', () => {
+    expect(mapDriveError(gaxios(503), { ...ctx, kind: 'mutate' }).message).toMatch(
+      /may have been applied anyway; re-read the file before retrying/,
+    );
+    expect(mapDriveError(gaxios(503), ctx).message).not.toMatch(/applied|duplicate/);
+  });
+});
+
+describe('content API error mapping hardening', () => {
+  const DISABLED_MSG = 'Google Docs API has not been used in project 1 before or it is disabled.';
+
+  it('M1: ErrorInfo SERVICE_DISABLED wins over a generic top-level reason', () => {
+    const err = Object.assign(errorInfo(403, 'SERVICE_DISABLED', 'x'), {
+      errors: [{ reason: 'forbidden' }],
+    });
+    expect(mapDriveError(err, { ...ctx, api: 'docs' })).toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M7: detects a disabled API from the response body message', () => {
+    const err = Object.assign(new Error('Request failed with status code 403'), {
+      status: 403,
+      response: { status: 403, data: { error: { code: 403, message: DISABLED_MSG } } },
+    });
+    expect(mapDriveError(err, { ...ctx, api: 'docs' })).toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M8: a 400 with the disabled-API wording is not ApiDisabledError', () => {
+    const mapped = mapDriveError(withMessage(400, 'badRequest', DISABLED_MSG), {
+      ...ctx,
+      api: 'docs',
+    });
+    expect(mapped).toBeInstanceOf(DriveApiError);
+    expect(mapped).not.toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M9: a 500 with the mismatch wording is not a revision mismatch', () => {
+    expect(isRevisionMismatch(withMessage(500, 'backendError', MISMATCH))).toBe(false);
+  });
+
+  it('reads ErrorInfo from an unparsed JSON string body', () => {
+    const body = {
+      error: {
+        details: [
+          { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'SERVICE_DISABLED' },
+        ],
+      },
+    };
+    const err = Object.assign(new Error('x'), {
+      status: 403,
+      response: { status: 403, data: JSON.stringify(body) },
+    });
+    expect(reasonOf(err)).toBe('SERVICE_DISABLED');
   });
 });

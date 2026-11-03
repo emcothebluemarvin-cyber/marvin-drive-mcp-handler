@@ -4,11 +4,29 @@ import { isInvalidGrant } from '../auth/oauth-errors.js';
 import type { AccountRecord } from '../config/account-registry.js';
 import { ReauthRequiredError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
+import { createDocsAdapter, type DocsAdapter } from './docs-adapter.js';
 import { createDriveAdapter, type DriveAdapter } from './drive-adapter.js';
+import { createSheetsAdapter, type SheetsAdapter } from './sheets-adapter.js';
+import { createSlidesAdapter, type SlidesAdapter } from './slides-adapter.js';
 
-export interface DriveContext {
-  account: AccountRecord;
+export interface GoogleAdapters {
   drive: DriveAdapter;
+  docs: DocsAdapter;
+  sheets: SheetsAdapter;
+  slides: SlidesAdapter;
+}
+
+export interface DriveContext extends GoogleAdapters {
+  account: AccountRecord;
+}
+
+export function createGoogleAdapters(client: Auth.OAuth2Client): GoogleAdapters {
+  return {
+    drive: createDriveAdapter(client),
+    docs: createDocsAdapter(client),
+    sheets: createSheetsAdapter(client),
+    slides: createSlidesAdapter(client),
+  };
 }
 
 /**
@@ -28,7 +46,9 @@ export class DriveClientFactory implements DriveRunner {
 
   constructor(
     private readonly auth: AuthService,
-    private readonly makeAdapter: (client: Auth.OAuth2Client) => DriveAdapter = createDriveAdapter,
+    private readonly makeAdapters: (
+      client: Auth.OAuth2Client,
+    ) => GoogleAdapters = createGoogleAdapters,
     private readonly logger: Logger = defaultLogger,
   ) {}
 
@@ -82,7 +102,7 @@ export class DriveClientFactory implements DriveRunner {
     if (cached && cached.refreshToken === token) return cached;
 
     const { client, refreshToken } = await this.auth.authorize(account.alias);
-    const fresh: CachedContext = { account, drive: this.makeAdapter(client), refreshToken };
+    const fresh: CachedContext = { account, ...this.makeAdapters(client), refreshToken };
     this.cache.set(account.email, fresh);
     return fresh;
   }

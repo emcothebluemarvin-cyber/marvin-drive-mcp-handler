@@ -23,8 +23,14 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ CLI: `auth add/login/list/remove/default`, `serve`
 - ✅ Claude Code registration docs
 
+### 4. Content processing (spec: `docs/superpowers/specs/2026-11-03-content-processing-design.md`)
+- ✅ Docs read / replace / insert / batch
+- ✅ Sheets info / read / write / append / batch
+- ✅ Slides read / replace / set text / batch
+- ✅ Revision guards + conflict errors
+- ✅ Disabled-API errors
+
 ## Later
-- ⬜ 4. Content processing (Docs/Sheets/PDF)
 - ⬜ 5. Sync (local ↔ Drive)
 - ⬜ Resumable upload for large files
 - ⬜ OAuth app → production (GitHub Pages homepage + privacy policy)

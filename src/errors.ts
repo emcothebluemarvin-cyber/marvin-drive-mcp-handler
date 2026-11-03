@@ -7,6 +7,15 @@ export abstract class AppError extends Error {
   }
 }
 
+export type GoogleApi = 'drive' | 'docs' | 'sheets' | 'slides';
+
+export const API_LABEL: Record<GoogleApi, string> = {
+  drive: 'Drive',
+  docs: 'Docs',
+  sheets: 'Sheets',
+  slides: 'Slides',
+};
+
 export class ValidationError extends AppError {
   readonly code = 'VALIDATION_ERROR';
 }
@@ -56,8 +65,11 @@ export class PermissionDeniedError extends AppError {
 export class RateLimitError extends AppError {
   readonly code = 'RATE_LIMITED';
 
-  constructor(options?: ErrorOptions) {
-    super('Google Drive rate limit exceeded; try again shortly', options);
+  constructor(options?: ErrorOptions & { api?: GoogleApi }) {
+    super(
+      `Google ${API_LABEL[options?.api ?? 'drive']} rate limit exceeded; try again shortly`,
+      options,
+    );
   }
 }
 
@@ -95,15 +107,39 @@ export class UnsupportedTypeError extends AppError {
   }
 }
 
+export class ConflictError extends AppError {
+  readonly code = 'CONFLICT';
+
+  constructor(fileLabel: string, rereadTool: string, options?: ErrorOptions) {
+    super(
+      `${fileLabel} changed since it was read (or the revisionId expired); re-read it with ${rereadTool} and retry with the new revisionId.`,
+      options,
+    );
+  }
+}
+
+export class ApiDisabledError extends AppError {
+  readonly code = 'API_DISABLED';
+
+  constructor(api: GoogleApi, options?: ErrorOptions) {
+    super(
+      `The Google ${API_LABEL[api]} API is not enabled for this OAuth project. Enable it in Cloud Console → APIs & Services, then retry.`,
+      options,
+    );
+  }
+}
+
 export class DriveApiError extends AppError {
   readonly code = 'DRIVE_API_ERROR';
 
   constructor(
     readonly status: number | undefined,
     detail: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { api?: GoogleApi },
   ) {
-    super(`Drive API error${status === undefined ? '' : ` (${status})`}: ${detail}`, options);
+    const api = options?.api ?? 'drive';
+    const label = api === 'drive' ? 'Drive API error' : `Google ${API_LABEL[api]} API error`;
+    super(`${label}${status === undefined ? '' : ` (${status})`}: ${detail}`, options);
   }
 }
 

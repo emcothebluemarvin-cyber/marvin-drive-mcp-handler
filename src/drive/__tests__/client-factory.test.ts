@@ -8,15 +8,14 @@ import { InMemoryTokenStore } from '../../auth/token-store.js';
 import { AccountRegistry } from '../../config/account-registry.js';
 import { ReauthRequiredError } from '../../errors.js';
 import { createLogger } from '../../logger.js';
-import { DriveClientFactory, type DriveContext } from '../client-factory.js';
-import type { DriveAdapter } from '../drive-adapter.js';
+import { DriveClientFactory, type DriveContext, type GoogleAdapters } from '../client-factory.js';
 
 const invalidGrant = (): Error =>
   Object.assign(new Error('invalid_grant'), { response: { data: { error: 'invalid_grant' } } });
 
 let tokens: InMemoryTokenStore;
 let auth: AuthService;
-let makeAdapter: Mock<(client: Auth.OAuth2Client) => DriveAdapter>;
+let makeAdapter: Mock<(client: Auth.OAuth2Client) => GoogleAdapters>;
 let factory: DriveClientFactory;
 
 beforeEach(async () => {
@@ -38,7 +37,9 @@ beforeEach(async () => {
     logger: createLogger(() => {}),
   });
   let n = 0;
-  makeAdapter = vi.fn((_client: Auth.OAuth2Client) => ({ id: ++n }) as unknown as DriveAdapter);
+  makeAdapter = vi.fn(
+    (_client: Auth.OAuth2Client) => ({ drive: { id: ++n } }) as unknown as GoogleAdapters,
+  );
   factory = new DriveClientFactory(auth, makeAdapter);
 });
 

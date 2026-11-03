@@ -1,8 +1,8 @@
 {
   "name": "marvin-drive-mcp-handler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Multi-account Google Drive MCP server and CLI for Claude Code",
+  "description": "Multi-account Google Drive MCP server and CLI for Claude Code, with tools to read and edit Google Docs, Sheets and Slides",
   "type": "module",
   "bin": {
     "marvin-drive": "dist/cli/main.js"
