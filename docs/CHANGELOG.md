@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-11-03
+
+### Added
+- Selective two-way sync between a local folder and a Drive folder (Phase A, binary files): six MCP tools (`sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_remove_pair`) and CLI `marvin-drive sync list | run | repair-marker`.
+- Claude-assisted file selection with text previews and Drive-side candidates.
+- Dry run by default; apply bound to the approved `planId`; conflicts keep both versions; deletions go to the Drive trash or macOS Trash; mass-delete brake; root-marker and case-sensitivity checks.
+- `DriveAdapter.updateFile` accepts new media (content update of the same file id).
+
 ## 0.2.0 — 2026-11-03
 
 ### Added

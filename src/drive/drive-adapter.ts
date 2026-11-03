@@ -28,6 +28,8 @@ export interface DriveAdapter {
   updateFile(params: {
     fileId: string;
     requestBody?: DriveFile;
+    /** New content for the same fileId (Drive keeps the previous revision). */
+    media?: { mimeType: string; body: Readable };
     addParents?: string;
     removeParents?: string;
     fields: string;
@@ -117,10 +119,11 @@ export function createDriveAdapter(auth: Auth.OAuth2Client): DriveAdapter {
       return res.data;
     },
 
-    async updateFile({ fileId, requestBody, addParents, removeParents, fields }) {
+    async updateFile({ fileId, requestBody, media, addParents, removeParents, fields }) {
       const res = await drive.files.update({
         fileId,
         requestBody,
+        media,
         addParents,
         removeParents,
         fields,

@@ -17,7 +17,15 @@ export type AuditOp =
   | 'sheets_batch_update'
   | 'slides_replace_text'
   | 'slides_set_text'
-  | 'slides_batch_update';
+  | 'slides_batch_update'
+  | 'sync_upload'
+  | 'sync_update'
+  | 'sync_download'
+  | 'sync_move_local'
+  | 'sync_conflict'
+  | 'sync_trash_remote'
+  | 'sync_trash_local'
+  | 'sync_release';
 
 export interface AuditEntry {
   ts: string;

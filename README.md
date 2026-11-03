@@ -1,6 +1,6 @@
 # Marvin Drive MCP Handler
 
-Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive accounts, and read and edit Google Docs, Sheets and Slides, through your own Google OAuth client.
+Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive accounts, read and edit Google Docs, Sheets and Slides, and keep a chosen set of local files in two-way sync with a Drive folder, through your own Google OAuth client.
 
 ## Requirements
 
@@ -31,14 +31,17 @@ After changing code, run `npm run build` again — Claude Code runs the compiled
 
 ## CLI
 
-| Command                             | Purpose                                           |
-| ----------------------------------- | ------------------------------------------------- |
-| `marvin-drive auth add [--alias a]` | Browser login, register account (first = default) |
-| `marvin-drive auth login <alias>`   | Re-login an expired account                       |
-| `marvin-drive auth list [--verify]` | Accounts and token status                         |
-| `marvin-drive auth remove <alias>`  | Remove account, delete + revoke token             |
-| `marvin-drive auth default <alias>` | Set the default account                           |
-| `marvin-drive serve`                | MCP server on stdio                               |
+| Command                                                                         | Purpose                                                         |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `marvin-drive auth add [--alias a]`                                             | Browser login, register account (first = default)               |
+| `marvin-drive auth login <alias>`                                               | Re-login an expired account                                     |
+| `marvin-drive auth list [--verify]`                                             | Accounts and token status                                       |
+| `marvin-drive auth remove <alias>`                                              | Remove account, delete + revoke token                           |
+| `marvin-drive auth default <alias>`                                             | Set the default account                                         |
+| `marvin-drive serve`                                                            | MCP server on stdio                                             |
+| `marvin-drive sync list`                                                        | Sync pairs with counts and last applied run                     |
+| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete]` | Dry run (default) or apply a sync; exit code 1 on failure/abort |
+| `marvin-drive sync repair-marker <name>`                                        | Rewrite the folder marker after confirming the local folder     |
 
 ## MCP tools
 
@@ -84,6 +87,28 @@ All tools accept an optional `account` (alias or email).
 | `slides_set_text`     | Replace the whole text of one shape, including shapes inside groups (speaker notes need `slides_batch_update`) |
 | `slides_batch_update` | Advanced: raw Slides API requests (create slides/shapes, styling); requires `requiredRevisionId`               |
 
+### Sync (selective two-way, on demand)
+
+| Tool               | Purpose                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `sync_create_pair` | Pair a local folder with an existing or new Drive folder; writes a hidden `.marvin-sync-<name>` marker |
+| `sync_list_pairs`  | Pairs with selected / tracked / excluded / baseline counts and the last applied run                    |
+| `sync_scan`        | Local files (with short text previews) and Drive-only candidates, so Claude can propose a selection    |
+| `sync_select`      | Add or remove relative paths; removing excludes the path and touches no file                           |
+| `sync_run`         | Dry run by default (plan + `planId`); `apply: true` with the approved `planId` executes it             |
+| `sync_remove_pair` | Forget a pair and remove its marker; no files are touched                                              |
+
+Typical conversation: "sync the seafaring files in Downloads to my Drive folder _Denizcilik_" → Claude creates the pair, runs `sync_scan`, opens unclear files with its own reader, proposes a list, asks you to confirm, calls `sync_select`, shows the `sync_run` dry run, and applies it with the `planId` once you agree.
+
+### Syncing safely
+
+- Only selected files sync. Drive files that already existed at the first applied run stay **candidates** until you select them; Drive files added later are downloaded and selected automatically (unless a local file of the same name exists — then it is reported as a collision).
+- Changes are detected three-way (local, Drive, last sync) by MD5. Edits on both sides become a **conflict**: the Drive version is saved next to yours as `<name> (Drive conflict YYYY-MM-DD HH.mm).<ext>`, then your version is uploaded (Drive keeps the old revision).
+- Deletions are propagated but never permanent: Drive files go to the Drive trash, local files to the macOS Trash via `/usr/bin/trash` (volumes without a Trash, e.g. some SMB/FAT disks, cannot delete — the action fails). A safety brake stops runs that would delete more than max(10, 20 %) of tracked files, or every tracked file of one side.
+- A local file is only ever overwritten when it is the tracked file itself and unchanged since the scan; every new local file is created exclusively (never replaces anything). Anything the planner cannot classify — unreadable folders, duplicate names, case-only clashes on case-sensitive disks — is reported and left alone.
+- Each run checks that the local folder still has its marker (catches unmounted or replaced disks) and that the Drive folder still exists; if the marker is missing, run `marvin-drive sync repair-marker <name>`.
+- Google Docs/Sheets/Slides inside a synced Drive folder are reported as `native-skipped` in this version. Hashing a file that iCloud has evicted makes macOS download it first (slow but correct).
+
 ### Editing safely
 
 Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools (`docs_insert_text` at `end`/`afterHeading`, and `slides_set_text`) apply this guard implicitly using their own read, while `docs_insert_text` at an explicit `index` is guarded only when you pass `requiredRevisionId`. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
@@ -92,18 +117,20 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 
 ## Files
 
-| Path                                          | Content                         |
-| --------------------------------------------- | ------------------------------- |
-| `~/.config/google-handler/client_secret.json` | OAuth client (never commit)     |
-| `~/.config/google-handler/accounts.json`      | Aliases and emails (no secrets) |
-| `~/.config/google-handler/audit.jsonl`        | Every mutating operation        |
-| Keychain service `marvin-drive`               | Refresh tokens                  |
-| `~/Downloads/marvin-drive/`                   | Default download folder         |
+| Path                                          | Content                              |
+| --------------------------------------------- | ------------------------------------ |
+| `~/.config/google-handler/client_secret.json` | OAuth client (never commit)          |
+| `~/.config/google-handler/accounts.json`      | Aliases and emails (no secrets)      |
+| `~/.config/google-handler/audit.jsonl`        | Every mutating operation             |
+| `~/.config/google-handler/sync/<name>.json`   | Sync pair state (selection, records) |
+| `<local folder>/.marvin-sync-<name>`          | Sync folder marker (pair id)         |
+| Keychain service `marvin-drive`               | Refresh tokens                       |
+| `~/Downloads/marvin-drive/`                   | Default download folder              |
 
 ## Development
 
 ```bash
 npm run check                                   # typecheck, lint, format, unit + integration tests
 MARVIN_KEYCHAIN_TEST=1 npx vitest run src/auth  # real Keychain round-trip
-MARVIN_E2E_ACCOUNT=emco npm run test:e2e        # live Drive test (creates and deletes a temp folder)
+MARVIN_E2E_ACCOUNT=emco npm run test:e2e        # live Drive tests (temp Drive folder + temp local dir; sync uses a temp trash)
 ```

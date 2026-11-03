@@ -5,16 +5,19 @@ import type { SheetsService } from '../content/sheets-service.js';
 import type { SlidesService } from '../content/slides-service.js';
 import type { FileService } from '../files/file-service.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
+import type { SyncService } from '../sync/sync-service.js';
 import { DOCS_TOOL_NAMES, registerDocsTools } from './docs-tools.js';
 import { DRIVE_TOOL_NAMES, registerDriveTools } from './drive-tools.js';
 import { SHEETS_TOOL_NAMES, registerSheetsTools } from './sheets-tools.js';
 import { SLIDES_TOOL_NAMES, registerSlidesTools } from './slides-tools.js';
+import { SYNC_TOOL_NAMES, registerSyncTools } from './sync-tools.js';
 
 export const TOOL_NAMES = [
   ...DRIVE_TOOL_NAMES,
   ...DOCS_TOOL_NAMES,
   ...SHEETS_TOOL_NAMES,
   ...SLIDES_TOOL_NAMES,
+  ...SYNC_TOOL_NAMES,
 ] as const;
 
 export interface McpDeps {
@@ -22,6 +25,7 @@ export interface McpDeps {
   docs: DocsService;
   sheets: SheetsService;
   slides: SlidesService;
+  sync: SyncService;
   auth: Pick<AuthService, 'status'>;
   version: string;
   logger?: Logger;
@@ -34,5 +38,6 @@ export function createMcpServer(deps: McpDeps): McpServer {
   registerDocsTools(server, deps.docs, log);
   registerSheetsTools(server, deps.sheets, log);
   registerSlidesTools(server, deps.slides, log);
+  registerSyncTools(server, deps.sync, log);
   return server;
 }

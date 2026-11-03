@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { DocsService } from '../../content/docs-service.js';
 import { SheetsService } from '../../content/sheets-service.js';
 import { SlidesService } from '../../content/slides-service.js';
+import { PairStore } from '../../sync/pair-store.js';
+import { SyncService } from '../../sync/sync-service.js';
+import { refuseTrash } from '../../sync/__tests__/fixtures.js';
 import { FileService } from '../../files/file-service.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import {
@@ -47,6 +50,11 @@ beforeEach(async () => {
     docs: new DocsService(deps),
     sheets: new SheetsService(deps),
     slides: new SlidesService(deps),
+    sync: new SyncService({
+      ...deps,
+      store: new PairStore({ dir: '/tmp/unused-sync' }),
+      trashExec: refuseTrash,
+    }),
     auth: { status: async () => [] },
     version: '0.0.0-test',
     logger: silentLogger(),

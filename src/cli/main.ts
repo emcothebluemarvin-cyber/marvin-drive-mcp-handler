@@ -1,16 +1,27 @@
 #!/usr/bin/env node
+import { createInterface } from 'node:readline/promises';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Command } from 'commander';
 import { buildApp } from '../app.js';
 import { createMcpServer } from '../mcp/server.js';
 import { VERSION } from '../version.js';
 import { formatAccounts } from './format.js';
+import { registerSyncCommands } from './sync-commands.js';
 
 const TESTING_MODE_HINT =
   'Note: while the OAuth app is in Testing mode, the Google account must be listed under Audience → Test users, and the login expires every 7 days.';
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
+}
+
+async function confirm(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return /^y(es)?$/i.test((await rl.question(question)).trim());
+  } finally {
+    rl.close();
+  }
 }
 
 const program = new Command()
@@ -76,11 +87,21 @@ program
       docs: app.docs,
       sheets: app.sheets,
       slides: app.slides,
+      sync: app.sync,
       auth: app.auth,
       version: VERSION,
     });
     await server.connect(new StdioServerTransport());
   });
+
+registerSyncCommands(program, {
+  sync: () => buildApp().sync,
+  out,
+  confirm,
+  setExitCode: (code) => {
+    process.exitCode = code;
+  },
+});
 
 program.parseAsync().catch((err: unknown) => {
   process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);

@@ -6,6 +6,9 @@ import { ReauthRequiredError } from '../../errors.js';
 import { DocsService } from '../../content/docs-service.js';
 import { SheetsService } from '../../content/sheets-service.js';
 import { SlidesService } from '../../content/slides-service.js';
+import { PairStore } from '../../sync/pair-store.js';
+import { SyncService } from '../../sync/sync-service.js';
+import { refuseTrash } from '../../sync/__tests__/fixtures.js';
 import { FileService } from '../../files/file-service.js';
 import {
   createAudit,
@@ -22,7 +25,7 @@ let client: Client;
 let statuses: AccountStatusEntry[];
 let verifyArgs: boolean[];
 
-function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides'> {
+function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides' | 'sync'> {
   const deps = {
     runner: createRunner(drive),
     audit: createAudit(),
@@ -33,6 +36,11 @@ function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides'> {
     docs: new DocsService(deps),
     sheets: new SheetsService(deps),
     slides: new SlidesService(deps),
+    sync: new SyncService({
+      ...deps,
+      store: new PairStore({ dir: '/tmp/unused-sync' }),
+      trashExec: refuseTrash,
+    }),
   };
 }
 
@@ -76,10 +84,10 @@ beforeEach(async () => {
 });
 
 describe('MCP server', () => {
-  it('exposes the 25 tools from both specs', async () => {
+  it('exposes the 31 tools from all specs', async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_NAMES).toHaveLength(25);
+    expect(TOOL_NAMES).toHaveLength(31);
     const list = tools.find((t) => t.name === 'drive_list');
     expect(list?.inputSchema.properties).toHaveProperty('account');
     expect(list?.inputSchema.properties).toHaveProperty('folderId');
