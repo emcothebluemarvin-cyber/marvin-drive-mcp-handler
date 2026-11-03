@@ -1,5 +1,6 @@
 import type { docs_v1 } from 'googleapis';
 import type { DocsDocument } from '../drive/docs-adapter.js';
+import { clip } from './truncate.js';
 
 type StructuralElement = docs_v1.Schema$StructuralElement;
 type Paragraph = docs_v1.Schema$Paragraph;
@@ -32,7 +33,7 @@ export function paragraphText(p: Paragraph): string {
 
 function quote(text: string): string {
   const s = text.replace(/\n$/, '');
-  return JSON.stringify(s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}…` : s);
+  return JSON.stringify(clip(s, MAX_TEXT));
 }
 
 function walk(content: StructuralElement[], depth: number, prefix: string, lines: string[]): void {

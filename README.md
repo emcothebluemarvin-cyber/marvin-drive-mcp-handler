@@ -1,6 +1,6 @@
 # Marvin Drive MCP Handler
 
-Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive accounts through your own Google OAuth client.
+Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive accounts, and read and edit Google Docs, Sheets and Slides, through your own Google OAuth client.
 
 ## Requirements
 
@@ -77,16 +77,18 @@ All tools accept an optional `account` (alias or email).
 
 ### Slides
 
-| Tool                  | Purpose                                                                                                |
-| --------------------- | ------------------------------------------------------------------------------------------------------ |
-| `slides_read`         | Per slide: element ids, text (including shapes in groups), tables, speaker notes; returns `revisionId` |
-| `slides_replace_text` | Replace every occurrence across the deck or only on given slides                                       |
-| `slides_set_text`     | Replace the whole text of one shape, including shapes inside groups                                    |
-| `slides_batch_update` | Advanced: raw Slides API requests (create slides/shapes, styling); requires `requiredRevisionId`       |
+| Tool                  | Purpose                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `slides_read`         | Per slide: element ids, text (including shapes in groups), tables, speaker notes; returns `revisionId`         |
+| `slides_replace_text` | Replace every occurrence across the deck or only on given slides                                               |
+| `slides_set_text`     | Replace the whole text of one shape, including shapes inside groups (speaker notes need `slides_batch_update`) |
+| `slides_batch_update` | Advanced: raw Slides API requests (create slides/shapes, styling); requires `requiredRevisionId`               |
 
 ### Editing safely
 
 Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools (`docs_insert_text` at `end`/`afterHeading`, and `slides_set_text`) apply this guard implicitly using their own read, while `docs_insert_text` at an explicit `index` is guarded only when you pass `requiredRevisionId`. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
+
+The advanced `*_batch_update` tools run raw API requests with the account's own permissions, and some requests (for example charts linked to another spreadsheet, or images inserted by URL) read from other sources.
 
 ## Files
 

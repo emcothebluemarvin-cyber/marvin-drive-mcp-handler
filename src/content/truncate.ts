@@ -12,6 +12,13 @@ export interface TextSlice {
 const isHigh = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
 const isLow = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
 
+/** Cut to at most `max` UTF-16 units (plus an ellipsis) without splitting a surrogate pair. */
+export function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const end = isHigh(s.charCodeAt(max - 1)) ? max - 1 : max;
+  return `${s.slice(0, end)}…`;
+}
+
 /** Slices `text` for paging without ever splitting a surrogate pair (e.g. emoji). */
 export function sliceText(text: string, offset: number, maxChars: number): TextSlice {
   const total = text.length;

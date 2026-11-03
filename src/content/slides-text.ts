@@ -3,6 +3,7 @@ import type {
   SlidesPresentation,
   SlidesTextContent,
 } from '../drive/slides-adapter.js';
+import { clip } from './truncate.js';
 
 const TEXT = 'text(textElements(textRun(content),autoText(content)))';
 const SHAPE = `shape(shapeType,placeholder(type),${TEXT})`;
@@ -18,14 +19,6 @@ export function shapeText(text: SlidesTextContent | undefined): string {
     .map((e) => e.textRun?.content ?? e.autoText?.content ?? '')
     .join('')
     .replace(/\n$/, '');
-}
-
-/** Cut to at most `max` UTF-16 units without splitting a surrogate pair. */
-function clip(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const last = s.charCodeAt(max - 1);
-  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
-  return `${s.slice(0, end)}…`;
 }
 
 function quote(s: string): string {

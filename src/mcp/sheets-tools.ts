@@ -27,7 +27,7 @@ export function registerSheetsTools(server: McpServer, sheets: SheetsService, lo
     'sheets_info',
     {
       description:
-        'List the tabs of a Google Sheet (sheetId, title, size, hidden) plus locale and time zone.',
+        'List the tabs of a Google Sheet (sheetId, title, size, hidden, sheetType) plus locale and time zone.',
       inputSchema: { account, fileId: contentFileId },
     },
     async (args) => respond(log, () => sheets.info(args)),

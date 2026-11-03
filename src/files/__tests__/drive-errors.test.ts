@@ -60,6 +60,17 @@ describe('isRateLimit', () => {
   });
 });
 
+describe('mapDriveError rate limit wording', () => {
+  it('names the API that was throttled', () => {
+    expect(mapDriveError(gaxios(429), ctx).message).toBe(
+      'Google Drive rate limit exceeded; try again shortly',
+    );
+    expect(mapDriveError(gaxios(429), { ...ctx, api: 'sheets' }).message).toBe(
+      'Google Sheets rate limit exceeded; try again shortly',
+    );
+  });
+});
+
 describe('mapDriveError', () => {
   it('maps statuses and 403 reasons to specific errors', () => {
     expect(mapDriveError(gaxios(404), ctx)).toBeInstanceOf(NotFoundError);

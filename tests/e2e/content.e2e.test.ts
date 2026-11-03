@@ -143,6 +143,16 @@ describe.runIf(account)('Content E2E (live)', () => {
         requiredRevisionId: s3.revisionId,
       });
       expect((await slides.read({ account, fileId: deck.id })).content).not.toContain('"filled"');
+      // Stale revision (s1 predates several edits) must surface as a ConflictError.
+      await expect(
+        slides.replaceText({
+          account,
+          fileId: deck.id,
+          find: 'Hi there',
+          replace: 'stale',
+          requiredRevisionId: s1.revisionId,
+        }),
+      ).rejects.toBeInstanceOf(ConflictError);
     } finally {
       await files.delete({ account, fileId: root.id, permanent: true });
       await rm(tmp, { recursive: true, force: true });

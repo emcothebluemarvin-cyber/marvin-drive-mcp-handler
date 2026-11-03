@@ -65,8 +65,11 @@ export class PermissionDeniedError extends AppError {
 export class RateLimitError extends AppError {
   readonly code = 'RATE_LIMITED';
 
-  constructor(options?: ErrorOptions) {
-    super('Google Drive rate limit exceeded; try again shortly', options);
+  constructor(options?: ErrorOptions & { api?: GoogleApi }) {
+    super(
+      `Google ${API_LABEL[options?.api ?? 'drive']} rate limit exceeded; try again shortly`,
+      options,
+    );
   }
 }
 

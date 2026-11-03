@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { sliceText } from '../truncate.js';
+import { clip, sliceText } from '../truncate.js';
+
+describe('clip', () => {
+  it('returns short strings unchanged', () => {
+    expect(clip('abc', 3)).toBe('abc');
+  });
+
+  it('cuts with an ellipsis', () => {
+    expect(clip('abcdef', 3)).toBe('abc…');
+  });
+
+  it('never splits a surrogate pair', () => {
+    expect(clip('ab😀cd', 3)).toBe('ab…');
+  });
+});
 
 describe('sliceText', () => {
   it('treats non-finite inputs as defaults', () => {

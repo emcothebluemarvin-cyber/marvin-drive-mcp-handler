@@ -144,7 +144,7 @@ export function mapDriveError(err: unknown, ctx: MapContext): AppError {
   const target = ctx.target ?? 'root';
 
   if (status === 404) return new NotFoundError(target, { cause: err });
-  if (isRateLimit(status, reason)) return new RateLimitError({ cause: err });
+  if (isRateLimit(status, reason)) return new RateLimitError({ cause: err, api });
   if (isApiDisabled(err, status, reason)) return new ApiDisabledError(api, { cause: err });
   if ((api === 'docs' || api === 'slides') && isRevisionMismatch(err)) {
     const label = ctx.name ? `"${ctx.name}"` : target;

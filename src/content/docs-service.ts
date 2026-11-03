@@ -1,6 +1,7 @@
 import type { Readable } from 'node:stream';
 import type { DocsRequest } from '../drive/docs-adapter.js';
-import { ValidationError } from '../errors.js';
+import { ExportTooLargeError, ValidationError } from '../errors.js';
+import { reasonOf } from '../files/drive-errors.js';
 import {
   ContentService,
   type ContentFileRef,
@@ -77,7 +78,17 @@ export class DocsService extends ContentService {
       if (format === 'markdown') {
         // Revision first: it is never newer than the exported content (spec §4.1).
         revisionId = (await ctx.docs.getDocument(file.id, 'revisionId')).revisionId ?? '';
-        text = await readAll(await ctx.drive.exportMedia(file.id, 'text/markdown'));
+        try {
+          text = await readAll(await ctx.drive.exportMedia(file.id, 'text/markdown'));
+        } catch (err) {
+          if (err instanceof ExportTooLargeError || reasonOf(err) === 'exportSizeLimitExceeded') {
+            throw new ValidationError(
+              `"${file.name}" is too large to export as Markdown (Drive's 10 MB export limit); use format "structure" or drive_download with exportFormat "pdf".`,
+              { cause: err },
+            );
+          }
+          throw err;
+        }
       } else {
         const doc = await ctx.docs.getDocument(file.id, DOC_FIELDS);
         revisionId = doc.revisionId ?? '';

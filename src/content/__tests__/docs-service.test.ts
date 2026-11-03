@@ -84,6 +84,17 @@ describe('DocsService.read', () => {
     expect(res.revisionId).toBe('r2');
   });
 
+  it('turns an oversized Markdown export into an actionable ValidationError', async () => {
+    doc();
+    docs.getDocument.mockResolvedValueOnce({ revisionId: 'r1' });
+    drive.exportMedia.mockRejectedValueOnce(httpError(403, 'exportSizeLimitExceeded'));
+    const err = await service.read({ fileId: 'd1' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toBe(
+      '"Plan" is too large to export as Markdown (Drive\'s 10 MB export limit); use format "structure" or drive_download with exportFormat "pdf".',
+    );
+  });
+
   it('pages long content', async () => {
     doc();
     docs.getDocument.mockResolvedValueOnce({ revisionId: 'r1' });
