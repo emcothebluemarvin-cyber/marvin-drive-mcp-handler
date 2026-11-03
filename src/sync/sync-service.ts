@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, open, realpath, stat } from 'node:fs/promises';
+import { access, open, realpath, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OperationRunner, type OperationDeps } from '../core/operation.js';
 import type { DriveFile } from '../drive/drive-adapter.js';
@@ -10,7 +10,12 @@ import { GOOGLE_MIME } from '../files/export-formats.js';
 import { uploadMimeType } from '../files/upload-mime.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { SyncRootError } from './errors.js';
-import { scanLocal } from './local-scanner.js';
+import { Executor } from './executor.js';
+import { hashLocal, probeOnDisk, scanLocal } from './local-scanner.js';
+import { plan as makePlan } from './planner.js';
+import { probeRecords } from './remote-probe.js';
+import { buildReport } from './report.js';
+import { hashTargets, onDiskProbeKeys } from './resolve.js';
 import {
   PairStore,
   checkOverlap,
@@ -25,6 +30,7 @@ import {
   foldKey,
   isIgnoredName,
   isUnder,
+  toKey,
   validateRelPath,
 } from './paths.js';
 import { SYNC_LIST_FIELDS, SYNC_PAGE_SIZE, childrenQuery, scanRemote } from './remote-scanner.js';
@@ -36,9 +42,12 @@ import {
   type LocalScan,
   type Pair,
   type PairFile,
+  type Plan,
   type RemoteScan,
+  type SyncReport,
 } from './types.js';
 
+const STALE_PART_MS = 60 * 60 * 1000;
 const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|yaml|x-sh|sql|toml))/;
 
 export interface SyncServiceDeps extends OperationDeps {
@@ -105,6 +114,13 @@ export interface SelectInput {
   name: string;
   add?: string[];
   remove?: string[];
+}
+
+export interface RunInput {
+  name: string;
+  apply?: boolean;
+  planId?: string;
+  allowMassDelete?: boolean;
 }
 
 export interface SelectResult {
@@ -484,6 +500,98 @@ export class SyncService {
         excluded: pair.excluded.length,
         tracked: file.records.length,
       };
+    });
+  }
+
+  /** Spec §5 steps 3–5: scan, hash, probe, plan. */
+  private async buildPlan(
+    file: PairFile,
+    apply: boolean,
+  ): Promise<{ plan: Plan; remote: RemoteScan }> {
+    const { pair, records } = file;
+    const { local, remote } = await this.scanBoth(pair);
+    if (apply) await this.removeStaleParts(pair, local);
+    // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
+    // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
+    const onDisk = await probeOnDisk(
+      pair.localDir,
+      onDiskProbeKeys({ pair, records, local, remote }),
+    );
+    const base = { pair, records, local, remote, probes: new Map(), onDisk };
+    const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
+    for (const name of failed) local.unknownSubtrees.push(toKey(name));
+    const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
+    const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
+    const probes = await probeRecords(missing, remote, (id, fields) =>
+      this.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
+    );
+    return { plan: makePlan({ ...base, probes, md5s }), remote };
+  }
+
+  private async removeStaleParts(pair: Pair, local: LocalScan): Promise<void> {
+    const now = this.clock().getTime();
+    for (const part of local.partFiles) {
+      if (now - part.mtimeMs <= STALE_PART_MS) continue;
+      try {
+        await rm(absInside(pair.localDir, part.name), { force: true });
+      } catch (err) {
+        this.log.warn('Could not remove a stale temp file', { name: part.name, error: err });
+      }
+    }
+  }
+
+  /** sync_run: dry run by default; apply re-plans and can be bound to a dry run's planId. */
+  async run(input: RunInput): Promise<SyncReport> {
+    const apply = input.apply ?? false;
+    return this.store.withLock(input.name, async () => {
+      // lastAppliedRunAt is the scan start: files changed during the run stay "recent" (U8).
+      const startedAt = this.clock().toISOString();
+      const file = await this.store.load(input.name);
+      await this.checkRoots(file.pair);
+      const { plan, remote } = await this.buildPlan(file, apply);
+      const name = file.pair.name;
+      if (!apply) return buildReport(name, plan, { dryRun: true });
+      if (input.planId !== undefined && input.planId !== plan.planId) {
+        return buildReport(name, plan, {
+          dryRun: true,
+          aborted: {
+            reason: 'plan-changed',
+            message:
+              'Files changed since the dry run; nothing was applied. Review this new plan and apply it with its planId.',
+          },
+        });
+      }
+      if (plan.brake.tripped && !input.allowMassDelete) {
+        const { trashRemote, trashLocal, tracked } = plan.brake;
+        return buildReport(name, plan, {
+          dryRun: true,
+          aborted: {
+            reason: 'mass-delete',
+            message: `Would move ${trashRemote} Drive file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
+          },
+        });
+      }
+      const executor = new Executor(
+        {
+          ops: this.ops,
+          audit: this.deps.audit,
+          logger: this.log,
+          clock: this.clock,
+          save: (f): Promise<void> => this.store.save(f),
+          trashExec: this.deps.trashExec,
+        },
+        file,
+        remote.folders,
+      );
+      const outcomes = await executor.run(plan.actions);
+      file.pair.lastAppliedRunAt = startedAt;
+      if (file.pair.firstAppliedRunAt === null) {
+        file.pair.firstAppliedRunAt = startedAt;
+        file.pair.remoteBaseline = plan.baseline.files;
+        file.pair.baselineFolders = plan.baseline.folders;
+      }
+      await this.store.save(file);
+      return buildReport(name, plan, { dryRun: false, outcomes });
     });
   }
 }
