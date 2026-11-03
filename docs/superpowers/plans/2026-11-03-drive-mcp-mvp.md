@@ -1828,7 +1828,11 @@ export class AuthService {
         throw new ValidationError(`Alias must match ${ALIAS_PATTERN.source} (got "${alias}")`);
       }
       const taken = await this.deps.registry.find(normalized);
-      if (taken) throw new ValidationError(`Alias "${normalized}" is already used by ${taken.email}`);
+      if (taken) {
+        throw new ValidationError(
+          `Alias "${normalized}" is already used by ${taken.email}; pass --alias <name>`,
+        );
+      }
     }
     const credentials = await this.deps.loadCredentials();
     const result = await this.deps.login({ credentials });
