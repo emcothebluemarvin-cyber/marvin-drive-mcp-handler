@@ -1,7 +1,7 @@
 # Marvin Drive — Selective Two-Way Sync Design (Sub-project 5)
 
 - **Date:** 2026-11-03
-- **Status:** Approved in brainstorming; spec review rounds 1–3 addressed (v4)
+- **Status:** Approved in brainstorming; spec review approved (round 4)
 - **Scope:** Sub-project 5 of 5 — on-demand, selective, two-way sync between a local folder and a Drive folder, with AI-assisted file selection and an optional "move to Drive" (release local copies) step
 - **Builds on:** MVP spec (`2026-11-03-drive-mcp-mvp-design.md`) and content spec (`2026-11-03-content-processing-design.md`)
 - **Delivery:** one spec, two implementation plans — **Phase A** (binary-file sync, AI selection, run) and **Phase B** (Google-native exports, release). §12 lists the split.
@@ -41,7 +41,7 @@ pair {
   id,                         // random UUID
   account,                    // alias
   localDir,                   // absolute realpath at creation
-  caseInsensitive: boolean,   // probed at creation and re-checked each run (create probe file, stat its case-flipped name)
+  caseInsensitive: boolean,   // probed read-only: lstat the case-flipped marker name; a mismatch at run time aborts ("run marvin-drive sync repair-marker")
   remoteFolderId,
   googleExport: { document: 'docx', spreadsheet: 'xlsx', presentation: 'pptx', drawing: 'pdf' },  // Phase B; validated per type with resolveExport
   selection: string[],        // NFC relative POSIX paths
@@ -90,7 +90,7 @@ Changes to existing code: `DriveAdapter.updateFile` gains optional `media` (same
 ## 5. Run lifecycle
 
 1. **Lock** (§10).
-2. **Root checks — abort the whole run if any fails:** `localDir` exists, is a readable directory, and contains `.marvin-sync-<name>` with `pair.id` (catches unmounted/replaced volumes); remote root exists, is a folder, not trashed, `canAddChildren`.
+2. **Root checks — abort the whole run if any fails** (marker problems tell the user to run `marvin-drive sync repair-marker <name>`): `localDir` exists, is a readable directory, and contains `.marvin-sync-<name>` with `pair.id` (catches unmounted/replaced volumes); remote root exists, is a folder, not trashed, `canAddChildren`.
 3. **Scan** both sides (hash only when size/mtime/ctime differ from the record; hash every selected file not yet recorded).
 4. **Probe** every record whose `remoteId` was not in the remote scan (§6.2).
 5. **Plan** (pure). `planId` = SHA-256 over the canonical list of `(kind, remoteId|key, md5s)` — no generated names or timestamps.
@@ -131,7 +131,7 @@ All tables below are **first-match-wins in the order listed**. Selection/`exclud
 | B4 | present-same, changed | changed | equal md5 → `adopt`; else `conflict` (§6.9; if `!canEdit`: conflict copy only + `remote-readonly`) |
 | B5 | present-same, unchanged | absent | `trash-remote` (needs `canTrash`, else `cannot-trash` report, record kept) |
 | B6 | present-same, changed | absent | `download-new` at the key (recreate; change beats deletion) |
-| B7 | present-moved | unchanged | `move-local` to the new key (exclusive); then `download-replace` if R changed. Selection: old key → new key. If old and new keys share a `foldKey` on a case-insensitive volume (remote case-only rename) → plain `rename` in place |
+| B7 | present-moved | unchanged | `move-local` to the new key (exclusive); then `download-replace` if R changed. Selection: old key → new key. If old and new keys share a `foldKey` on a case-insensitive volume (remote case-only rename) → plain `rename` in place, persisting `localName` and the selection key in the same step |
 | B8 | present-moved | changed | `download-new` at the new key; L stays at the old key untouched; old key → `excluded`; new key → selection; report `conflict-rename` |
 | B9 | present-moved | absent | `download-new` at the new key; old key → new key in selection (remote rename counts as a change) |
 | B10 | trashed | unchanged | `trash-local` |
@@ -194,12 +194,6 @@ Untracked native R with L present at the export key → `ambiguous-native` (repo
 
 Remote-only native records are never exported unless `restorePending` (regression test: released Google Doc, remote modified → no export).
 
-### 6.10 Ignored entries
-
-- **Local:** names starting with `.` (incl. the marker), `*.marvin-part` (stale ones older than 1 hour are deleted at run start), non-regular files (symlinks, sockets, devices, FIFOs), anything whose realpath leaves `localDir`.
-- **Remote:** shortcuts, folders as leaves, Google-native files in Phase A (reported `native-skipped`), unsupported native types in Phase B (Forms, Sites, Apps Script, Jamboard, Maps — `resolveExport` would throw `UnsupportedTypeError`; reported `native-unsupported`), `unrepresentable` names.
-- Ignored entries never count as "L present" or "R present" for any rule; a tracked key now occupied by an ignored local entry is `unknown-state` (§6.1 step 4).
-
 ### 6.8 Mass-delete brake
 
 Count planned `trash-remote` + `trash-local`. Over threshold → abort with counts unless `allowMassDelete: true`. Threshold: count > max(10, 20% of tracked non-remote-only records), **or** every tracked non-remote-only file of one side would be deleted while ≥ 3 are tracked.
@@ -209,6 +203,12 @@ Count planned `trash-remote` + `trash-local`. Over threshold → abort with coun
 1. `downloadReplace`-style stream of R into `place-exclusive` target `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>` (` 2`, ` 3`… on collision), verify md5, `fsync`.
 2. Only then `update-remote` with L.
 3. Report both paths; the conflict copy is not selected. Step 1 failure → step 2 skipped.
+
+### 6.10 Ignored entries
+
+- **Local:** names starting with `.` (incl. the marker), `*.marvin-part` (stale ones older than 1 hour are deleted at the start of **applied** runs only), non-regular files (symlinks, sockets, devices, FIFOs), anything whose realpath leaves `localDir`.
+- **Remote:** shortcuts, folders as leaves, Google-native files in Phase A (reported `native-skipped`), unsupported native types in Phase B (Forms, Sites, Apps Script, Jamboard, Maps — `resolveExport` would throw `UnsupportedTypeError`; reported `native-unsupported`), `unrepresentable` names.
+- Ignored entries never count as "L present" or "R present" for any rule; a tracked key now occupied by an ignored local entry is `unknown-state` (§6.1 step 4).
 
 ## 7. Execution
 
