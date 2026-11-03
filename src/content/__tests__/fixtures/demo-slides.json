@@ -1,0 +1,1462 @@
+{
+  "presentationId": "11_xq5HeEZt7nqi9OTt-pX1QO5pVPMj4xbAfo1kp3u7g",
+  "slides": [
+    {
+      "objectId": "p1",
+      "pageElements": [
+        {
+          "objectId": "p1_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "marvin-drive"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p1_i3",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p1_i4",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Claude Code için çok hesaplı Google Drive MCP sunucusu"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p1_i5",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MVP · Kasım 2026"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p1_g1",
+              "shape": {}
+            },
+            {
+              "objectId": "p1_g2",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p1_g1"
+          }
+        }
+      }
+    },
+    {
+      "objectId": "p2",
+      "pageElements": [
+        {
+          "objectId": "p2_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "DURUM"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i3",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MVP tamamlandı ve canlı doğrulandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i4",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p2_i5",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "12"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i6",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MCP aracı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i7",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "202"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i8",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "geçen test"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i9",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "~2.9k"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i10",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "kaynak satırı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i11",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "40"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i12",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "commit"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p2_i13",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "26 test dosyası · canlı uçtan uca test · Claude Code'a kullanıcı kapsamında kayıtlı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p2_g3",
+              "shape": {}
+            },
+            {
+              "objectId": "p2_g4",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p2_g3"
+          }
+        }
+      }
+    },
+    {
+      "objectId": "p3",
+      "pageElements": [
+        {
+          "objectId": "p3_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MIMARI"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i3",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Katmanlı, test edilebilir yapı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i4",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p3_i5",
+          "shape": {
+            "shapeType": "RECTANGLE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "cli · mcp"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i6",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Giriş noktaları: CLI komutları ve stdio MCP sunucusu"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i7",
+          "shape": {
+            "shapeType": "RECTANGLE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "files"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i8",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Dosya servisi: iş kuralları, yeniden deneme, hata eşleme"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i9",
+          "shape": {
+            "shapeType": "RECTANGLE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "drive"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i10",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "googleapis istemci fabrikası ve adaptör"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i11",
+          "shape": {
+            "shapeType": "RECTANGLE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "auth · config · audit"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p3_i12",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "OAuth + Keychain, yapılandırma, JSONL günlük"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p3_g5",
+              "shape": {}
+            },
+            {
+              "objectId": "p3_g6",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p3_g5"
+          }
+        }
+      }
+    },
+    {
+      "objectId": "p4",
+      "pageElements": [
+        {
+          "objectId": "p4_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MCP ARAÇLARI"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i3",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Drive'ın tamamı, 12 araçla"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i4",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p4_i5",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Gezinme"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i6",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_list"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_search"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_get_metadata"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_list_accounts"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i7",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Aktarım"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i8",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_upload"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_download"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i9",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Düzenleme"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i10",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_create_folder"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_move"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_rename"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_copy"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i11",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Silme"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p4_i12",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_delete"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "drive_restore"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p4_g7",
+              "shape": {}
+            },
+            {
+              "objectId": "p4_g8",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p4_g7"
+          }
+        }
+      }
+    },
+    {
+      "objectId": "p5",
+      "pageElements": [
+        {
+          "objectId": "p5_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "GÜVENLIK"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p5_i3",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Sırlar repoda değil, token'lar Keychain'de"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p5_i4",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p5_i5",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "—  Loopback + PKCE OAuth, çoklu hesap"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "—  İstemci sırrı ~/.config altında, chmod 600"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "—  Tarayıcıya yanıt yalnızca doğrulama ve kayıttan sonra; CSP'li callback sayfası"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "—  Drive kapsamı verilmezse giriş açıkça başarısız"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                },
+                {},
+                {
+                  "textRun": {
+                    "content": "—  Silme varsayılan olarak çöp kutusuna; her işlem denetim günlüğünde"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p5_g9",
+              "shape": {}
+            },
+            {
+              "objectId": "p5_g10",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p5_g9"
+          }
+        }
+      }
+    },
+    {
+      "objectId": "p6",
+      "pageElements": [
+        {
+          "objectId": "p6_i2",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "YOL HARITASI"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i3",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Sırada içerik işleme var"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i4",
+          "shape": {
+            "shapeType": "RECTANGLE"
+          }
+        },
+        {
+          "objectId": "p6_i5",
+          "shape": {
+            "shapeType": "ELLIPSE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "1"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i6",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Çekirdek"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i7",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Tamamlandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i8",
+          "shape": {
+            "shapeType": "ELLIPSE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "2"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i9",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Dosya yönetimi"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i10",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Tamamlandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i11",
+          "shape": {
+            "shapeType": "ELLIPSE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "3"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i12",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "MCP sunucusu"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i13",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Tamamlandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i14",
+          "shape": {
+            "shapeType": "ELLIPSE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "4"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i15",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "İçerik işleme"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i16",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Planlandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i17",
+          "shape": {
+            "shapeType": "ELLIPSE",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "5"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i18",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Senkronizasyon"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i19",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Planlandı"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "objectId": "p6_i20",
+          "shape": {
+            "shapeType": "TEXT_BOX",
+            "text": {
+              "textElements": [
+                {},
+                {
+                  "textRun": {
+                    "content": "Ayrıca: devam ettirilebilir yükleme · OAuth uygulamasını üretime alma"
+                  }
+                },
+                {
+                  "textRun": {
+                    "content": "\n"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "slideProperties": {
+        "notesPage": {
+          "pageElements": [
+            {
+              "objectId": "p6_g11",
+              "shape": {}
+            },
+            {
+              "objectId": "p6_g12",
+              "shape": {}
+            }
+          ],
+          "notesProperties": {
+            "speakerNotesObjectId": "p6_g11"
+          }
+        }
+      }
+    }
+  ],
+  "title": "marvin-drive — Sunum",
+  "revisionId": "Q25i_wzfqZN1zg"
+}

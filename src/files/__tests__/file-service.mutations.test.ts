@@ -159,7 +159,11 @@ describe('copy', () => {
 
   it('omits the not-yet-computed size of a freshly copied Google file', async () => {
     drive.getFile.mockResolvedValueOnce({ id: 'g1', mimeType: GOOGLE_MIME.spreadsheet });
-    drive.copyFile.mockResolvedValueOnce({ id: 'c2', mimeType: GOOGLE_MIME.spreadsheet, size: '1' });
+    drive.copyFile.mockResolvedValueOnce({
+      id: 'c2',
+      mimeType: GOOGLE_MIME.spreadsheet,
+      size: '1',
+    });
     const res = await service.copy({ fileId: 'g1' });
     expect(res).not.toHaveProperty('size');
   });

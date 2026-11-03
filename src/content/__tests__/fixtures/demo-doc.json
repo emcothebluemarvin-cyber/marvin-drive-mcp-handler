@@ -1,0 +1,1204 @@
+{
+  "title": "marvin-drive — Genel Bakış",
+  "body": {
+    "content": [
+      {
+        "endIndex": 1,
+        "sectionBreak": {
+          "sectionStyle": {
+            "sectionType": "CONTINUOUS"
+          }
+        }
+      },
+      {
+        "startIndex": 1,
+        "endIndex": 35,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "marvin-drive — Proje Genel Bakışı\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_1"
+          }
+        }
+      },
+      {
+        "startIndex": 35,
+        "endIndex": 162,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Claude Code'un Google Drive'ı birden fazla hesapla, güvenli biçimde yönetmesini sağlayan TypeScript CLI ve stdio MCP sunucusu.\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 162,
+        "endIndex": 168,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Durum\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_2"
+          }
+        }
+      },
+      {
+        "startIndex": 168,
+        "endIndex": 206,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "MVP tamamlandı"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — "
+              }
+            },
+            {
+              "textRun": {
+                "content": "main"
+              }
+            },
+            {
+              "textRun": {
+                "content": " dalı, 40 commit\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 206,
+        "endIndex": 284,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Testler:"
+              }
+            },
+            {
+              "textRun": {
+                "content": " 26 test dosyası, 202 test geçiyor (1 atlandı) + canlı uçtan uca test\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 284,
+        "endIndex": 328,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Kod:"
+              }
+            },
+            {
+              "textRun": {
+                "content": " ~2.900 satır kaynak, ~2.700 satır test\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 328,
+        "endIndex": 396,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Kayıt:"
+              }
+            },
+            {
+              "textRun": {
+                "content": " Claude Code'a kullanıcı kapsamında "
+              }
+            },
+            {
+              "textRun": {
+                "content": "marvin-drive"
+              }
+            },
+            {
+              "textRun": {
+                "content": " adıyla bağlı\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 396,
+        "endIndex": 403,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Mimari\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_2"
+          }
+        }
+      },
+      {
+        "startIndex": 403,
+        "endIndex": 867,
+        "table": {
+          "rows": 8,
+          "columns": 2,
+          "tableRows": [
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 406,
+                      "endIndex": 413,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "Katman\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 414,
+                      "endIndex": 425,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "Sorumluluk\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 427,
+                      "endIndex": 434,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "config"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 435,
+                      "endIndex": 487,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "client_secret.json"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": " ve "
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "accounts.json"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": " yükleme, yollar\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 489,
+                      "endIndex": 494,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "auth"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 495,
+                      "endIndex": 587,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "Loopback + PKCE OAuth girişi, Keychain token deposu, yenileme, tasarlanmış callback sayfası\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 589,
+                      "endIndex": 595,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "drive"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 596,
+                      "endIndex": 643,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "googleapis istemci fabrikası ve Drive adaptörü\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 645,
+                      "endIndex": 651,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "files"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 652,
+                      "endIndex": 733,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "Dosya servisi: listeleme, arama, yükleme, indirme, taşıma, silme, yeniden deneme\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 735,
+                      "endIndex": 741,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "audit"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 742,
+                      "endIndex": 764,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "JSONL denetim günlüğü\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 766,
+                      "endIndex": 770,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "mcp"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 771,
+                      "endIndex": 817,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "12 aracı zod şemalarıyla sunan stdio sunucusu\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "tableCells": [
+                {
+                  "content": [
+                    {
+                      "startIndex": 819,
+                      "endIndex": 823,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "cli"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    {
+                      "startIndex": 824,
+                      "endIndex": 866,
+                      "paragraph": {
+                        "elements": [
+                          {
+                            "textRun": {
+                              "content": "auth add/login/list/remove/default"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": ", "
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "serve"
+                            }
+                          },
+                          {
+                            "textRun": {
+                              "content": "\n"
+                            }
+                          }
+                        ],
+                        "paragraphStyle": {
+                          "namedStyleType": "NORMAL_TEXT"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "startIndex": 867,
+        "endIndex": 880,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "MCP Araçları\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_2"
+          }
+        }
+      },
+      {
+        "startIndex": 880,
+        "endIndex": 927,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_list_accounts"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — hesaplar ve token durumu\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 927,
+        "endIndex": 955,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_list"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — klasör içeriği\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 955,
+        "endIndex": 992,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_search"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — ad ve tam metin arama\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 992,
+        "endIndex": 1048,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_get_metadata"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — sahip, üst klasör, boyut, bağlantı\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1048,
+        "endIndex": 1110,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_download"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — indirme (+ Google formatlarını dışa aktarma)\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1110,
+        "endIndex": 1182,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_upload"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — akışlı yükleme, isteğe bağlı Google formatına dönüştürme\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1182,
+        "endIndex": 1202,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_create_folder"
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1202,
+        "endIndex": 1213,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_move"
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1213,
+        "endIndex": 1226,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_rename"
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1226,
+        "endIndex": 1237,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_copy"
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1237,
+        "endIndex": 1295,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_delete"
+              }
+            },
+            {
+              "textRun": {
+                "content": " — varsayılan çöp kutusu, isteğe bağlı kalıcı\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1295,
+        "endIndex": 1309,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "drive_restore"
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1309,
+        "endIndex": 1327,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Güvenlik İlkeleri\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_2"
+          }
+        }
+      },
+      {
+        "startIndex": 1327,
+        "endIndex": 1401,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "İstemci sırrı repoda değil, "
+              }
+            },
+            {
+              "textRun": {
+                "content": "~/.config/google-handler/"
+              }
+            },
+            {
+              "textRun": {
+                "content": " altında (chmod 600)\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1401,
+        "endIndex": 1429,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Token'lar macOS Keychain'de\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1429,
+        "endIndex": 1523,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Tarayıcıya yanıt ancak hesap doğrulanıp kaydedildikten sonra verilir; callback sayfasında CSP\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1523,
+        "endIndex": 1576,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Drive kapsamı verilmezse giriş açıkça başarısız olur\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1576,
+        "endIndex": 1612,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Her işlem denetim günlüğüne yazılır\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1612,
+        "endIndex": 1625,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Yol Haritası\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "HEADING_2"
+          }
+        }
+      },
+      {
+        "startIndex": 1625,
+        "endIndex": 1658,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "✅ Çekirdek (config, auth, audit)\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1658,
+        "endIndex": 1675,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "✅ Dosya yönetimi\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1675,
+        "endIndex": 1690,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "✅ MCP sunucusu\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1690,
+        "endIndex": 1749,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "⬜ İçerik işleme (Docs / Sheets / Slides yerinde düzenleme)\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1749,
+        "endIndex": 1782,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "⬜ Senkronizasyon (yerel ↔ Drive)\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1782,
+        "endIndex": 1783,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1783,
+        "endIndex": 1923,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Ek olarak: büyük dosyalar için devam ettirilebilir yükleme, OAuth uygulamasını üretime alma (GitHub Pages ana sayfa + gizlilik politikası).\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1923,
+        "endIndex": 1924,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1924,
+        "endIndex": 1926,
+        "paragraph": {
+          "elements": [
+            {},
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1926,
+        "endIndex": 1927,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      },
+      {
+        "startIndex": 1927,
+        "endIndex": 2042,
+        "paragraph": {
+          "elements": [
+            {
+              "textRun": {
+                "content": "Bu belge, marvin-drive'ın kendi "
+              }
+            },
+            {
+              "textRun": {
+                "content": "drive_upload"
+              }
+            },
+            {
+              "textRun": {
+                "content": " aracıyla "
+              }
+            },
+            {
+              "textRun": {
+                "content": ".md"
+              }
+            },
+            {
+              "textRun": {
+                "content": " dosyasından Google Doküman'a dönüştürülerek oluşturuldu."
+              }
+            },
+            {
+              "textRun": {
+                "content": "\n"
+              }
+            }
+          ],
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT"
+          }
+        }
+      }
+    ]
+  },
+  "revisionId": "AHj4eMQan_439SoZYb7--yRVLzlvTasMPUfUjizKyya3K5I8E-vCVbEoko4AR6At4ylCwPzi0qnvOMQvlhMZloWcKJ3qecTjr4DjU2Vt8-w",
+  "documentId": "1VUS46rxnazQQyHP22VD4UXJEZd0p_zWPxIl6fQfgVKQ"
+}
