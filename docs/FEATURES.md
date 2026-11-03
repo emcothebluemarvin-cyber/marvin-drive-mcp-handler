@@ -40,5 +40,6 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 
 ## Later
 - ⬜ Sync watch mode (continuous sync)
+- ⬜ GUI with Claude-API file classification for sync selection (plugs into `sync_select`; terminal use keeps Claude Code as the selector)
 - ⬜ Resumable upload for large files
 - ⬜ OAuth app → production (GitHub Pages homepage + privacy policy)
