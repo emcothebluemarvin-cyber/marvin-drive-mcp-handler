@@ -506,11 +506,9 @@ export class SyncService {
   /** Spec §5 steps 3–5: scan, hash, probe, plan. */
   private async buildPlan(
     file: PairFile,
-    apply: boolean,
-  ): Promise<{ plan: Plan; remote: RemoteScan }> {
+  ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan }> {
     const { pair, records } = file;
     const { local, remote } = await this.scanBoth(pair);
-    if (apply) await this.removeStaleParts(pair, local);
     // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
     // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
     const onDisk = await probeOnDisk(
@@ -525,7 +523,7 @@ export class SyncService {
     const probes = await probeRecords(missing, remote, (id, fields) =>
       this.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
     );
-    return { plan: makePlan({ ...base, probes, md5s }), remote };
+    return { plan: makePlan({ ...base, probes, md5s }), remote, local };
   }
 
   private async removeStaleParts(pair: Pair, local: LocalScan): Promise<void> {
@@ -548,7 +546,7 @@ export class SyncService {
       const startedAt = this.clock().toISOString();
       const file = await this.store.load(input.name);
       await this.checkRoots(file.pair);
-      const { plan, remote } = await this.buildPlan(file, apply);
+      const { plan, remote, local } = await this.buildPlan(file);
       const name = file.pair.name;
       if (!apply) return buildReport(name, plan, { dryRun: true });
       if (input.planId !== undefined && input.planId !== plan.planId) {
@@ -571,6 +569,7 @@ export class SyncService {
           },
         });
       }
+      await this.removeStaleParts(file.pair, local);
       const executor = new Executor(
         {
           ops: this.ops,

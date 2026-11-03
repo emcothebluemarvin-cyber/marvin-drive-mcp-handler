@@ -1,5 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { link, lstat, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { ValidationError, hasErrorCode } from '../errors.js';
@@ -99,6 +110,7 @@ export class PairStore {
 
   private async ensureDir(): Promise<void> {
     await mkdir(this.opts.dir, { recursive: true, mode: 0o700 });
+    await chmod(this.opts.dir, 0o700);
   }
 
   async exists(name: string): Promise<boolean> {

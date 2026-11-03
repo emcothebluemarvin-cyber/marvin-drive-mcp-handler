@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -42,6 +43,13 @@ function store(isAlive: (pid: number) => boolean = () => true): PairStore {
 }
 
 describe('PairStore', () => {
+  it('tightens an existing sync dir to 0700', async () => {
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o755);
+    await store().save(makePairFile({}, []));
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+  });
+
   it('saves atomically with 0600 file and 0700 dir, and loads it back', async () => {
     const s = store();
     const data = makePairFile({}, [record('r1', 'a.pdf')]);

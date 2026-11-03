@@ -41,7 +41,13 @@ afterEach(async () => {
   await rm(trashDir, { recursive: true, force: true });
 });
 
-function executor(file: PairFile, folders = new Map([[ROOT_ID, '']])): Executor {
+function executor(
+  file: PairFile,
+  folders = new Map([[ROOT_ID, '']]),
+  save: (f: PairFile) => Promise<void> = async (f) => {
+    saves.push(structuredClone(f));
+  },
+): Executor {
   const ops = new OperationRunner({
     runner: createRunner(drive),
     audit,
@@ -54,9 +60,7 @@ function executor(file: PairFile, folders = new Map([[ROOT_ID, '']])): Executor 
       audit,
       logger: silentLogger(),
       clock: () => NOW,
-      save: async (f) => {
-        saves.push(structuredClone(f));
-      },
+      save,
       trashExec: async (_bin, args) => {
         const target = args[1] ?? '';
         await rename(target, path.join(trashDir, path.basename(target)));
@@ -422,6 +426,45 @@ describe('Executor', () => {
       ['c.pdf', 'not-run'],
     ]);
     expect(out[1]?.message).toBe(new QuotaExceededError('emco').message);
+  });
+
+  it('aborts the run when the pair file cannot be saved', async () => {
+    serve('R');
+    const failing = async (): Promise<void> => {
+      throw new Error('ENOSPC');
+    };
+    const out = await executor(pairFile(), new Map([[ROOT_ID, '']]), failing).run([
+      action('download-new', 'a.pdf', {
+        remote: remote('n1', 'a.pdf', 'R'),
+        selection: { add: ['a.pdf'] },
+      }),
+      action('download-new', 'b.pdf', { remote: remote('n2', 'b.pdf', 'R') }),
+      action('trash-remote', 'c.pdf', {
+        record: record('r3', 'c.pdf'),
+        remote: remote('r3', 'c.pdf', 'C'),
+      }),
+    ]);
+    expect(out.map((o) => [o.path, o.status])).toEqual([
+      ['a.pdf', 'failed'],
+      ['b.pdf', 'not-run'],
+      ['c.pdf', 'not-run'],
+    ]);
+    expect(drive.downloadMedia).toHaveBeenCalledTimes(1);
+    expect(drive.updateFile).not.toHaveBeenCalled();
+  });
+
+  it('reports all actions as not-run when the folder pre-pass hits a run-ending error', async () => {
+    const a = await put('sub/a.pdf', 'A');
+    drive.listFiles.mockRejectedValue(httpError(403, 'storageQuotaExceeded'));
+    const out = await executor(pairFile([], ['sub/a.pdf'])).run([
+      action('upload-new', 'sub/a.pdf', { local: a, localMd5: md5('A') }),
+      action('download-new', 'c.pdf', { remote: remote('n3', 'c.pdf', 'C') }),
+    ]);
+    expect(out.map((o) => [o.path, o.status])).toEqual([
+      ['sub/a.pdf', 'not-run'],
+      ['c.pdf', 'not-run'],
+    ]);
+    expect(drive.createFile).not.toHaveBeenCalled();
   });
 
   it('persists after every success, so a crash keeps completed work', async () => {

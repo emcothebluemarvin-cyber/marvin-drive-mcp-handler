@@ -31,17 +31,17 @@ After changing code, run `npm run build` again — Claude Code runs the compiled
 
 ## CLI
 
-| Command                                                        | Purpose                                                         |
-| -------------------------------------------------------------- | --------------------------------------------------------------- |
-| `marvin-drive auth add [--alias a]`                            | Browser login, register account (first = default)               |
-| `marvin-drive auth login <alias>`                              | Re-login an expired account                                     |
-| `marvin-drive auth list [--verify]`                            | Accounts and token status                                       |
-| `marvin-drive auth remove <alias>`                             | Remove account, delete + revoke token                           |
-| `marvin-drive auth default <alias>`                            | Set the default account                                         |
-| `marvin-drive serve`                                           | MCP server on stdio                                             |
-| `marvin-drive sync list`                                       | Sync pairs with counts and last applied run                     |
-| `marvin-drive sync run <name> [--apply] [--allow-mass-delete]` | Dry run (default) or apply a sync; exit code 1 on failure/abort |
-| `marvin-drive sync repair-marker <name>`                       | Rewrite the folder marker after confirming the local folder     |
+| Command                                                                         | Purpose                                                         |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `marvin-drive auth add [--alias a]`                                             | Browser login, register account (first = default)               |
+| `marvin-drive auth login <alias>`                                               | Re-login an expired account                                     |
+| `marvin-drive auth list [--verify]`                                             | Accounts and token status                                       |
+| `marvin-drive auth remove <alias>`                                              | Remove account, delete + revoke token                           |
+| `marvin-drive auth default <alias>`                                             | Set the default account                                         |
+| `marvin-drive serve`                                                            | MCP server on stdio                                             |
+| `marvin-drive sync list`                                                        | Sync pairs with counts and last applied run                     |
+| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete]` | Dry run (default) or apply a sync; exit code 1 on failure/abort |
+| `marvin-drive sync repair-marker <name>`                                        | Rewrite the folder marker after confirming the local folder     |
 
 ## MCP tools
 

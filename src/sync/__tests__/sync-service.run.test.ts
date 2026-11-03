@@ -219,6 +219,19 @@ describe('run', () => {
     await apply();
     expect(await readdir(local)).not.toContain('.abc.marvin-part');
   });
+
+  it('a rejected apply (stale planId) leaves stale temp files alone', async () => {
+    const part = at('.abc.marvin-part');
+    await writeFile(part, 'partial');
+    const old = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    await utimes(part, old, old);
+    const dry = await sync.run({ name: 'docs' });
+    await writeFile(at('new.pdf'), 'N');
+    await sync.select({ name: 'docs', add: ['new.pdf'] });
+    const res = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
+    expect(res.aborted?.reason).toBe('plan-changed');
+    expect(await readdir(local)).toContain('.abc.marvin-part');
+  });
 });
 
 describe('run (review regressions)', () => {

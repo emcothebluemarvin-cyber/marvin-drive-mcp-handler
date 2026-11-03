@@ -14,7 +14,7 @@ const execFileAsync = promisify(execFile);
 export const defaultExec: ExecFn = (file, args) => execFileAsync(file, [...args]);
 
 /** Moves one path to the macOS Trash via `/usr/bin/trash -s` (spec §7). Never unlinks. */
-export async function trashLocal(absPath: string, exec: ExecFn = defaultExec): Promise<void> {
+export async function trashLocal(absPath: string, exec: ExecFn): Promise<void> {
   if (!path.isAbsolute(absPath)) {
     throw new ValidationError(`trash needs an absolute path (got "${absPath}")`);
   }

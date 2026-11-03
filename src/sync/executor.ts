@@ -7,7 +7,7 @@ import { AppError, ValidationError, hasErrorCode } from '../errors.js';
 import { GOOGLE_MIME } from '../files/export-formats.js';
 import { escapeQueryValue } from '../files/query.js';
 import type { Logger } from '../logger.js';
-import { CollisionError, TargetChangedError, isAbortError } from './errors.js';
+import { CollisionError, PersistenceError, TargetChangedError, isAbortError } from './errors.js';
 import { md5File } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, prepareParent } from './paths.js';
 import { SYNC_LIST_FIELDS } from './remote-scanner.js';
@@ -186,7 +186,12 @@ export class Executor {
   async run(actions: readonly Action[]): Promise<ActionOutcome[]> {
     const outcomes: ActionOutcome[] = [];
     let aborted = false;
-    await this.ensureFolders(actions.filter((a) => a.kind === 'upload-new'));
+    try {
+      await this.ensureFolders(actions.filter((a) => a.kind === 'upload-new'));
+    } catch (err) {
+      if (!isAbortError(err)) throw err;
+      aborted = true;
+    }
     for (const stage of STAGES) {
       for (const action of actions.filter((a) => stage.includes(a.kind))) {
         const base = { kind: action.kind, path: action.key };
@@ -246,10 +251,21 @@ export class Executor {
     }
   }
 
+  /** Atomic pair-file save; a failure aborts the run (see PersistenceError). */
+  private async persist(): Promise<void> {
+    try {
+      await this.deps.save(this.file);
+    } catch (err) {
+      throw new PersistenceError(`Could not save the pair file: ${messageOf(err)}`, {
+        cause: err,
+      });
+    }
+  }
+
   private async commit(action: Action, mutate: () => void): Promise<void> {
     mutate();
     applySelection(this.file, action.selection);
-    await this.deps.save(this.file);
+    await this.persist();
   }
 
   private async audit(op: AuditOp, action: Action, remoteId: string): Promise<void> {
@@ -535,7 +551,7 @@ export class Executor {
     );
     const after = await this.statFields(action.key, written.md5);
     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
-    await this.deps.save(this.file);
+    await this.persist();
     await this.audit('sync_download', action, remote.id);
     return {};
   }

@@ -37,12 +37,18 @@ export class LocalTrashError extends AppError {
   readonly code = 'SYNC_LOCAL_TRASH';
 }
 
+/** The pair file could not be saved; continuing would act without a durable record (spec §7). */
+export class PersistenceError extends AppError {
+  readonly code = 'SYNC_PERSISTENCE';
+}
+
 /** Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). */
 export function isAbortError(err: unknown): boolean {
   return (
     err instanceof ReauthRequiredError ||
     err instanceof QuotaExceededError ||
     err instanceof ApiDisabledError ||
-    err instanceof RateLimitError
+    err instanceof RateLimitError ||
+    err instanceof PersistenceError
   );
 }
