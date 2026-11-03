@@ -1,3 +1,6 @@
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { isInvalidGrant } from '../auth/oauth-errors.js';
 import type { DriveContext, DriveRunner } from '../drive/client-factory.js';
@@ -8,6 +11,7 @@ import { mapDriveError, statusOf } from './drive-errors.js';
 import { GOOGLE_MIME } from './export-formats.js';
 import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
 import { withRetry, type RetryClass, type RetryOptions } from './retry.js';
+import { googleTargetMime, uploadMimeType } from './upload-mime.js';
 
 export const SUMMARY_FIELDS = 'id, name, mimeType, size, modifiedTime, parents';
 export const LIST_FIELDS = `nextPageToken, files(${SUMMARY_FIELDS})`;
@@ -85,6 +89,13 @@ export interface DeleteResult {
   fileId: string;
   name?: string;
   permanent: boolean;
+}
+
+export interface UploadInput extends AccountInput {
+  localPath: string;
+  parentId?: string;
+  name?: string;
+  convertToGoogle?: boolean;
 }
 
 export function toSummary(file: DriveFile): FileSummary {
@@ -279,6 +290,51 @@ export class FileService {
       });
       await this.recordAudit(ctx, 'restore', restored, {});
       return toSummary(restored);
+    });
+  }
+
+  async upload(input: UploadInput): Promise<FileSummary> {
+    const localPath = path.resolve(input.localPath);
+    let size: number;
+    try {
+      const info = await stat(localPath);
+      if (!info.isFile()) throw new ValidationError(`${localPath} is not a regular file`);
+      size = info.size;
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      throw new ValidationError(`Cannot read ${localPath}`, { cause: err });
+    }
+
+    const convert = input.convertToGoogle ?? false;
+    const parentId = input.parentId ?? 'root';
+    const requestBody = {
+      name: input.name ?? path.basename(localPath),
+      parents: [parentId],
+      ...(convert ? { mimeType: googleTargetMime(localPath) } : {}),
+    };
+    const mimeType = uploadMimeType(localPath);
+
+    return this.exec(input.account, 'create', input.parentId, async (ctx) => {
+      // Streaming multipart for all sizes (spec §6). A new stream per attempt.
+      const body = createReadStream(localPath);
+      let uploaded: DriveFile;
+      try {
+        uploaded = await ctx.drive.createFile({
+          requestBody,
+          media: { mimeType, body },
+          fields: SUMMARY_FIELDS,
+        });
+      } catch (err) {
+        body.destroy();
+        throw err;
+      }
+      await this.recordAudit(ctx, 'upload', uploaded, {
+        localPath,
+        parentId,
+        size,
+        converted: convert,
+      });
+      return toSummary(uploaded);
     });
   }
 
