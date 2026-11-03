@@ -35,6 +35,22 @@ beforeEach(async () => {
 });
 
 describe('upload', () => {
+  it('rejects relative local paths', async () => {
+    await expect(service.upload({ localPath: 'relative/file.txt' })).rejects.toThrow(
+      'localPath must be an absolute path (got "relative/file.txt")',
+    );
+  });
+
+  it('expands ~/ before resolving', async () => {
+    const err = await service
+      .upload({ localPath: '~/marvin-nonexistent-file.txt' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toBe(
+      `Cannot read ${path.join(os.homedir(), 'marvin-nonexistent-file.txt')}`,
+    );
+  });
+
   it('streams the file with its detected MIME type and audits', async () => {
     const local = path.join(dir, 'notes.txt');
     await writeFile(local, 'hello');

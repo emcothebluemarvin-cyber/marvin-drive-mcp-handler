@@ -37,7 +37,7 @@ export interface WrittenFile {
 
 const MAX_COLLISIONS = 1000;
 
-function expandHome(p: string): string {
+export function expandHome(p: string): string {
   if (p === '~') return os.homedir();
   if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
   return p;
@@ -71,7 +71,11 @@ export async function resolveDestination(input: DestinationInput): Promise<Desti
   if (input.destPath === undefined || input.destPath.trim() === '') {
     return { dir: path.resolve(input.defaultDir), name: generated };
   }
-  const resolved = path.resolve(expandHome(input.destPath));
+  const expanded = expandHome(input.destPath);
+  if (!path.isAbsolute(expanded)) {
+    throw new ValidationError(`destPath must be an absolute path (got "${input.destPath}")`);
+  }
+  const resolved = path.resolve(expanded);
   if (input.destPath.endsWith('/') || (await isDirectory(resolved))) {
     return { dir: resolved, name: generated };
   }

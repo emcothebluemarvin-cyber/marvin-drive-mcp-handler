@@ -27,6 +27,8 @@ Error messages refer to `marvin-drive …`; without `npm link`, run the same com
 claude mcp add marvin-drive --scope user -- node "$PWD/dist/cli/main.js" serve
 ```
 
+After changing code, run `npm run build` again — Claude Code runs the compiled `dist/` output.
+
 ## CLI
 
 | Command                             | Purpose                                           |

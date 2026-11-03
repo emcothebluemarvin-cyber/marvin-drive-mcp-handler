@@ -38,6 +38,12 @@ describe('resolveDestination', () => {
     ).resolves.toEqual({ dir, name: 'custom.bin' });
   });
 
+  it('rejects relative destPath', async () => {
+    await expect(
+      resolveDestination({ ...base, defaultDir: '/unused', destPath: 'rel/x.txt' }),
+    ).rejects.toThrow('destPath must be an absolute path (got "rel/x.txt")');
+  });
+
   it('expands ~ to the home directory', async () => {
     const res = await resolveDestination({ ...base, defaultDir: '/unused', destPath: '~/x.txt' });
     expect(res).toEqual({ dir: os.homedir(), name: 'x.txt' });

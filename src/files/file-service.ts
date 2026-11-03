@@ -9,7 +9,7 @@ import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
 import { ExportTooLargeError, NotFoundError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { mapDriveError, reasonOf, statusOf } from './drive-errors.js';
-import { resolveDestination, writeUnique } from './destination.js';
+import { expandHome, resolveDestination, writeUnique } from './destination.js';
 import {
   GOOGLE_MIME,
   resolveExport,
@@ -315,7 +315,11 @@ export class FileService {
   }
 
   async upload(input: UploadInput): Promise<FileSummary> {
-    const localPath = path.resolve(input.localPath);
+    const expanded = expandHome(input.localPath);
+    if (!path.isAbsolute(expanded)) {
+      throw new ValidationError(`localPath must be an absolute path (got "${input.localPath}")`);
+    }
+    const localPath = path.resolve(expanded);
     let size: number;
     try {
       const info = await stat(localPath);

@@ -146,7 +146,7 @@ export function createMcpServer(deps: McpDeps): McpServer {
         'Upload a local file. convertToGoogle turns office/text/csv files into Google Docs/Sheets/Slides.',
       inputSchema: {
         account,
-        localPath: z.string().min(1).describe('Absolute local file path (~ is not expanded)'),
+        localPath: z.string().min(1).describe('Absolute local file path (~/ allowed)'),
         parentId: z.string().min(1).optional().describe('Destination folder ID (default root)'),
         name: z.string().min(1).optional(),
         convertToGoogle: z.boolean().optional(),
