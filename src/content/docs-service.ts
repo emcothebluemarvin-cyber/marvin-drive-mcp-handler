@@ -1,7 +1,12 @@
 import type { Readable } from 'node:stream';
 import type { DocsRequest } from '../drive/docs-adapter.js';
 import { ValidationError } from '../errors.js';
-import { ContentService, type ContentFileRef, type Guard } from './content-service.js';
+import {
+  ContentService,
+  type ContentFileRef,
+  type Guard,
+  requestKinds,
+} from './content-service.js';
 import { DOC_FIELDS, bodyEndIndex, docOutline, headings } from './docs-structure.js';
 import { DEFAULT_MAX_CHARS, sliceText, type TextSlice } from './truncate.js';
 
@@ -46,6 +51,11 @@ interface InsertPlan {
   /** Range to reset to NORMAL_TEXT, when the insert forms its own paragraph after a heading. */
   restyle?: { startIndex: number; endIndex: number };
   revisionId?: string;
+}
+
+export interface DocsBatchInput extends ContentFileRef {
+  requests: Array<Record<string, unknown>>;
+  requiredRevisionId: string;
 }
 
 async function readAll(stream: Readable): Promise<string> {
@@ -192,5 +202,25 @@ export class DocsService extends ContentService {
       ? { startIndex: index, endIndex: index + input.text.length }
       : undefined;
     return { index, text: input.text, ...(restyle ? { restyle } : {}), ...base };
+  }
+
+  async batchUpdate(input: DocsBatchInput): Promise<DocsEditResult & { replies: unknown[] }> {
+    const file = await this.resolve(input.account, input.fileId);
+    return this.run(input.account, file, 'mutate', async (ctx) => {
+      const res = await ctx.docs.batchUpdate(
+        file.id,
+        input.requests as DocsRequest[],
+        input.requiredRevisionId,
+      );
+      await this.ops.audit(ctx, 'docs_batch_update', file, {
+        requestCount: input.requests.length,
+        requestKinds: requestKinds(input.requests),
+        guarded: 'caller',
+      });
+      return {
+        replies: res.replies ?? [],
+        revisionId: res.writeControl?.requiredRevisionId ?? null,
+      };
+    });
   }
 }

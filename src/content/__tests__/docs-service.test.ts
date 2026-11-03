@@ -307,3 +307,32 @@ describe('DocsService.insertText', () => {
     expect(audit.entries[0]?.details).toMatchObject({ guarded: false });
   });
 });
+
+describe('DocsService.batchUpdate', () => {
+  it('sends raw requests under the required revision and audits request kinds', async () => {
+    doc();
+    docs.batchUpdate.mockResolvedValueOnce({
+      replies: [{}, {}],
+      writeControl: { requiredRevisionId: 'r2' },
+    });
+    const requests = [
+      { insertText: { location: { index: 1 }, text: 'A' } },
+      {
+        updateTextStyle: {
+          range: { startIndex: 1, endIndex: 2 },
+          textStyle: { bold: true },
+          fields: 'bold',
+        },
+      },
+      { insertText: { location: { index: 2 }, text: 'B' } },
+    ];
+    const res = await service.batchUpdate({ fileId: 'd1', requests, requiredRevisionId: 'r1' });
+    expect(docs.batchUpdate).toHaveBeenCalledWith('d1', requests, 'r1');
+    expect(res).toEqual({ replies: [{}, {}], revisionId: 'r2' });
+    expect(audit.entries[0]?.details).toEqual({
+      requestCount: 3,
+      requestKinds: ['insertText', 'updateTextStyle'],
+      guarded: 'caller',
+    });
+  });
+});
