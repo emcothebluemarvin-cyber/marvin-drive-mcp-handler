@@ -25,10 +25,11 @@
 
 ### Declared refinements vs the spec (all intentional)
 
-- **`foldKey`** = NFC → `toUpperCase()` → `toLowerCase()` → NFC. Upper-casing first folds `ß`/`SS`, ligatures (`ﬀ`/`FF`) and final sigma the way APFS does; the over-folding it adds (Turkish `ı`/`i`) only makes more keys collide, which is the safe direction. Anything APFS folds beyond that is caught by the on-disk inode probe (next bullet).
-- **On-disk probe and blocking ancestors (§6.1 step 4, hardened).** `LocalScan` = `{ entries, occupied, unknownSubtrees, blocking, partFiles }`: `occupied` holds keys of existing non-regular or ignored entries; `blocking` holds symlinks, special files and dot-named folders — nothing below them is ever "absent". Before planning, the service `lstat`s every record key without an exact scan match and passes `PlanInput.onDisk` (key → `{ kind, ino }`). `resolveLocal`: exact → fold (case-insensitive) → unknown subtree → **blocked ancestor → unknown-state** → occupied → **on disk: same inode as a scanned entry ⇒ that entry (renamed-case), else unknown-state** → absent. U0 also treats blocked keys as `unknown-state`, and `sync_select add` rejects them. (Regression: a folder moved to another disk and replaced by a symlink — reachable or dangling — never yields `trash-remote`.)
+- **`foldKey`** = NFC → per character `c === 'ı' ? c : c.toUpperCase()` → join → `toLowerCase()` → NFC. This matches APFS for `ı`/`I`/`i` (dotless `ı` stays distinct: `ılık` ≠ `ilik`, `ilik` ≡ `ILIK`), `İ`/`i̇`, `ß`/`SS`, `ﬀ`, `ﬅ`, `ſ` and `Σ`/`ς` (all covered by tests).
+- **Filesystem-agreement rule.** Our fold alone never decides that two spellings are the same file. On a case-insensitive volume a fold-only match (a record key vs a differently spelled local file, or a selected/Drive key vs a local file in U2/U3/U6/U7) counts only when the service's `lstat` of that key hits **the same inode** as the scanned local entry; otherwise the key is `ambiguous` (report, no action). The service probes exactly those keys (`onDiskProbeKeys`: record keys without an exact scan match, plus Drive/selected keys that match a local file only by fold). Folder-spelling reuse for uploads (`uploadKey`, `ensureRemoteFolder`) may use the fold alone, since it only picks an existing Drive folder and writes nothing locally. (Regression P5: tracked `ilik.pdf` deleted locally next to an unrelated `ılık.pdf` → `trash-remote` for `ilik.pdf`, `ılık.pdf` is a local candidate, never `update-remote`/conflict.)
+- **On-disk probe and blocking ancestors (§6.1 step 4, hardened).** `LocalScan` = `{ entries, occupied, unknownSubtrees, blocking, partFiles }`: `occupied` holds keys of existing non-regular or ignored entries; `blocking` holds symlinks, special files and dot-named folders — nothing below them is ever "absent". Before planning, the service `lstat`s every record key without an exact scan match and passes `PlanInput.onDisk` (key → `{ kind, ino }`). `resolveLocal`: exact → fold (case-insensitive **and confirmed by the volume**, else ambiguous) → unknown subtree → **blocked ancestor → unknown-state** → occupied → **on disk: same inode as a scanned entry ⇒ that entry (renamed-case), else unknown-state** → absent. U0 also treats blocked keys as `unknown-state`, and `sync_select add` rejects them. (Regression: a folder moved to another disk and replaced by a symlink — reachable or dangling — never yields `trash-remote`.)
 - **`moveLocal` never deletes the only copy.** `link` → `EEXIST` with the same inode drops the source only when it is a genuine second link (`nlink ≥ 2` **and** two distinct directory entries); otherwise the two names are one entry folded by the volume (`straße`/`STRASSE`, `report`/`Report`) and it is `rename`d. In place (case-only) moves require the target to be absent or the same inode. A crash after `unlink` but before persistence is resumed by adopting the file at the target when its md5 equals the record (`B7-resume`).
-- **Remote folder spelling (U1).** On a case-insensitive volume each parent folder of an upload takes the spelling of an existing Drive folder with the same fold (local `docs/a.pdf` uploads into Drive `Docs/`, record key `Docs/a.pdf`); on a case-sensitive volume a case-only folder mismatch is `ambiguous`. The executor's `folderFor`/`ensureRemoteFolder` match by fold on case-insensitive volumes (the folder query lists all folders of the parent and filters by fold / exact NFC name).
+- **Remote folder spelling (U1).** On a case-insensitive volume each parent folder of an upload takes the spelling of an existing Drive folder with the same fold (local `docs/a.pdf` uploads into Drive `Docs/`, record key `Docs/a.pdf`); on a case-sensitive volume a case-only folder mismatch is `ambiguous`. The executor's `folderFor`/`ensureRemoteFolder` match by fold on case-insensitive volumes (the folder query lists all folders of the parent, following `nextPageToken`, and filters by fold / exact NFC name).
 - **U8 recency** uses `max(mtimeMs, ctimeMs) > lastAppliedRunAt` (`cp -p`, `mv`, `ditto` keep the old mtime), and `lastAppliedRunAt`/`firstAppliedRunAt` are the **scan start** time of the applied run, not its end.
 - **Ignored names are symmetric:** Drive items whose name starts with `.` or ends with `.marvin-part` are ignored like local ones (§6.10 lists them only for local). Dot-named and unrepresentable Drive folders are not descended; their ids are added to `baselineFolders` on the first applied run (with the ambiguous/unlistable ones), so files that appear later under them stay candidates.
 - **Types:** `LocalEntry` gains `ino`. `RemoteScan` gains `ignored` (with ids, for the baseline and for records renamed to ignored names) and `unknownFolderIds`. `RemoteEntry.ancestorIds` lets U5 test `baselineFolders` membership.
@@ -36,7 +37,7 @@
 - **`planId` binding:** the MCP `sync_run` rejects `apply: true` without a `planId` (Claude must apply exactly the approved dry run). The CLI keeps `sync run <name> --apply` (re-plans) and gains `--plan-id <id>`.
 - **Internal action `refresh`** (record bookkeeping only — touched-but-identical file, a changed on-disk name (`localName`), Drive metadata change with the same md5). Emitted only when something actually differs (a renamed-case match whose `localName` already matches needs nothing). It is executed, but excluded from `planId` and from report `actions`.
 - **Phase B records** (`remoteOnly` or `native` set) cannot exist in Phase A; if found they get `unknown-state` (rule `phase-b`) and are never acted on.
-- **Case-sensitive volume:** besides tracked fold-only matches (§6.1 step 2), an untracked fold group whose exact keys differ (selected key vs local vs Drive) is `ambiguous`. On a case-insensitive volume such a group pairs up and the **Drive key** becomes the record path / selection key.
+- **Case-sensitive volume:** besides tracked fold-only matches (§6.1 step 2), an untracked fold group whose exact keys differ (selected key vs local vs Drive) is `ambiguous`. On a case-insensitive volume such a group pairs up (when the volume confirms it, see above) and the **Drive key** becomes the record path / selection key.
 - **Claimed keys:** an untracked Drive file whose fold equals a tracked record's path or Drive-move target is reported `collision` (rule `U-tracked`). B7–B9 targets occupied by a different local file are `collision` (planner check; placeExclusive still guards).
 - **B11:** an untracked Drive file at the key with md5 = L is adopted (crash between upload and persistence); a *different* untracked Drive file at the key is a `collision` report (no second same-name upload).
 - **U2 with a read-only Drive file** and differing content → `remote-readonly` report only. B4 with `!canEdit` writes the conflict copy once and updates the record's remote side so it does not repeat.
@@ -48,7 +49,7 @@
 - **Uploads** record the *planned* local stat and `localMd5 = response md5` (a change during upload is re-detected next run, `changed-during-upload` warning). Duplicate-safe adoption compares name, md5 and `createdTime` within ±10 min.
 - **Re-verification outcomes:** skips are warnings with code `skipped-changed`; execution-time `EEXIST` lands in `collisions`; `trash-local` of a vanished file is a skip; `trash-remote` of an already-trashed file is success.
 - **Report:** `SyncReport` adds `pair`, `dryRun`, `aborted`, `notRun`; `unknown` is `{ path, reason? }[]`; no `releasable` (Phase B). Brake and `planId` mismatch return a report with `aborted`; root-check failures throw `SyncRootError` with the `repair-marker` hint.
-- **Lock** is also taken by dry runs. An unreadable lock counts as busy until 60 s old. A stale lock is broken by renaming it to a unique name and re-reading it: if it is no longer the stale content (another process re-locked meanwhile) it is put back and the caller gets "busy", so two processes can never both hold the lock.
+- **Lock** is also taken by dry runs. An unreadable lock counts as busy until 60 s old. A stale lock is broken by renaming it to a unique name and re-reading it: if it is no longer the stale content (another process re-locked meanwhile) it is put back and the caller gets "busy", so two processes can never both hold the lock. The lock content carries `{ pid, startedAt, token }`; after acquiring, the holder reads it back and verifies it is its own, and release removes the file only if it still holds exactly that content.
 - **`trashExec` is required** in `SyncServiceDeps`/`ExecutorDeps`: the app passes `defaultExec` (`/usr/bin/trash`), every test passes a fake (`refuseTrash` or a move-into-temp-dir), so no test can reach the real Trash by omission.
 - **`createPair`** stores the resolved account **alias**; writes the marker before touching Drive and removes it if the Drive step fails. **`repair-marker`** also re-probes and stores `caseInsensitive`.
 - **`sync_select`:** `remove` accepts any clean relative path; `add` canonicalises to the existing local key (else the Drive key) and skips already-selected folds.
@@ -132,11 +133,21 @@ describe('keys', () => {
     expect(foldKey(NFD)).toBe(foldKey('ŞARTNAME.pdf'));
   });
 
-  it('folds like APFS: ß/SS, ligatures and final sigma', () => {
+  it('folds like APFS: ß/SS, ligatures, long s and final sigma', () => {
     expect(foldKey('straße.pdf')).toBe(foldKey('STRASSE.pdf'));
     expect(foldKey('ﬀ.pdf')).toBe(foldKey('FF.pdf'));
+    expect(foldKey('ﬅ.pdf')).toBe(foldKey('st.pdf'));
+    expect(foldKey('ſ.pdf')).toBe(foldKey('s.pdf'));
     expect(foldKey('ΟΔΟΣ.pdf')).toBe(foldKey('οδος.pdf'));
     expect(foldKey('οδοσ.pdf')).toBe(foldKey('οδος.pdf'));
+  });
+
+  it('keeps Turkish dotless ı distinct like APFS (ılık ≠ ilik, ilik ≡ ILIK, İ ≡ i̇)', () => {
+    expect(foldKey('ılık.pdf')).not.toBe(foldKey('ilik.pdf'));
+    expect(foldKey('sıcak.pdf')).not.toBe(foldKey('sicak.pdf'));
+    expect(foldKey('ilik.pdf')).toBe(foldKey('ILIK.pdf'));
+    expect(foldKey('I')).toBe(foldKey('i'));
+    expect(foldKey('İ')).toBe(foldKey('i\u0307'));
   });
 
   it('lists proper ancestors', () => {
@@ -498,11 +509,16 @@ export function toKey(relPath: string): string {
 }
 
 /**
- * NFC + case fold (spec §3): upper-casing first folds ß/SS, ligatures (ﬀ/FF) and final
- * sigma like APFS does; over-folding (Turkish ı/i) only makes more keys collide (safe).
+ * NFC + case fold matching APFS (spec §3): per-character upper-casing first folds ß/SS,
+ * ligatures (ﬀ, ﬅ), long s and final sigma; Turkish dotless ı stays distinct from i
+ * (APFS keeps `ılık` ≠ `ilik` while `ilik` ≡ `ILIK`).
  */
 export function foldKey(key: string): string {
-  return key.normalize('NFC').toUpperCase().toLowerCase().normalize('NFC');
+  return Array.from(key.normalize('NFC'))
+    .map((c) => (c === 'ı' ? c : c.toUpperCase()))
+    .join('')
+    .toLowerCase()
+    .normalize('NFC');
 }
 
 /** Proper ancestor keys of `key`, shortest first (`a/b/c` → `a`, `a/b`). */
@@ -1016,6 +1032,20 @@ describe('PairStore', () => {
     expect((await readdir(dir)).filter((n) => n.endsWith('.stale'))).toEqual([]);
   });
 
+  it('releases only its own lock (pid + token)', async () => {
+    const s = store();
+    const lockFile = path.join(dir, 'docs.lock');
+    const release = await s.lock('docs');
+    expect(JSON.parse(await readFile(lockFile, 'utf8'))).toMatchObject({
+      pid: process.pid,
+      token: expect.any(String),
+    });
+    const foreign = JSON.stringify({ pid: 4242, startedAt: 'x', token: 'theirs' });
+    await writeFile(lockFile, foreign);
+    await release();
+    expect(await readFile(lockFile, 'utf8')).toBe(foreign);
+  });
+
   it('treats an unreadable lock as busy until it is a minute old', async () => {
     const s = store();
     await s.save(makePairFile());
@@ -1272,16 +1302,24 @@ export class PairStore {
     const lockFile = path.join(this.opts.dir, `${name}.lock`);
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        const content = JSON.stringify({
+          pid: process.pid,
+          startedAt: this.now().toISOString(),
+          token: randomUUID(),
+        });
         const handle = await open(lockFile, 'wx', 0o600);
         try {
-          await handle.writeFile(
-            JSON.stringify({ pid: process.pid, startedAt: this.now().toISOString() }),
-          );
+          await handle.writeFile(content);
         } finally {
           await handle.close();
         }
+        if (!(await this.holds(lockFile, content))) {
+          throw new ValidationError(`sync is busy for ${name}`);
+        }
         return async () => {
-          await rm(lockFile, { force: true });
+          // Release only our own lock (a stale-lock breaker may have replaced it).
+          if (await this.holds(lockFile, content)) await rm(lockFile, { force: true });
+          else this.log.warn('Sync lock was taken over; not removing it', { name });
         };
       } catch (err) {
         if (!hasErrorCode(err, 'EEXIST')) throw err;
@@ -1305,6 +1343,15 @@ export class PairStore {
       return await fn();
     } finally {
       await release();
+    }
+  }
+
+  private async holds(lockFile: string, content: string): Promise<boolean> {
+    try {
+      return (await readFile(lockFile, 'utf8')) === content;
+    } catch (err) {
+      if (hasErrorCode(err, 'ENOENT')) return false;
+      throw err;
     }
   }
 
@@ -2335,6 +2382,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildContext,
   hashTargets,
+  onDiskProbeKeys,
   localState,
   remoteState,
   resolveLocal,
@@ -2355,9 +2403,26 @@ describe('resolveLocal (spec §6.1)', () => {
     });
   });
 
-  it('2: fold match on a case-insensitive volume is renamed-case', () => {
-    const ctx = buildContext(planInput({ local: [localEntry('report.pdf')] }));
-    expect(resolveLocal(ctx, 'Report.pdf')).toMatchObject({ kind: 'present', renamedCase: true });
+  it('2: fold match on a case-insensitive volume is renamed-case when the volume agrees', () => {
+    const agreed = buildContext(
+      planInput({
+        local: [localEntry('report.pdf')],
+        onDisk: [['Report.pdf', { kind: 'file', ino: 1 }]],
+      }),
+    );
+    expect(resolveLocal(agreed, 'Report.pdf')).toMatchObject({
+      kind: 'present',
+      renamedCase: true,
+    });
+    const unprobed = buildContext(planInput({ local: [localEntry('report.pdf')] }));
+    expect(resolveLocal(unprobed, 'Report.pdf')).toEqual({ kind: 'ambiguous' });
+    const other = buildContext(
+      planInput({
+        local: [localEntry('report.pdf')],
+        onDisk: [['Report.pdf', { kind: 'file', ino: 2 }]],
+      }),
+    );
+    expect(resolveLocal(other, 'Report.pdf')).toEqual({ kind: 'ambiguous' });
   });
 
   it('2: fold-only match on a case-sensitive volume is ambiguous', () => {
@@ -2492,6 +2557,18 @@ describe('resolveLocal safety (blocking ancestors, on-disk probe)', () => {
     });
   });
 });
+
+describe('onDiskProbeKeys', () => {
+  it('asks the volume about record keys without an exact match and fold-only matches', () => {
+    const input = planInput({
+      records: [record('r1', 'kept.pdf'), record('r2', 'Gone.pdf')],
+      selection: ['Sel.pdf', 'nowhere.pdf'],
+      local: [localEntry('kept.pdf'), localEntry('sel.pdf'), localEntry('drive.pdf')],
+      remote: [remoteEntry('n1', 'Drive.pdf'), remoteEntry('n2', 'other.pdf')],
+    });
+    expect(onDiskProbeKeys(input)).toEqual(['Drive.pdf', 'Gone.pdf', 'Sel.pdf']);
+  });
+});
 ```
 
 - [ ] **Step 2: Run and see it fail** — `npx vitest run src/sync/__tests__/resolve.test.ts` → FAIL: `../resolve.js` cannot be resolved.
@@ -2619,6 +2696,12 @@ export type LocalResolution =
   | { kind: 'ambiguous' }
   | { kind: 'unknown'; reason: string };
 
+/** The volume resolves `key` to `entry` itself (from the service's lstat probe). */
+export function sameFileOnDisk(ctx: PlanContext, key: string, entry: LocalEntry): boolean {
+  const probe = ctx.input.onDisk.get(key);
+  return probe?.kind === 'file' && probe.ino === entry.ino;
+}
+
 /** Spec §6.1. */
 export function resolveLocal(ctx: PlanContext, key: string): LocalResolution {
   const exact = ctx.localByKey.get(key);
@@ -2626,7 +2709,9 @@ export function resolveLocal(ctx: PlanContext, key: string): LocalResolution {
   const folded = ctx.localByFold.get(foldKey(key)) ?? [];
   if (folded.length > 0) {
     const [only] = folded;
-    if (ctx.ci && folded.length === 1 && only) {
+    // A fold-only match counts as the same file only when the volume agrees: lstat(key)
+    // must hit exactly that inode (protects against any fold/APFS mismatch).
+    if (ctx.ci && folded.length === 1 && only && sameFileOnDisk(ctx, key, only)) {
       return { kind: 'present', entry: only, renamedCase: true };
     }
     return { kind: 'ambiguous' };
@@ -2711,6 +2796,26 @@ export function remoteState(
     changed: entry.size !== record.remoteSize || entry.modifiedTime !== record.remoteModifiedTime,
     weak: true,
   };
+}
+
+/**
+ * Keys the service must `lstat` before planning (`PlanInput.onDisk`): record keys without
+ * an exact scan match, and Drive/selected keys that match a local file only by fold.
+ */
+export function onDiskProbeKeys(
+  input: Pick<PlanInput, 'pair' | 'records' | 'local' | 'remote'>,
+): string[] {
+  const exact = new Set(input.local.entries.map((e) => e.key));
+  const folds = new Set(input.local.entries.map((e) => e.foldKey));
+  const keys = new Set<string>();
+  for (const r of input.records) if (!exact.has(r.path)) keys.add(r.path);
+  for (const r of input.remote.entries) {
+    if (!exact.has(r.key) && folds.has(r.foldKey)) keys.add(r.key);
+  }
+  for (const k of input.pair.selection) {
+    if (!exact.has(k) && folds.has(foldKey(k))) keys.add(k);
+  }
+  return [...keys].sort();
 }
 
 /**
@@ -3048,7 +3153,11 @@ describe('review regressions', () => {
   it('a local ß → SS rename is the same file (no trash-remote)', () => {
     const k = record('r1', 'straße.pdf');
     const result = run(
-      { local: [localEntry('STRASSE.pdf')], remote: [remoteEntry('r1', 'straße.pdf')] },
+      {
+        local: [localEntry('STRASSE.pdf')],
+        remote: [remoteEntry('r1', 'straße.pdf')],
+        onDisk: [['straße.pdf', { kind: 'file', ino: 1 }]],
+      },
       k,
     );
     expect(result.actions.map((a) => [a.kind, a.local?.name])).toEqual([
@@ -3068,7 +3177,11 @@ describe('review regressions', () => {
   it('renamed-case needs no refresh when localName already matches', () => {
     const k = record('r1', 'Report.pdf', { localName: 'report.pdf' });
     const result = run(
-      { local: [localEntry('report.pdf')], remote: [remoteEntry('r1', 'Report.pdf')] },
+      {
+        local: [localEntry('report.pdf')],
+        remote: [remoteEntry('r1', 'Report.pdf')],
+        onDisk: [['Report.pdf', { kind: 'file', ino: 1 }]],
+      },
       k,
     );
     expect(result).toMatchObject({ actions: [], notes: [] });
@@ -3519,7 +3632,11 @@ describe('untracked keys (spec §6.5)', () => {
   });
 
   it('U7 new Drive file colliding with a local file → collision', () => {
-    const result = run({ remote: [remoteEntry('n1', 'a.pdf')], local: [localEntry('A.pdf')] });
+    const result = run({
+      remote: [remoteEntry('n1', 'a.pdf')],
+      local: [localEntry('A.pdf')],
+      onDisk: [['a.pdf', { kind: 'file', ino: 1 }]],
+    });
     expect(result.actions).toEqual([]);
     expect(result.notes[0]).toMatchObject({ code: 'collision', rule: 'U7', remoteId: 'n1' });
   });
@@ -3588,12 +3705,24 @@ describe('case and normalization across sides', () => {
       local: [localEntry('Report.pdf')],
       remote: [remoteEntry('n1', 'report.pdf', { md5: 'm' })],
       md5s: [['Report.pdf', 'm']],
+      onDisk: [['report.pdf', { kind: 'file', ino: 1 }]],
     });
     expect(result.actions[0]).toMatchObject({
       kind: 'adopt',
       key: 'report.pdf',
       selection: { remove: ['Report.pdf'], add: ['report.pdf'] },
     });
+  });
+
+  it('Report.pdf vs report.pdf without the volume confirming the match is ambiguous', () => {
+    const result = run({
+      selection: ['Report.pdf'],
+      local: [localEntry('Report.pdf')],
+      remote: [remoteEntry('n1', 'report.pdf', { md5: 'm' })],
+      md5s: [['Report.pdf', 'm']],
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes.map((n) => n.code)).toEqual(['ambiguous', 'ambiguous']);
   });
 
   it('Report.pdf vs report.pdf on a case-sensitive volume is ambiguous', () => {
@@ -3664,7 +3793,14 @@ describe('review regressions', () => {
 
 ```ts
 import { baseName, foldKey, parentKey } from './paths.js';
-import { isBlocked, isExcluded, isOccupied, isUnknownKey, type PlanContext } from './resolve.js';
+import {
+  isBlocked,
+  isExcluded,
+  isOccupied,
+  isUnknownKey,
+  sameFileOnDisk,
+  type PlanContext,
+} from './resolve.js';
 import type { Action, Candidate, LocalEntry, Note, RemoteEntry, SelectionChange } from './types.js';
 
 export const CANDIDATE_CAP = 200;
@@ -3782,10 +3918,14 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
         note('collision', 'U7', 'a local folder or special file uses this path', R.key, R.id);
       continue;
     }
-    // Case-sensitive volume: fold-only matches across sides are ambiguous (spec §6.1 step 2).
-    if (!ctx.ci) {
-      const exact = new Set([sel, L?.key, R?.key].filter((k): k is string => k !== undefined));
-      if (exact.size > 1) {
+    // Fold-only matches across sides (spec §6.1 step 2): ambiguous on a case-sensitive
+    // volume; on a case-insensitive one only when the volume itself maps the other spelling
+    // onto the local file (lstat hits the same inode) — never on our fold alone.
+    const exact = new Set([sel, L?.key, R?.key].filter((k): k is string => k !== undefined));
+    if (exact.size > 1) {
+      const agreed =
+        ctx.ci && (!L || [...exact].every((k) => k === L.key || sameFileOnDisk(ctx, k, L)));
+      if (!agreed) {
         for (const p of [...exact].sort())
           note('ambiguous', 'ambiguous', 'names differ only in case', p);
         continue;
@@ -4083,6 +4223,7 @@ describe('regressions (spec §11, Phase A)', () => {
         records: [k],
         local: [localEntry('report.pdf')],
         remote: [remoteEntry('r1', 'Report.pdf')],
+        onDisk: [['Report.pdf', { kind: 'file', ino: 1 }]],
       }),
     );
     expect(ci.actions.map((a) => [a.kind, a.local?.name])).toEqual([['refresh', 'report.pdf']]);
@@ -4124,6 +4265,36 @@ describe('regressions (spec §11, Phase A)', () => {
     );
     expect(p.actions).toEqual([]);
     expect(p.notes[0]).toMatchObject({ code: 'unknown-state' });
+  });
+
+  it('P5: Turkish ılık.pdf is not the deleted ilik.pdf (no upload of unrelated content)', () => {
+    const k = record('r1', 'ilik.pdf');
+    const p = plan(
+      planInput({
+        pair: { lastAppliedRunAt: null },
+        records: [k],
+        local: [localEntry('ılık.pdf', { ino: 9 })],
+        remote: [remoteEntry('r1', 'ilik.pdf')],
+      }),
+    );
+    expect(p.actions.map((a) => [a.kind, a.key])).toEqual([['trash-remote', 'ilik.pdf']]);
+    expect(p.candidates.local.map((c) => c.path)).toEqual(['ılık.pdf']);
+    expect(p.actions.some((a) => a.kind === 'update-remote' || a.kind === 'conflict')).toBe(false);
+  });
+
+  it('a fold match the volume does not confirm is ambiguous, never written over', () => {
+    const k = record('r1', 'Report.pdf', { localMd5: 'old' });
+    const p = plan(
+      planInput({
+        records: [k],
+        local: [localEntry('report.pdf', { size: 99 })],
+        remote: [remoteEntry('r1', 'Report.pdf', { md5: 'old' })],
+        md5s: [['report.pdf', 'unrelated']],
+        onDisk: [['Report.pdf', { kind: 'file', ino: 2 }]],
+      }),
+    );
+    expect(p.actions).toEqual([]);
+    expect(p.notes.map((n) => n.code)).toEqual(['ambiguous']);
   });
 
   it('a remote-only record (Phase B data) is never trashed in Phase A', () => {
@@ -5356,6 +5527,28 @@ describe('Executor (review regressions)', () => {
     expect(drive.updateFile).not.toHaveBeenCalled();
   });
 
+  it('pages through the parent folder listing when ensuring a folder', async () => {
+    const l = await put('sub/a.pdf', 'hello');
+    drive.listFiles
+      .mockResolvedValueOnce({ files: [{ id: 'X', name: 'other' }], nextPageToken: 'p2' })
+      .mockResolvedValueOnce({ files: [{ id: 'F-sub', name: 'sub' }] });
+    drive.createFile.mockResolvedValueOnce({
+      id: 'n1',
+      name: 'a.pdf',
+      parents: ['F-sub'],
+      md5Checksum: md5('hello'),
+    });
+    await executor(pairFile([], ['sub/a.pdf'])).run([
+      action('upload-new', 'sub/a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(drive.listFiles.mock.calls[1]?.[0].pageToken).toBe('p2');
+    expect(drive.createFile).toHaveBeenCalledTimes(1);
+    expect(drive.createFile.mock.calls[0]?.[0].requestBody).toEqual({
+      name: 'a.pdf',
+      parents: ['F-sub'],
+    });
+  });
+
   it('reuses a Drive folder whose name differs only in case (case-insensitive volume)', async () => {
     const l = await put('docs/a.pdf', 'hello');
     drive.listFiles.mockResolvedValueOnce({ files: [{ id: 'F-Docs', name: 'Docs' }] });
@@ -5726,11 +5919,21 @@ export class Executor {
   /** Reuses exactly one non-trashed same-name folder; several → refuse (spec §4). */
   private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
     const q = `'${escapeQueryValue(parentId)}' in parents and trashed = false and mimeType = '${GOOGLE_MIME.folder}'`;
-    const list = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
-      ctx.drive.listFiles({ q, pageSize: 1000, fields: 'files(id, name)' }),
-    );
-    // Same fold on a case-insensitive volume (a local `docs/` maps onto Drive `Docs/`).
-    const same = (list.files ?? []).filter((f) =>
+    const folders: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const page = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
+        ctx.drive.listFiles({
+          q,
+          pageSize: 1000,
+          ...(pageToken ? { pageToken } : {}),
+          fields: 'nextPageToken, files(id, name)',
+        }),
+      );
+      folders.push(...(page.files ?? []));
+      pageToken = page.nextPageToken ?? undefined;
+    } while (pageToken);
+    const same = folders.filter((f) =>
       this.pair.caseInsensitive
         ? foldKey(f.name ?? '') === foldKey(name)
         : (f.name ?? '').normalize('NFC') === name.normalize('NFC'),
@@ -7622,12 +7825,11 @@ Append these methods at the end of the `SyncService` class (after `select`):
     const { pair, records } = file;
     const { local, remote } = await this.scanBoth(pair);
     if (apply) await this.removeStaleParts(pair, local);
-    // §6.1 step 4: a record key without an exact scan match may still exist on disk
-    // (through a symlinked parent, or under a name the volume folds differently).
-    const scanned = new Set(local.entries.map((e) => e.key));
+    // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
+    // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
     const onDisk = await probeOnDisk(
       pair.localDir,
-      records.map((r) => r.path).filter((k) => !scanned.has(k)),
+      onDiskProbeKeys({ pair, records, local, remote }),
     );
     const base = { pair, records, local, remote, probes: new Map(), onDisk };
     const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
