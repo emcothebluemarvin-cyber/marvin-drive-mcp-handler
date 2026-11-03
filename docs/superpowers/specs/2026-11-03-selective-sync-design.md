@@ -63,7 +63,7 @@ record {                      // one per tracked Drive file, keyed by remoteId
 
 **Root identity marker:** `sync_create_pair` writes `<localDir>/.marvin-sync-<name>` containing `pair.id`. (Dot-files are ignored by sync.) Moving the folder elsewhere = remove and recreate the pair (records re-adopt by md5, §6.5 U2).
 
-**Keys:** `key` = NFC relative path. `foldKey` = NFC + Unicode case-fold. Remote names containing `/` or NUL, or a segment longer than 255 UTF-8 bytes, are `unrepresentable` (skipped, reported).
+**Keys:** `key` = NFC relative path. `foldKey` = NFC → `toUpperCase` → `toLowerCase` → NFC (approximates APFS folding incl. `ß`/`SS`, ligatures, final sigma; over-folding only adds ambiguity, never data loss). Whether two names are the same file is ultimately decided by the filesystem: an on-disk `lstat` inode equal to a scanned entry ⇒ same file. Remote names containing `/` or NUL, or a segment longer than 255 UTF-8 bytes, are `unrepresentable` (skipped, reported).
 
 ## 4. Architecture
 
@@ -95,7 +95,7 @@ Changes to existing code: `DriveAdapter.updateFile` gains optional `media` (same
 4. **Probe** every record whose `remoteId` was not in the remote scan (§6.2).
 5. **Plan** (pure). `planId` = SHA-256 over the canonical list of `(kind, remoteId|key, md5s)` — no generated names or timestamps.
 6. **Dry run** returns the plan; nothing is written (no timestamps updated). **Apply** re-scans and re-plans; if `planId` was passed and differs → abort and return the new plan.
-7. **Brake** (§6.8), **execute** (§7), then set `lastAppliedRunAt`; on the first applied run also set `firstAppliedRunAt` and `remoteBaseline` = ids of **every** untracked remote file seen in this run, whatever its classification (candidate, native-skipped, ambiguous, unrepresentable, ignored), plus `baselineFolders` = ids of remote folders that were unknown subtrees. Files later first seen under a folder in `baselineFolders` (or one of its descendants) are treated as baseline candidates (U5), never adopted.
+7. **Brake** (§6.8), **execute** (§7), then set `lastAppliedRunAt` to the run's scan start time; on the first applied run also set `firstAppliedRunAt` and `remoteBaseline` = ids of **every** untracked remote file seen in this run, whatever its classification (candidate, native-skipped, ambiguous, unrepresentable, ignored), plus `baselineFolders` = ids of remote folders that were unknown subtrees. Files later first seen under a folder in `baselineFolders` (or one of its descendants) are treated as baseline candidates (U5), never adopted.
 
 ## 6. Planner
 
@@ -155,7 +155,7 @@ Candidate keys = selection keys without a record ∪ untracked remote files (by 
 | U5 | Untracked R, key not selected, and (`R.id ∈ remoteBaseline`, or under a `baselineFolders` folder, or `firstAppliedRunAt` null) | `candidate-remote` |
 | U6 | Untracked R, key not selected, not in baseline, first applied run done, no local entry with same `foldKey` | `download-new` + add key to selection (native: `export-new`) |
 | U7 | Same as U6 but a local entry with same `foldKey` exists | `collision` (report; nothing written) |
-| U8 | Unselected L, no untracked R with same `foldKey` | `candidate-local` if mtime > `lastAppliedRunAt` (all on first run); cap 200 |
+| U8 | Unselected L, no untracked R with same `foldKey` | `candidate-local` if max(mtime, ctime) > `lastAppliedRunAt` (all on first run; ctime catches copied/moved-in files whose mtime is preserved); cap 200 |
 
 Duplicate keys on one side (same `foldKey` twice, or two remote files with the same name in one folder) → all involved keys `ambiguous` (report; no action), overriding every rule above.
 
