@@ -1,14 +1,21 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { Readable } from 'node:stream';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { isInvalidGrant } from '../auth/oauth-errors.js';
 import type { DriveContext, DriveRunner } from '../drive/client-factory.js';
 import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
-import { ValidationError } from '../errors.js';
+import { ExportTooLargeError, NotFoundError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import { mapDriveError, statusOf } from './drive-errors.js';
-import { GOOGLE_MIME } from './export-formats.js';
+import { mapDriveError, reasonOf, statusOf } from './drive-errors.js';
+import { resolveDestination, writeUnique } from './destination.js';
+import {
+  GOOGLE_MIME,
+  resolveExport,
+  type ExportFormat,
+  type ExportPlan,
+} from './export-formats.js';
 import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
 import { withRetry, type RetryClass, type RetryOptions } from './retry.js';
 import { googleTargetMime, uploadMimeType } from './upload-mime.js';
@@ -17,6 +24,8 @@ export const SUMMARY_FIELDS = 'id, name, mimeType, size, modifiedTime, parents';
 export const LIST_FIELDS = `nextPageToken, files(${SUMMARY_FIELDS})`;
 export const FILE_FIELDS =
   'id, name, mimeType, size, createdTime, modifiedTime, parents, owners(emailAddress, displayName), webViewLink, trashed, shortcutDetails';
+
+const DOWNLOAD_FIELDS = 'id, name, mimeType, size, webViewLink, shortcutDetails, exportLinks';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
@@ -96,6 +105,18 @@ export interface UploadInput extends AccountInput {
   parentId?: string;
   name?: string;
   convertToGoogle?: boolean;
+}
+
+export interface DownloadInput extends FileRef {
+  destPath?: string;
+  exportFormat?: ExportFormat;
+}
+
+export interface DownloadResult {
+  path: string;
+  size: number;
+  mimeType: string;
+  exportFormat: ExportFormat | null;
 }
 
 export function toSummary(file: DriveFile): FileSummary {
@@ -336,6 +357,59 @@ export class FileService {
       });
       return toSummary(uploaded);
     });
+  }
+
+  download(input: DownloadInput): Promise<DownloadResult> {
+    return this.exec(input.account, 'idempotent', input.fileId, async (ctx) => {
+      let file = await ctx.drive.getFile(input.fileId, DOWNLOAD_FIELDS);
+      if (file.mimeType === GOOGLE_MIME.shortcut) {
+        const targetId = file.shortcutDetails?.targetId;
+        if (!targetId) throw new NotFoundError(input.fileId);
+        file = await ctx.drive.getFile(targetId, DOWNLOAD_FIELDS);
+      }
+      const fileId = file.id ?? input.fileId;
+      const mimeType = file.mimeType ?? 'application/octet-stream';
+      const plan = resolveExport(mimeType, input.exportFormat);
+
+      const destination = await resolveDestination({
+        ...(input.destPath !== undefined ? { destPath: input.destPath } : {}),
+        defaultDir: this.deps.downloadsDir,
+        driveName: file.name ?? '',
+        fileId,
+        ...(plan ? { extension: plan.extension } : {}),
+      });
+      const written = await writeUnique(destination, () =>
+        plan ? this.openExport(ctx, fileId, plan, file) : ctx.drive.downloadMedia(fileId),
+      );
+      return {
+        path: written.path,
+        size: written.size,
+        mimeType,
+        exportFormat: plan?.format ?? null,
+      };
+    });
+  }
+
+  private async openExport(
+    ctx: DriveContext,
+    fileId: string,
+    plan: ExportPlan,
+    file: DriveFile,
+  ): Promise<Readable> {
+    try {
+      return await ctx.drive.exportMedia(fileId, plan.mimeType);
+    } catch (err) {
+      if (reasonOf(err) !== 'exportSizeLimitExceeded') throw err;
+      const link = file.exportLinks?.[plan.mimeType];
+      if (link) {
+        try {
+          return await ctx.drive.fetchExportLink(link);
+        } catch (fallbackErr) {
+          this.log.warn('exportLinks fallback failed', { fileId, error: fallbackErr });
+        }
+      }
+      throw new ExportTooLargeError(file.webViewLink ?? null, { cause: err });
+    }
   }
 
   /** Runs `operation` for an account with retry + error mapping (invalid_grant passes through). */
