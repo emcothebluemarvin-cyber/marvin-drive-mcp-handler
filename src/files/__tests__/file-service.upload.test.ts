@@ -85,6 +85,27 @@ describe('upload', () => {
     });
   });
 
+  it('omits the not-yet-computed size Drive reports for a freshly converted file', async () => {
+    const local = path.join(dir, 'notes.md');
+    await writeFile(local, '# hi');
+    drive.createFile.mockResolvedValueOnce({
+      id: 'u4',
+      name: 'notes',
+      mimeType: GOOGLE_MIME.document,
+      size: '1',
+    });
+    const res = await service.upload({ localPath: local, convertToGoogle: true });
+    expect(res).toEqual({ id: 'u4', name: 'notes', mimeType: GOOGLE_MIME.document });
+  });
+
+  it('keeps the size of a binary upload', async () => {
+    const local = path.join(dir, 'b.txt');
+    await writeFile(local, 'hello');
+    drive.createFile.mockResolvedValueOnce({ id: 'u5', mimeType: 'text/plain', size: '5' });
+    const res = await service.upload({ localPath: local });
+    expect(res.size).toBe(5);
+  });
+
   it('validates the local path and conversion before calling Drive', async () => {
     await expect(service.upload({ localPath: path.join(dir, 'missing.txt') })).rejects.toThrow(
       ValidationError,

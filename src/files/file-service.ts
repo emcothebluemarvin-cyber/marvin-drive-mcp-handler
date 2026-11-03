@@ -12,6 +12,7 @@ import { mapDriveError, reasonOf, statusOf } from './drive-errors.js';
 import { expandHome, resolveDestination, writeUnique } from './destination.js';
 import {
   GOOGLE_MIME,
+  isGoogleNative,
   resolveExport,
   type ExportFormat,
   type ExportPlan,
@@ -128,6 +129,17 @@ export function toSummary(file: DriveFile): FileSummary {
     ...(file.modifiedTime ? { modifiedTime: file.modifiedTime } : {}),
     ...(file.parents ? { parents: file.parents } : {}),
   };
+}
+
+/**
+ * Summary for a file Drive has just created (upload, copy). For Google-native
+ * files Drive fills `size` lazily with storage bytes and returns a placeholder
+ * (e.g. "1") in the create response, so it is dropped rather than reported.
+ */
+function toCreatedSummary(file: DriveFile): FileSummary {
+  const summary = toSummary(file);
+  if (isGoogleNative(summary.mimeType)) delete summary.size;
+  return summary;
 }
 
 function toListResult(list: DriveFileList): ListResult {
@@ -265,7 +277,7 @@ export class FileService {
         sourceId: input.fileId,
         parentId: input.parentId ?? null,
       });
-      return toSummary(copied);
+      return toCreatedSummary(copied);
     });
   }
 
@@ -359,7 +371,7 @@ export class FileService {
         size,
         converted: convert,
       });
-      return toSummary(uploaded);
+      return toCreatedSummary(uploaded);
     });
   }
 
