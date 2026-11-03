@@ -3,11 +3,13 @@ import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Auth } from 'googleapis';
 import { AppError, AuthFlowError } from '../errors.js';
+import { logger } from '../logger.js';
 import { CALLBACK_PAGE_HEADERS, renderCallbackPage, type CallbackPage } from './callback-page.js';
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 export const OAUTH_SCOPES = [DRIVE_SCOPE, 'openid', 'email'] as const;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_FINISH_TIMEOUT_MS = 60_000;
 
 /** The subset of Auth.OAuth2Client used by the login flow (injectable for tests). */
 export interface OAuthFlowClient {
@@ -29,6 +31,8 @@ export interface LoginFlowOptions {
   openUrl: (url: string) => Promise<void>;
   print: (message: string) => void;
   timeoutMs?: number;
+  /** Deadline for the token exchange + verification after the browser returned (default 60 s). */
+  finishTimeoutMs?: number;
   createClient?: (redirectUri: string) => OAuthFlowClient;
   /**
    * Runs after Google verified the account, before the browser is answered — e.g. saving the
@@ -42,11 +46,45 @@ export interface LoginResult {
   refreshToken: string;
 }
 
-/** Writes a callback page and resolves once the response has been flushed. */
+/**
+ * Writes a callback page. Resolves once it is flushed — or as soon as the browser is gone
+ * (closed tab): Node never calls the `end` callback on a destroyed socket, so 'close' also settles.
+ * Never throws and never writes twice.
+ */
 function sendPage(res: ServerResponse, status: number, page: CallbackPage): Promise<void> {
   return new Promise((resolve) => {
-    res.writeHead(status, CALLBACK_PAGE_HEADERS).end(renderCallbackPage(page), () => resolve());
+    if (res.destroyed || res.headersSent) {
+      resolve();
+      return;
+    }
+    res.once('close', () => resolve());
+    try {
+      res.writeHead(status, CALLBACK_PAGE_HEADERS).end(renderCallbackPage(page), () => resolve());
+    } catch (err) {
+      logger.warn('Could not send the login result page', { error: err });
+      resolve();
+    }
   });
+}
+
+/** Rejects with AuthFlowError if `work` does not settle within `ms`. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new AuthFlowError(
+          `Login did not finish within ${Math.round(ms / 1000)} s while contacting Google. Check your connection and try again.`,
+        ),
+      );
+    }, ms);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 interface Callback {
@@ -177,7 +215,11 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
 
     const { code, respond } = await callbackPromise;
     try {
-      const result = await exchangeAndVerify(client, code, codeVerifier, opts.clientId);
+      // Network calls get a deadline; onVerified (local save) is not raced, to avoid half-saves.
+      const result = await withDeadline(
+        exchangeAndVerify(client, code, codeVerifier, opts.clientId),
+        opts.finishTimeoutMs ?? DEFAULT_FINISH_TIMEOUT_MS,
+      );
       await opts.onVerified?.(result);
       await respond(200, { kind: 'success', email: result.email });
       return result;

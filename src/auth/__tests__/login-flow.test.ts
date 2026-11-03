@@ -359,4 +359,50 @@ describe('runLoginFlow', () => {
       await vi.waitFor(() => expect(csp).toContain("default-src 'none'"));
     });
   });
+  describe('robustness while the browser waits', () => {
+    it('finishes even if the browser tab is closed before the answer', async () => {
+      let tokenRequested = false;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const h = harness({
+        getToken: async () => {
+          tokenRequested = true;
+          await gate;
+          return { tokens: { refresh_token: 'rt-1', id_token: 'id-token' } };
+        },
+      });
+      const result = await runLoginFlow({
+        ...base,
+        createClient: h.create,
+        openUrl: async (url) => {
+          const state = new URL(url).searchParams.get('state') ?? '';
+          const controller = new AbortController();
+          const pending = fetch(`${h.redirect()}/?code=abc&state=${state}`, {
+            signal: controller.signal,
+          }).catch(() => undefined);
+          await vi.waitFor(() => expect(tokenRequested).toBe(true));
+          controller.abort(); // user closes the tab while we exchange the code
+          await pending;
+          release();
+        },
+      });
+      expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
+    });
+
+    it('gives up on a hung token exchange and shows the failure page', async () => {
+      const h = harness({ getToken: () => new Promise(() => {}) });
+      const seen: Seen = { status: 0, html: '' };
+      await expect(
+        runLoginFlow({
+          ...base,
+          createClient: h.create,
+          finishTimeoutMs: 50,
+          openUrl: capturingBrowser(h, (s) => `code=abc&state=${s}`, seen),
+        }),
+      ).rejects.toThrow(/did not finish/);
+      await vi.waitFor(() => expect(seen.html).toContain('did not finish'));
+    });
+  });
 });
