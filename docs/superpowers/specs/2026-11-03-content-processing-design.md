@@ -1,7 +1,7 @@
 # Marvin Drive — Content Processing Design (Sub-project 4)
 
 - **Date:** 2026-11-03
-- **Status:** Approved in brainstorming; spec review round 1 issues addressed
+- **Status:** Approved in brainstorming; spec review approved (round 2)
 - **Scope:** Sub-project 4 of 5 — read and edit Google Docs, Sheets and Slides in place
 - **Builds on:** `2026-11-03-drive-mcp-mvp-design.md` (sub-projects 1–3)
 
@@ -32,7 +32,7 @@ src/drive/
   sheets-adapter.ts     thin wrapper: get(spreadsheetId, fields), values.get/update/append, batchUpdate
   slides-adapter.ts     thin wrapper: get(presentationId, fields), batchUpdate(presentationId, requests, writeControl)
 src/core/
-  operation.ts          OperationRunner: exec(account, retryClass, target, fn) + audit(); extracted from FileService
+  operation.ts          OperationRunner: exec(account, kind, target, fn, meta?: { api, name }) + audit(); extracted from FileService
   google-file.ts        resolveGoogleFile(ctx, fileId, expectedMime): shortcut resolution + type check
 src/content/
   docs-service.ts       read (markdown | structure), replaceText, insertText, batchUpdate
@@ -76,6 +76,7 @@ Every tool takes the optional `account` (alias or email), like the MVP tools. `f
 - **`end`:** inserts at `body.content[last].endIndex - 1` (before the final newline Docs requires).
 - **`index`:** passed through; out-of-range errors come back as Google's 400 message.
 - `insertText` is plain text; formatting is done via `docs_batch_update`.
+- **Paragraph style:** in `afterHeading` mode, the same `batchUpdate` adds `updateParagraphStyle { namedStyleType: NORMAL_TEXT }` over the inserted range, because inserted text otherwise inherits the style of the paragraph it lands in (the heading itself in the last-paragraph case, or a following heading in an empty section). `end` and `index` modes leave styles as Docs applies them.
 - **Implicit guard:** `end` and `afterHeading` compute the index from a `documents.get`. If the caller gave no `requiredRevisionId`, that read's `revisionId` is used as the guard, so a concurrent edit between read and write produces `ConflictError` instead of text at a wrong index. `index` mode does no read and is guarded only when the caller passes `requiredRevisionId`.
 - `replaceAllText` replies may omit `occurrencesChanged` when it is 0; the tool reports `0`.
 - **Tabs:** Docs tools address the document's first tab (`documents.get` without `includeTabsContent`, `batchUpdate` without `tabId`). The Markdown export may include all tabs, so on multi-tab documents `markdown` and `structure` can differ. Tool descriptions state "first tab only for structure and edits".
@@ -127,7 +128,7 @@ Docs and Slides `batchUpdate` responses carry `writeControl.requiredRevisionId`;
 
 ## 5. Error handling
 
-`mapDriveError` is reused for all four APIs. `MapContext` changes from `{ target, alias, logger, createOp? }` to `{ target, alias, logger, kind: 'read' | 'create' | 'mutate', api?: 'drive' | 'docs' | 'sheets' | 'slides' (default 'drive'), name?: string }`; `OperationRunner.exec` fills `api`/`name` from the pre-flight result.
+`mapDriveError` is reused for all four APIs. `MapContext` changes from `{ target, alias, logger, createOp? }` to `{ target, alias, logger, kind: 'read' | 'create' | 'mutate', api?: 'drive' | 'docs' | 'sheets' | 'slides' (default 'drive'), name?: string }`; `OperationRunner.exec` fills `api`/`name` from the pre-flight result; `name` is optional, so errors raised by the pre-flight `files.get` itself (404, 403, disabled API) name the file by id.
 
 **Reason extraction:** `reasonOf` also reads the newer Google error format used by Docs/Sheets/Slides — `response.data.error.details[]` entries with `@type` `type.googleapis.com/google.rpc.ErrorInfo` — returning their `reason` when no legacy `errors[0].reason` exists.
 
@@ -136,7 +137,7 @@ Additions (checked **before** the existing 403 switch, so a disabled API is not 
 | Error | Trigger | Message to MCP client |
 |---|---|---|
 | `ConflictError` (new) | `api` is `docs`/`slides` and HTTP 400 whose message mentions the required revision ID (`writeControl` mismatch or an expired revision — Docs revision IDs are valid for roughly 24 h) | "`<name>` changed since it was read (or the revisionId expired); re-read it with `docs_read` / `slides_read` (chosen by `api`) and retry with the new revisionId." |
-| `ApiDisabledError` (new) | HTTP 403 with reason `accessNotConfigured` or `SERVICE_DISABLED`, or (fallback) a 403 message matching `/has not been used in project|is disabled/` | "The Google `<Docs/Sheets/Slides/Drive>` API (from `api`) is not enabled for this OAuth project. Enable it in Cloud Console → APIs & Services, then retry." |
+| `ApiDisabledError` (new) | HTTP 403 with reason `accessNotConfigured` or `SERVICE_DISABLED`, or (fallback) a 403 message matching `/API has not been used in project|API .* is disabled/` | "The Google `<Docs/Sheets/Slides/Drive>` API (from `api`) is not enabled for this OAuth project. Enable it in Cloud Console → APIs & Services, then retry." |
 | `ValidationError` | Wrong file type (pre-flight), unknown heading, non-text element for `slides_set_text`, zod failures | Specific message as described in §4 |
 | `DriveApiError` | Other 400s from content APIs (bad A1 range, invalid batch request) | Prefix names the API (`Google Sheets API error (400): …`; constructor gains an optional API label, default keeps the existing `Drive API error` text). Google's message is scrubbed and capped at 500 chars when `api` ≠ `drive` (these messages are the actionable part); the 200-char cap for Drive is unchanged |
 | Existing | 404, 403 permission, 429, reauth | Unchanged MVP behaviour |
@@ -167,7 +168,7 @@ The exact wording Google uses for a revision mismatch is confirmed by the E2E te
 ## 7. Testing
 
 - **Unit — services (Vitest, fake adapters extending `fakes.ts`):** pre-flight type check + shortcut resolution; `afterHeading` (incl. heading-as-last-paragraph and in-table headings ignored) / `end` / `index` index computation; implicit guard used when no `requiredRevisionId`; `null` → `""` mapping; revisionId ordering (`documents.get` before export); truncation boundaries and `nextOffset`; `slides_set_text` request building (empty vs non-empty shape, non-text element, missing objectId); Sheets `render`/`input` mapping and `maxCells` row truncation; retry class per tool (`mutate` never retries 5xx); audit details contain no content.
-- **Unit — pure functions:** `docs-structure.ts` and `slides-text.ts` against JSON fixtures captured from the demo Doc and Slides deck (`src/content/__tests__/fixtures/`), golden-string assertions; revision-mismatch matcher; `mapGoogleError` additions.
+- **Unit — pure functions:** `docs-structure.ts` and `slides-text.ts` against JSON fixtures captured from the demo Doc and Slides deck (`src/content/__tests__/fixtures/`), golden-string assertions; revision-mismatch matcher; `mapDriveError` additions.
 - **Refactor safety:** after `OperationRunner` is extracted (and before any new tool is added) the existing 205 tests pass; allowed test changes are construction/fakes and `createOp` → `kind` in `drive-errors.test.ts`.
 - **Error mapping:** `reasonOf` on the ErrorInfo format; `SERVICE_DISABLED` → `ApiDisabledError` not `PermissionDeniedError`; conflict matcher only for `docs`/`slides`; API-labelled prefix and 500-char cap only for non-Drive APIs.
 - **MCP integration:** in-memory transport; tool list now 25, schema validation (e.g. `docs_batch_update` without `requiredRevisionId` is rejected), happy paths, `isError` texts for `ConflictError` and `ApiDisabledError`.
