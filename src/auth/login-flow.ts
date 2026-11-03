@@ -4,17 +4,17 @@ import type { AddressInfo } from 'node:net';
 import { Auth } from 'googleapis';
 import { AuthFlowError } from '../errors.js';
 
-export const OAUTH_SCOPES = ['https://www.googleapis.com/auth/drive', 'openid', 'email'] as const;
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+export const OAUTH_SCOPES = [DRIVE_SCOPE, 'openid', 'email'] as const;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** The subset of Auth.OAuth2Client used by the login flow (injectable for tests). */
 export interface OAuthFlowClient {
   generateCodeVerifierAsync(): Promise<{ codeVerifier: string; codeChallenge?: string }>;
   generateAuthUrl(opts: Auth.GenerateAuthUrlOpts): string;
-  getToken(opts: {
-    code: string;
-    codeVerifier?: string;
-  }): Promise<{ tokens: { refresh_token?: string | null; id_token?: string | null } }>;
+  getToken(opts: { code: string; codeVerifier?: string }): Promise<{
+    tokens: { refresh_token?: string | null; id_token?: string | null; scope?: string | null };
+  }>;
   verifyIdToken(opts: {
     idToken: string;
     audience: string;
@@ -136,6 +136,11 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
 
     const code = await codePromise;
     const { tokens } = await client.getToken({ code, codeVerifier });
+    if (tokens.scope && !tokens.scope.split(' ').includes(DRIVE_SCOPE)) {
+      throw new AuthFlowError(
+        'Google Drive access was not granted. Run the login again and tick the "See, edit, create, and delete all of your Google Drive files" checkbox on the consent screen.',
+      );
+    }
     if (!tokens.id_token) throw new AuthFlowError('Google did not return an id_token');
 
     const ticket = await client.verifyIdToken({

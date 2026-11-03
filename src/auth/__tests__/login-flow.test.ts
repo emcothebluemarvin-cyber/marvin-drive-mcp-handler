@@ -3,6 +3,8 @@ import type { Auth } from 'googleapis';
 import { AuthFlowError } from '../../errors.js';
 import { OAUTH_SCOPES, runLoginFlow, type OAuthFlowClient } from '../login-flow.js';
 
+const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive openid email';
+
 interface Harness {
   client: OAuthFlowClient;
   create: (redirectUri: string) => OAuthFlowClient;
@@ -22,7 +24,9 @@ function harness(overrides: Partial<OAuthFlowClient> = {}): Harness {
       urlOpts = opts;
       return `https://accounts.example/auth?state=${String(opts.state)}`;
     },
-    getToken: vi.fn(async () => ({ tokens: { refresh_token: 'rt-1', id_token: 'id-token' } })),
+    getToken: vi.fn(async () => ({
+      tokens: { refresh_token: 'rt-1', id_token: 'id-token', scope: DRIVE_SCOPES },
+    })),
     verifyIdToken: vi.fn(async () => ({
       getPayload: () => ({ email: 'User@Example.com', email_verified: true }),
     })),
@@ -165,6 +169,34 @@ describe('runLoginFlow', () => {
         openUrl: browser(noRefresh, (s) => `code=abc&state=${s}`),
       }),
     ).rejects.toThrow(/refresh token/);
+  });
+
+  it('fails when the Drive scope was not granted', async () => {
+    const h = harness({
+      getToken: async () => ({
+        tokens: { refresh_token: 'rt-1', id_token: 'id-token', scope: 'openid email' },
+      }),
+    });
+    await expect(
+      runLoginFlow({
+        ...base,
+        createClient: h.create,
+        openUrl: browser(h, (s) => `code=abc&state=${s}`),
+      }),
+    ).rejects.toThrow(/Drive access was not granted/);
+  });
+
+  it('does not fail when the token response omits scope', async () => {
+    const h = harness({
+      getToken: async () => ({ tokens: { refresh_token: 'rt-1', id_token: 'id-token' } }),
+    });
+    await expect(
+      runLoginFlow({
+        ...base,
+        createClient: h.create,
+        openUrl: browser(h, (s) => `code=abc&state=${s}`),
+      }),
+    ).resolves.toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
   });
 
   it('prints the auth URL so the user can open it manually', async () => {
