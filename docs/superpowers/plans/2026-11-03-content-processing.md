@@ -15,12 +15,17 @@
 ## Ground rules (read before Task 1)
 
 - Run everything from `/Users/emcomacpro/google-handler`.
-- Quality gate after every task: `npm run check` (typecheck + eslint + prettier check + vitest). It must be fully green before committing. If prettier complains, run `npx prettier --write <files>` and re-run.
+- Quality gate after every task: `npm run check` (typecheck + eslint + prettier check + vitest). It must be fully green — and eslint must stay at **zero warnings** — before committing. The plan's code is not prettier-formatted: run `npx prettier --write <changed files>` before every `npm run check`.
 - Imports use the `.js` suffix (ESM, NodeNext), e.g. `import { x } from './y.js';`.
 - Test helpers live in `src/files/__tests__/fakes.ts`: `createFakeDrive`, `createRunner`, `createAudit`, `noSleep`, `silentLogger`, `httpError`, `ACCOUNT`.
 - Fixtures already committed: `src/content/__tests__/fixtures/demo-doc.json` (Docs `documents.get` with `DOC_FIELDS`), `src/content/__tests__/fixtures/demo-slides.json` (Slides `presentations.get` with `SLIDE_FIELDS`), `tests/e2e/fixtures/deck.pptx`. Load JSON fixtures with `readFileSync` + `JSON.parse` (don't `import` JSON).
 - Live-verified fact: a stale Docs `requiredRevisionId` returns HTTP 400 with message `The required revision ID '<id>' does not match the latest revision.` (reason `badRequest`).
 - Commit messages: Conventional Commits, ending with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push.
+- **Declared refinements vs the spec** (all intentional):
+  - `afterHeading` resets the paragraph style only when the inserted text forms its own paragraph (text ends with `\n`, or the heading is the last paragraph). Restyling text that merges into the next paragraph would turn that paragraph (possibly another heading) into normal text. The tool description says so.
+  - `insertedAt` is the index where the insert happens; in the heading-is-last-paragraph case that is the position of the prepended `\n` (the caller's text starts one later).
+  - `sheets_read_range` also returns `totalRows` (rows available before truncation).
+  - Spec §4.3's `layout=` slide-header field and §4.3's `NotFoundError` for an unknown `objectId` are replaced as described in Tasks 11–12.
 - **Naming refinement vs spec §3:** the operation kind is `'idempotent' | 'create' | 'mutate'` (spec wrote `read`). Same semantics: `idempotent` = retry rate limits + 5xx; `create`/`mutate` = retry rate limits only. Keeping `idempotent` means `FileService` call sites don't change (move/rename/delete are idempotent but not reads).
 
 ## File map
@@ -164,7 +169,7 @@ git commit -m "feat(core): ConflictError, ApiDisabledError and API-labelled Driv
   - change `const ctx = { target: 'file-1', alias: 'emco', logger: silent };` to `const ctx = { target: 'file-1', alias: 'emco', logger: silent, kind: 'idempotent' as const };`
   - change `{ ...ctx, createOp: true }` (in "adds a duplicate hint for failed creates") to `{ ...ctx, kind: 'create' as const }`.
 
-- [ ] **Step 2: Write the failing tests** — append (import `ApiDisabledError`, `ConflictError`, `DriveApiError` from `'../../errors.js'` and `isRevisionMismatch` from `'../drive-errors.js'` alongside existing imports):
+- [ ] **Step 2: Write the failing tests** — append (add `ApiDisabledError`, `ConflictError` to the existing `'../../errors.js'` import — `DriveApiError` is already imported — and `isRevisionMismatch` to the `'../drive-errors.js'` import):
 
 ```ts
 const errorInfo = (status: number, reason: string, message: string): Error =>
@@ -687,7 +692,7 @@ export interface DocsAdapter {
 
 export function createDocsAdapter(auth: Auth.OAuth2Client): DocsAdapter {
   const docs = google.docs({ version: 'v1', auth, retry: false });
-  return {
+  const adapter: DocsAdapter = {
     async getDocument(documentId, fields) {
       return (await docs.documents.get({ documentId, fields })).data;
     },
@@ -702,6 +707,7 @@ export function createDocsAdapter(auth: Auth.OAuth2Client): DocsAdapter {
       return res.data;
     },
   };
+  return adapter;
 }
 ```
 
@@ -728,7 +734,7 @@ export interface SlidesAdapter {
 
 export function createSlidesAdapter(auth: Auth.OAuth2Client): SlidesAdapter {
   const slides = google.slides({ version: 'v1', auth, retry: false });
-  return {
+  const adapter: SlidesAdapter = {
     async getPresentation(presentationId, fields) {
       return (await slides.presentations.get({ presentationId, fields })).data;
     },
@@ -743,6 +749,7 @@ export function createSlidesAdapter(auth: Auth.OAuth2Client): SlidesAdapter {
       return res.data;
     },
   };
+  return adapter;
 }
 ```
 
@@ -782,7 +789,7 @@ export interface SheetsAdapter {
 
 export function createSheetsAdapter(auth: Auth.OAuth2Client): SheetsAdapter {
   const sheets = google.sheets({ version: 'v4', auth, retry: false });
-  return {
+  const adapter: SheetsAdapter = {
     async getSpreadsheet(spreadsheetId, fields) {
       return (await sheets.spreadsheets.get({ spreadsheetId, fields })).data;
     },
@@ -815,10 +822,11 @@ export function createSheetsAdapter(auth: Auth.OAuth2Client): SheetsAdapter {
         .data;
     },
   };
+  return adapter;
 }
 ```
 
-If `tsc` rejects `retry: false` in an options object, mirror `DRIVE_CLIENT_OPTIONS` in `drive-adapter.ts` (`{ version: 'v1', retry: false } as const` spread with `auth`).
+(The typed `const adapter: X = {…}; return adapter;` pattern mirrors `drive-adapter.ts` and keeps eslint's `explicit-function-return-type` at zero warnings.) If `tsc` rejects `retry: false` in an options object, mirror `DRIVE_CLIENT_OPTIONS` in `drive-adapter.ts` (`{ version: 'v1', retry: false } as const` spread with `auth`).
 
 - [ ] **Step 2: Write the adapter smoke test** — `src/drive/__tests__/content-adapters.test.ts` (verifies the request shape sent to googleapis without network, by stubbing the transporter):
 
@@ -1763,7 +1771,7 @@ describe('DocsService.insertText', () => {
       { insertText: { location: { index: 17 }, text: '\nSoon' } },
       {
         updateParagraphStyle: {
-          range: { startIndex: 18, endIndex: 22 },
+          range: { startIndex: 18, endIndex: 23 },
           paragraphStyle: { namedStyleType: 'NORMAL_TEXT' },
           fields: 'namedStyleType',
         },
@@ -1899,7 +1907,9 @@ Methods inside `DocsService`:
       // Heading is the last paragraph: insert before its final newline, starting a new paragraph.
       const index = end - 1;
       const text = `\n${input.text}`;
-      return { index, text, restyle: { startIndex: index + 1, endIndex: index + text.length }, ...base };
+      // +1 also covers the original final newline, so a trailing empty paragraph left by a
+      // caller's "\n" is not left in heading style.
+      return { index, text, restyle: { startIndex: index + 1, endIndex: index + text.length + 1 }, ...base };
     }
     const index = heading.endIndex;
     // Only text ending in "\n" forms its own paragraph; otherwise it merges into the next one,
@@ -2110,7 +2120,7 @@ describe('SheetsService', () => {
     await expect(service.batchUpdate({ fileId: 's1', requests })).resolves.toEqual({
       replies: [{ addSheet: { properties: { sheetId: 9 } } }],
     });
-    expect(audit.entries[0]?.details).toEqual({ requestCount: 1, requestKinds: ['addSheet'] });
+    expect(audit.entries[0]?.details).toEqual({ requestCount: 1, requestKinds: ['addSheet'], guarded: false });
   });
 });
 ```
@@ -2186,6 +2196,7 @@ export interface SheetsBatchInput extends ContentFileRef {
 /** null → "" (the Sheets API skips nulls, leaving the old value); enforces the write cap. */
 function toApiValues(values: WriteCell[][]): CellValue[][] {
   const cells = values.reduce((n, row) => n + row.length, 0);
+  if (cells === 0) throw new ValidationError('values must contain at least one cell');
   if (cells > MAX_WRITE_CELLS) {
     throw new ValidationError(`Too many cells (${cells}); write at most ${MAX_WRITE_CELLS} per call`);
   }
@@ -2296,6 +2307,7 @@ export class SheetsService extends ContentService {
       await this.ops.audit(ctx, 'sheets_batch_update', file, {
         requestCount: input.requests.length,
         requestKinds: requestKinds(input.requests),
+        guarded: false, // the Sheets API has no revision guard
       });
       return { replies: res.replies ?? [] };
     });
@@ -2303,7 +2315,7 @@ export class SheetsService extends ContentService {
 }
 ```
 
-(Sheets has no revision guard, so its audit details have no `guarded` field — spec §6 lists `guarded` only where a guard exists.)
+(Sheets has no revision guard: `sheets_batch_update` audits `guarded: false`; write/append details follow spec §6's Sheets row, which has no `guarded`.)
 
 - [ ] **Step 4: Verify** → PASS; `npm run check` → green.
 
@@ -2803,6 +2815,7 @@ export class SlidesService extends ContentService {
 - [ ] **Step 1: Move code.**
   - `src/mcp/shared.ts`: move `respond`, `account`, `fileId`, `pageSize`, `pageToken` from `server.ts` and export them (same code).
   - `src/mcp/drive-tools.ts`: export `DRIVE_TOOL_NAMES` (the current 12-name `TOOL_NAMES` array, `as const`) and `registerDriveTools(server: McpServer, deps: { files: FileService; auth: Pick<AuthService, 'status'> }, log: Logger): void` containing the 12 `server.registerTool(...)` calls moved verbatim.
+  - Imports — `shared.ts`: `CallToolResult` (`@modelcontextprotocol/sdk/types.js`), `z`, `AppError`, `type Logger`. `drive-tools.ts`: `type McpServer` (`@modelcontextprotocol/sdk/server/mcp.js`), `z`, `EXPORT_FORMATS`, `type FileService`, `type AuthService`, `type Logger`, and `respond, account, fileId, pageSize, pageToken` from `./shared.js`. `server.ts` then drops the imports it no longer uses.
   - `src/mcp/server.ts` keeps `McpDeps` and `createMcpServer`; `TOOL_NAMES = [...DRIVE_TOOL_NAMES] as const` for now; `createMcpServer` creates the server, calls `registerDriveTools(server, deps, log)`, returns it.
 
 - [ ] **Step 2: Verify** — `npm run check` → green with **no test changes** (pure move).
@@ -2950,7 +2963,7 @@ export const SHEETS_TOOL_NAMES = [
 
 const range = z.string().min(1).describe('A1 notation, e.g. "Sheet1!A1:C10" or a tab name');
 const values = z
-  .array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])))
+  .array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).min(1))
   .min(1)
   .describe('Rows of cells (max 10000 cells); null clears a cell');
 const input = z
@@ -3244,13 +3257,13 @@ describe('content MCP tools', () => {
 });
 ```
 
-- [ ] **Step 8: Verify** — `npm run check` → green (TypeScript will flag `src/cli/main.ts` until Task 15; if so, do Task 15 Step 1 now and commit both together).
+- [ ] **Step 8: Wire the app now** — `McpDeps` now requires `docs/sheets/slides`, so `src/cli/main.ts` no longer compiles. Do **Task 15 Steps 1–2** (`app.ts` + `main.ts`) now, then `npm run check` → green.
 
-- [ ] **Step 9: Commit** — `git add src/mcp && git commit -m "feat(mcp): docs, sheets and slides tools (25 total)"`
+- [ ] **Step 9: Commit** — `git add src/mcp src/app.ts src/cli/main.ts && git commit -m "feat(mcp): docs, sheets and slides tools (25 total), wired into serve"`
 
 ### Task 15: Wire services into the app and CLI
 
-**Files:** Modify `src/app.ts`, `src/cli/main.ts`.
+**Files:** Modify `src/app.ts`, `src/cli/main.ts`. (Steps 1–2 were already done in Task 14 Step 8 — just confirm them, then continue at Step 3.)
 
 - [ ] **Step 1: `src/app.ts`** — import the three services; extend `App` with `docs: DocsService; sheets: SheetsService; slides: SlidesService;`; in `buildApp` share one runner and audit sink:
 
@@ -3295,7 +3308,7 @@ await c.close();
 
 Expected: `25 docs_read docs_replace_text docs_insert_text docs_batch_update sheets_info sheets_read_range sheets_write_range sheets_append_rows sheets_batch_update slides_read slides_replace_text slides_set_text slides_batch_update`
 
-- [ ] **Step 5: Commit** — `git add src/app.ts src/cli/main.ts && git commit -m "feat(app): wire content services into buildApp and serve"`
+- [ ] **Step 5:** nothing new to commit unless Step 3–4 required a fix; if so: `git add -A && git commit -m "fix(app): …"`.
 
 ### Task 16: Live E2E
 
