@@ -3,6 +3,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AccountStatusEntry } from '../../auth/auth-service.js';
 import { ReauthRequiredError } from '../../errors.js';
+import { DocsService } from '../../content/docs-service.js';
+import { SheetsService } from '../../content/sheets-service.js';
+import { SlidesService } from '../../content/slides-service.js';
 import { FileService } from '../../files/file-service.js';
 import {
   createAudit,
@@ -12,15 +15,30 @@ import {
   silentLogger,
   type FakeDrive,
 } from '../../files/__tests__/fakes.js';
-import { TOOL_NAMES, createMcpServer } from '../server.js';
+import { TOOL_NAMES, createMcpServer, type McpDeps } from '../server.js';
 
 let drive: FakeDrive;
 let client: Client;
 let statuses: AccountStatusEntry[];
 let verifyArgs: boolean[];
 
+function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides'> {
+  const deps = {
+    runner: createRunner(drive),
+    audit: createAudit(),
+    retry: noSleep,
+    logger: silentLogger(),
+  };
+  return {
+    docs: new DocsService(deps),
+    sheets: new SheetsService(deps),
+    slides: new SlidesService(deps),
+  };
+}
+
 async function connect(files: FileService): Promise<Client> {
   const server = createMcpServer({
+    ...contentServices(),
     files,
     auth: {
       status: async (verify?: boolean) => {
@@ -58,10 +76,10 @@ beforeEach(async () => {
 });
 
 describe('MCP server', () => {
-  it('exposes the 12 tools from the spec', async () => {
+  it('exposes the 25 tools from both specs', async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_NAMES).toHaveLength(12);
+    expect(TOOL_NAMES).toHaveLength(25);
     const list = tools.find((t) => t.name === 'drive_list');
     expect(list?.inputSchema.properties).toHaveProperty('account');
     expect(list?.inputSchema.properties).toHaveProperty('folderId');
@@ -125,6 +143,7 @@ describe('MCP server', () => {
 
   it('hides unexpected error details', async () => {
     const server = createMcpServer({
+      ...contentServices(),
       files: new FileService({
         runner: createRunner(drive),
         audit: createAudit(),

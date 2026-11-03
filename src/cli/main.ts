@@ -71,7 +71,14 @@ program
   .description('Run the MCP server on stdio (used by Claude Code)')
   .action(async () => {
     const app = buildApp();
-    const server = createMcpServer({ files: app.files, auth: app.auth, version: VERSION });
+    const server = createMcpServer({
+      files: app.files,
+      docs: app.docs,
+      sheets: app.sheets,
+      slides: app.slides,
+      auth: app.auth,
+      version: VERSION,
+    });
     await server.connect(new StdioServerTransport());
   });
 
