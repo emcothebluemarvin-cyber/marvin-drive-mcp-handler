@@ -86,7 +86,7 @@ All tools accept an optional `account` (alias or email).
 
 ### Editing safely
 
-Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools such as `docs_insert_text` and `slides_set_text` apply this guard implicitly. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
+Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools (`docs_insert_text` at `end`/`afterHeading`, and `slides_set_text`) apply this guard implicitly using their own read, while `docs_insert_text` at an explicit `index` is guarded only when you pass `requiredRevisionId`. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
 
 ## Files
 
