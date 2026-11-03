@@ -4,22 +4,36 @@ import type {
   SlidesTextContent,
 } from '../drive/slides-adapter.js';
 
-const TEXT = 'text(textElements(textRun(content)))';
+const TEXT = 'text(textElements(textRun(content),autoText(content)))';
+const SHAPE = `shape(shapeType,placeholder(type),${TEXT})`;
 /** Field mask for presentations.get used by slides_read and slides_set_text. */
-export const SLIDE_FIELDS = `presentationId,title,revisionId,slides(objectId,pageElements(objectId,shape(shapeType,placeholder(type),${TEXT}),table(rows,columns,tableRows(tableCells(${TEXT}))),image(contentUrl),line(lineType),elementGroup(children(objectId)),video(id),sheetsChart(spreadsheetId)),slideProperties(notesPage(notesProperties(speakerNotesObjectId),pageElements(objectId,shape(${TEXT})))))`;
+export const SLIDE_FIELDS = `presentationId,title,revisionId,slides(objectId,pageElements(objectId,${SHAPE},table(rows,columns,tableRows(tableCells(${TEXT}))),image(contentUrl),line(lineType),elementGroup(children(objectId,${SHAPE},elementGroup(children(objectId)))),video(id),sheetsChart(spreadsheetId)),slideProperties(notesPage(notesProperties(speakerNotesObjectId),pageElements(objectId,shape(${TEXT})))))`;
 
 const MAX_TEXT = 300;
+const MAX_CELL = 100;
 
 /** Plain text of a shape/cell, without the trailing newline Slides always keeps. */
 export function shapeText(text: SlidesTextContent | undefined): string {
   return (text?.textElements ?? [])
-    .map((e) => e.textRun?.content ?? '')
+    .map((e) => e.textRun?.content ?? e.autoText?.content ?? '')
     .join('')
     .replace(/\n$/, '');
 }
 
+/** Cut to at most `max` UTF-16 units without splitting a surrogate pair. */
+function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const last = s.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return `${s.slice(0, end)}…`;
+}
+
 function quote(s: string): string {
-  return JSON.stringify(s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}…` : s);
+  return JSON.stringify(clip(s, MAX_TEXT));
+}
+
+function cellText(s: string): string {
+  return clip(s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ⏎ '), MAX_CELL);
 }
 
 export function elementKind(el: SlidesPageElement): string {
@@ -33,24 +47,25 @@ export function elementKind(el: SlidesPageElement): string {
   return 'element';
 }
 
-function describeElement(el: SlidesPageElement): string {
+function describeElement(el: SlidesPageElement, indent = ''): string {
   const id = el.objectId ?? '?';
   if (el.shape) {
     const kind = el.shape.placeholder?.type ?? el.shape.shapeType ?? 'SHAPE';
     const text = shapeText(el.shape.text);
-    return `- shape ${id} (${kind}): ${text ? quote(text) : '(empty)'}`;
+    return `${indent}- shape ${id} (${kind}): ${text ? quote(text) : '(empty)'}`;
   }
   if (el.table) {
     const rows = (el.table.tableRows ?? []).map(
-      (row) => `| ${(row.tableCells ?? []).map((cell) => shapeText(cell.text)).join(' | ')} |`,
+      (row) =>
+        `| ${(row.tableCells ?? []).map((cell) => cellText(shapeText(cell.text))).join(' | ')} |`,
     );
-    return `- table ${id} ${el.table.rows ?? 0}x${el.table.columns ?? 0}: ${rows.join(' / ')}`;
+    return `${indent}- table ${id} ${el.table.rows ?? 0}x${el.table.columns ?? 0}: ${rows.join(' / ')}`;
   }
   if (el.elementGroup) {
-    const children = (el.elementGroup.children ?? []).map((c) => c.objectId ?? '?');
-    return `- group ${id}: ${children.join(', ')}`;
+    const children = (el.elementGroup.children ?? []).map((c) => describeElement(c, `${indent}  `));
+    return [`${indent}- group ${id}:`, ...children].join('\n');
   }
-  return `- ${elementKind(el)} ${id}`;
+  return `${indent}- ${elementKind(el)} ${id}`;
 }
 
 /** One block per slide: element objectIds with their text, then speaker notes. */
@@ -68,13 +83,22 @@ export function slidesOutline(p: SlidesPresentation): string {
   return blocks.join('\n\n');
 }
 
-/** Top-level page element by objectId (group children are not searched). */
+function search(elements: SlidesPageElement[], objectId: string): SlidesPageElement | undefined {
+  for (const el of elements) {
+    if (el.objectId === objectId) return el;
+    const inner = search(el.elementGroup?.children ?? [], objectId);
+    if (inner) return inner;
+  }
+  return undefined;
+}
+
+/** Page element by objectId, including children of groups. */
 export function findElement(
   p: SlidesPresentation,
   objectId: string,
 ): { slideId: string; element: SlidesPageElement } | undefined {
   for (const slide of p.slides ?? []) {
-    const element = (slide.pageElements ?? []).find((e) => e.objectId === objectId);
+    const element = search(slide.pageElements ?? [], objectId);
     if (element) return { slideId: slide.objectId ?? '', element };
   }
   return undefined;

@@ -160,7 +160,7 @@ describe('SlidesService', () => {
     deck();
     slides.getPresentation.mockResolvedValueOnce(PRESENTATION);
     await expect(service.setText({ fileId: 'p1', objectId: 'zzz', text: 'x' })).rejects.toThrow(
-      'No top-level page element "zzz" in "Deck"; run slides_read to list objectIds.',
+      'No page element "zzz" in "Deck"; run slides_read to list objectIds.',
     );
     deck();
     slides.getPresentation.mockResolvedValueOnce(PRESENTATION);
@@ -191,5 +191,43 @@ describe('SlidesService', () => {
       requestKinds: ['deleteObject'],
       guarded: 'caller',
     });
+  });
+
+  it('setText works on a grouped child', async () => {
+    deck();
+    slides.getPresentation.mockResolvedValueOnce({
+      revisionId: 'rv1',
+      slides: [
+        {
+          objectId: 's1',
+          pageElements: [
+            {
+              objectId: 'g',
+              elementGroup: {
+                children: [
+                  {
+                    objectId: 'kid',
+                    shape: { text: { textElements: [{ textRun: { content: 'Old\n' } }] } },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    slides.batchUpdate.mockResolvedValueOnce({});
+    await service.setText({ fileId: 'p1', objectId: 'kid', text: 'New' });
+    expect(slides.batchUpdate.mock.calls[0]?.[1]).toEqual([
+      { deleteText: { objectId: 'kid', textRange: { type: 'ALL' } } },
+      { insertText: { objectId: 'kid', insertionIndex: 0, text: 'New' } },
+    ]);
+  });
+
+  it('replaceText omits pageObjectIds for an empty slideIds', async () => {
+    deck();
+    slides.batchUpdate.mockResolvedValueOnce({});
+    await service.replaceText({ fileId: 'p1', find: 'a', replace: 'b', slideIds: [] });
+    expect(JSON.stringify(slides.batchUpdate.mock.calls[0]?.[1])).not.toContain('pageObjectIds');
   });
 });

@@ -3,7 +3,7 @@ import { ValidationError } from '../errors.js';
 import { ContentService, requestKinds, type ContentFileRef } from './content-service.js';
 
 const INFO_FIELDS =
-  'spreadsheetId,properties(title,locale,timeZone),sheets(properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount)))';
+  'spreadsheetId,properties(title,locale,timeZone),sheets(properties(sheetId,title,index,sheetType,hidden,gridProperties(rowCount,columnCount)))';
 
 export const DEFAULT_MAX_CELLS = 5_000;
 export const MAX_WRITE_CELLS = 10_000;
@@ -24,6 +24,7 @@ export interface SheetTab {
   sheetId: number;
   title: string;
   index: number;
+  sheetType: string;
   rowCount: number;
   columnCount: number;
   hidden: boolean;
@@ -85,14 +86,17 @@ export class SheetsService extends ContentService {
         name: s.properties?.title ?? file.name,
         locale: s.properties?.locale ?? null,
         timeZone: s.properties?.timeZone ?? null,
-        sheets: (s.sheets ?? []).map((sh) => ({
-          sheetId: sh.properties?.sheetId ?? 0,
-          title: sh.properties?.title ?? '',
-          index: sh.properties?.index ?? 0,
-          rowCount: sh.properties?.gridProperties?.rowCount ?? 0,
-          columnCount: sh.properties?.gridProperties?.columnCount ?? 0,
-          hidden: sh.properties?.hidden ?? false,
-        })),
+        sheets: (s.sheets ?? [])
+          .filter((sh) => typeof sh.properties?.sheetId === 'number')
+          .map((sh) => ({
+            sheetId: sh.properties?.sheetId ?? 0,
+            title: sh.properties?.title ?? '',
+            index: sh.properties?.index ?? 0,
+            sheetType: sh.properties?.sheetType ?? 'GRID',
+            rowCount: sh.properties?.gridProperties?.rowCount ?? 0,
+            columnCount: sh.properties?.gridProperties?.columnCount ?? 0,
+            hidden: sh.properties?.hidden ?? false,
+          })),
       };
     });
   }

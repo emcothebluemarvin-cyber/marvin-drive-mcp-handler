@@ -48,11 +48,13 @@ describe('SheetsService', () => {
             gridProperties: { rowCount: 1000, columnCount: 26 },
           },
         },
+        { properties: { title: 'NoId' } },
         {
           properties: {
             sheetId: 7,
             title: 'Hidden',
             index: 1,
+            sheetType: 'OBJECT',
             hidden: true,
             gridProperties: { rowCount: 5, columnCount: 2 },
           },
@@ -65,8 +67,24 @@ describe('SheetsService', () => {
       locale: 'tr_TR',
       timeZone: 'Europe/Istanbul',
       sheets: [
-        { sheetId: 0, title: 'Modüller', index: 0, rowCount: 1000, columnCount: 26, hidden: false },
-        { sheetId: 7, title: 'Hidden', index: 1, rowCount: 5, columnCount: 2, hidden: true },
+        {
+          sheetId: 0,
+          title: 'Modüller',
+          index: 0,
+          sheetType: 'GRID',
+          rowCount: 1000,
+          columnCount: 26,
+          hidden: false,
+        },
+        {
+          sheetId: 7,
+          title: 'Hidden',
+          index: 1,
+          sheetType: 'OBJECT',
+          rowCount: 5,
+          columnCount: 2,
+          hidden: true,
+        },
       ],
     });
   });

@@ -72,7 +72,9 @@ export class SlidesService extends ContentService {
             replaceAllText: {
               containsText: { text: input.find, matchCase },
               replaceText: input.replace,
-              ...(input.slideIds ? { pageObjectIds: input.slideIds } : {}),
+              ...(input.slideIds && input.slideIds.length > 0
+                ? { pageObjectIds: input.slideIds }
+                : {}),
             },
           },
         ],
@@ -99,7 +101,7 @@ export class SlidesService extends ContentService {
     const found = findElement(p, input.objectId);
     if (!found) {
       throw new ValidationError(
-        `No top-level page element "${input.objectId}" in "${file.name}"; run slides_read to list objectIds.`,
+        `No page element "${input.objectId}" in "${file.name}"; run slides_read to list objectIds.`,
       );
     }
     const shape = found.element.shape;
