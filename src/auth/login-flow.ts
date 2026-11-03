@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Auth } from 'googleapis';
-import { AuthFlowError } from '../errors.js';
+import { AppError, AuthFlowError } from '../errors.js';
+import { CALLBACK_PAGE_HEADERS, renderCallbackPage, type CallbackPage } from './callback-page.js';
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 export const OAUTH_SCOPES = [DRIVE_SCOPE, 'openid', 'email'] as const;
@@ -29,6 +30,11 @@ export interface LoginFlowOptions {
   print: (message: string) => void;
   timeoutMs?: number;
   createClient?: (redirectUri: string) => OAuthFlowClient;
+  /**
+   * Runs after Google verified the account, before the browser is answered — e.g. saving the
+   * account. If it throws, the browser shows the failure instead of a success page.
+   */
+  onVerified?: (result: LoginResult) => Promise<void>;
 }
 
 export interface LoginResult {
@@ -36,10 +42,20 @@ export interface LoginResult {
   refreshToken: string;
 }
 
-const PAGE = (text: string): string =>
-  `<!doctype html><meta charset="utf-8"><title>Marvin Drive</title><p>${text}</p>`;
+/** Writes a callback page and resolves once the response has been flushed. */
+function sendPage(res: ServerResponse, status: number, page: CallbackPage): Promise<void> {
+  return new Promise((resolve) => {
+    res.writeHead(status, CALLBACK_PAGE_HEADERS).end(renderCallbackPage(page), () => resolve());
+  });
+}
 
-function waitForCode(server: Server, state: string, timeoutMs: number): Promise<string> {
+interface Callback {
+  code: string;
+  /** Answers the browser request that delivered the code (held open until the login finishes). */
+  respond: (status: number, page: CallbackPage) => Promise<void>;
+}
+
+function waitForCallback(server: Server, state: string, timeoutMs: number): Promise<Callback> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new AuthFlowError(`Login timed out after ${Math.round(timeoutMs / 1000)} s`));
@@ -53,23 +69,22 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
         res.writeHead(404).end();
         return;
       }
-      const reply = (status: number, text: string): void => {
-        res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' }).end(PAGE(text));
-      };
       if (settled) {
-        reply(200, 'This login is already finished. You can close this tab.');
+        void sendPage(res, 200, { kind: 'finished' });
         return;
       }
       const params = url.searchParams;
       if (params.get('state') !== state) {
-        reply(400, 'Invalid or stale login link. Return to the terminal.');
+        void sendPage(res, 400, { kind: 'stale' });
         return;
       }
       const fail = (message: string): void => {
         settled = true;
-        reply(400, 'Login failed. Close this tab and check the terminal.');
         clearTimeout(timer);
-        reject(new AuthFlowError(message));
+        // Reject only after the page is flushed; the caller closes all connections next.
+        void sendPage(res, 400, { kind: 'failure', message }).then(() => {
+          reject(new AuthFlowError(message));
+        });
       };
 
       const error = params.get('error');
@@ -84,11 +99,37 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
       if (!code) return fail('Callback did not include an authorization code');
 
       settled = true;
-      reply(200, 'Login complete. You can close this tab.');
       clearTimeout(timer);
-      resolve(code);
+      resolve({ code, respond: (status, page) => sendPage(res, status, page) });
     });
   });
+}
+
+async function exchangeAndVerify(
+  client: OAuthFlowClient,
+  code: string,
+  codeVerifier: string,
+  clientId: string,
+): Promise<LoginResult> {
+  const { tokens } = await client.getToken({ code, codeVerifier });
+  if (tokens.scope && !tokens.scope.split(' ').includes(DRIVE_SCOPE)) {
+    throw new AuthFlowError(
+      'Google Drive access was not granted. Run the login again and tick the "See, edit, create, and delete all of your Google Drive files" checkbox on the consent screen.',
+    );
+  }
+  if (!tokens.id_token) throw new AuthFlowError('Google did not return an id_token');
+
+  const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: clientId });
+  const payload = ticket.getPayload();
+  if (!payload?.email || payload.email_verified !== true) {
+    throw new AuthFlowError('Google account email is missing or unverified');
+  }
+  if (!tokens.refresh_token) {
+    throw new AuthFlowError(
+      'Google did not return a refresh token. Remove the app at https://myaccount.google.com/permissions and retry.',
+    );
+  }
+  return { email: payload.email.toLowerCase(), refreshToken: tokens.refresh_token };
 }
 
 async function listen(server: Server): Promise<number> {
@@ -117,8 +158,8 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       });
 
     const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
-    const codePromise = waitForCode(server, state, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    codePromise.catch(() => undefined); // awaited below; prevents an unhandled rejection if we throw first
+    const callbackPromise = waitForCallback(server, state, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    callbackPromise.catch(() => undefined); // awaited below; prevents an unhandled rejection if we throw first
 
     const authUrl = client.generateAuthUrl({
       access_type: 'offline',
@@ -134,29 +175,18 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       opts.print('Could not open a browser automatically; use the URL above.');
     });
 
-    const code = await codePromise;
-    const { tokens } = await client.getToken({ code, codeVerifier });
-    if (tokens.scope && !tokens.scope.split(' ').includes(DRIVE_SCOPE)) {
-      throw new AuthFlowError(
-        'Google Drive access was not granted. Run the login again and tick the "See, edit, create, and delete all of your Google Drive files" checkbox on the consent screen.',
-      );
+    const { code, respond } = await callbackPromise;
+    try {
+      const result = await exchangeAndVerify(client, code, codeVerifier, opts.clientId);
+      await opts.onVerified?.(result);
+      await respond(200, { kind: 'success', email: result.email });
+      return result;
+    } catch (err) {
+      const message =
+        err instanceof AppError ? err.message : 'Unexpected error; see the terminal for details.';
+      await respond(400, { kind: 'failure', message });
+      throw err;
     }
-    if (!tokens.id_token) throw new AuthFlowError('Google did not return an id_token');
-
-    const ticket = await client.verifyIdToken({
-      idToken: tokens.id_token,
-      audience: opts.clientId,
-    });
-    const payload = ticket.getPayload();
-    if (!payload?.email || payload.email_verified !== true) {
-      throw new AuthFlowError('Google account email is missing or unverified');
-    }
-    if (!tokens.refresh_token) {
-      throw new AuthFlowError(
-        'Google did not return a refresh token. Remove the app at https://myaccount.google.com/permissions and retry.',
-      );
-    }
-    return { email: payload.email.toLowerCase(), refreshToken: tokens.refresh_token };
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

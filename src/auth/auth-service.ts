@@ -31,7 +31,15 @@ export interface AuthServiceDeps {
   registry: AccountRegistry;
   tokens: TokenStore;
   loadCredentials: () => Promise<ClientCredentials>;
-  login: (opts: { credentials: ClientCredentials; loginHint?: string }) => Promise<LoginResult>;
+  /**
+   * Runs the browser login. Must call `onVerified` after Google verified the account and before
+   * answering the browser, so save errors are shown on the page (see runLoginFlow).
+   */
+  login: (opts: {
+    credentials: ClientCredentials;
+    loginHint?: string;
+    onVerified: (result: LoginResult) => Promise<void>;
+  }) => Promise<LoginResult>;
   newClient?: (credentials: ClientCredentials) => Auth.OAuth2Client;
   logger?: Logger;
 }
@@ -63,31 +71,47 @@ export class AuthService {
       }
     }
     const credentials = await this.deps.loadCredentials();
-    const result = await this.deps.login({ credentials });
-    const record = await this.deps.registry.add({
-      alias: alias ?? defaultAlias(result.email),
-      email: result.email,
+    const outcome: { saved?: AccountRecord } = {};
+    await this.deps.login({
+      credentials,
+      onVerified: async (result) => {
+        const record = await this.deps.registry.add({
+          alias: alias ?? defaultAlias(result.email),
+          email: result.email,
+        });
+        try {
+          await this.deps.tokens.set(record.email, result.refreshToken);
+        } catch (err) {
+          await this.deps.registry.remove(record.alias);
+          throw err;
+        }
+        outcome.saved = record;
+      },
     });
-    try {
-      await this.deps.tokens.set(record.email, result.refreshToken);
-    } catch (err) {
-      await this.deps.registry.remove(record.alias);
-      throw err;
-    }
-    this.reauthNeeded.delete(record.email);
-    return record;
+    const { saved } = outcome;
+    if (!saved) throw new AuthFlowError('Login finished without saving the account');
+    this.reauthNeeded.delete(saved.email);
+    return saved;
   }
 
   async relogin(ref: string): Promise<AccountRecord> {
     const record = await this.deps.registry.resolve(ref);
     const credentials = await this.deps.loadCredentials();
-    const result = await this.deps.login({ credentials, loginHint: record.email });
-    if (result.email !== record.email) {
-      throw new AuthFlowError(
-        `Signed in as ${result.email}, but "${record.alias}" is ${record.email}. Nothing was saved.`,
-      );
-    }
-    await this.deps.tokens.set(record.email, result.refreshToken);
+    const outcome = { saved: false };
+    await this.deps.login({
+      credentials,
+      loginHint: record.email,
+      onVerified: async (result) => {
+        if (result.email !== record.email) {
+          throw new AuthFlowError(
+            `Signed in as ${result.email}, but "${record.alias}" is ${record.email}. Nothing was saved.`,
+          );
+        }
+        await this.deps.tokens.set(record.email, result.refreshToken);
+        outcome.saved = true;
+      },
+    });
+    if (!outcome.saved) throw new AuthFlowError('Login finished without saving the account');
     this.reauthNeeded.delete(record.email);
     return record;
   }

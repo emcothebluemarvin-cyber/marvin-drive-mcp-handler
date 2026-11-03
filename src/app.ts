@@ -22,11 +22,12 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
     registry: new AccountRegistry(paths.accounts),
     tokens: new KeychainTokenStore(),
     loadCredentials: (): Promise<ClientCredentials> => loadClientSecret(paths.clientSecret),
-    login: ({ credentials, loginHint }): Promise<LoginResult> =>
+    login: ({ credentials, loginHint, onVerified }): Promise<LoginResult> =>
       runLoginFlow({
         clientId: credentials.clientId,
         clientSecret: credentials.clientSecret,
         ...(loginHint ? { loginHint } : {}),
+        onVerified,
         openUrl: async (url) => {
           await open(url);
         },

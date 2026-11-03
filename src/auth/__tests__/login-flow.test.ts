@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Auth } from 'googleapis';
-import { AuthFlowError } from '../../errors.js';
+import { AuthFlowError, ValidationError } from '../../errors.js';
 import { OAUTH_SCOPES, runLoginFlow, type OAuthFlowClient } from '../login-flow.js';
 
 const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive openid email';
@@ -48,6 +48,25 @@ function browser(h: Harness, query: (state: string) => string): (url: string) =>
   return async (url) => {
     const state = new URL(url).searchParams.get('state') ?? '';
     await (await fetch(`${h.redirect()}/?${query(state)}`)).text();
+  };
+}
+
+interface Seen {
+  status: number;
+  html: string;
+}
+
+/** Like `browser`, but records what the browser was shown. */
+function capturingBrowser(
+  h: Harness,
+  query: (state: string) => string,
+  seen: Seen,
+): (url: string) => Promise<void> {
+  return async (url) => {
+    const state = new URL(url).searchParams.get('state') ?? '';
+    const res = await fetch(`${h.redirect()}/?${query(state)}`);
+    seen.status = res.status;
+    seen.html = await res.text();
   };
 }
 
@@ -102,30 +121,37 @@ describe('runLoginFlow', () => {
   });
 
   it('answers requests after completion with a neutral 200', async () => {
+    let tokenRequested = false;
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
     const h = harness({
       getToken: async () => {
+        tokenRequested = true;
         await gate; // keep the flow (and server) alive until the late request is done
         return { tokens: { refresh_token: 'rt-1', id_token: 'id-token' } };
       },
     });
     let late = 0;
+    let lateBody = '';
     const result = await runLoginFlow({
       ...base,
       createClient: h.create,
       openUrl: async (url) => {
         const state = new URL(url).searchParams.get('state') ?? '';
-        await (await fetch(`${h.redirect()}/?code=abc&state=${state}`)).text();
+        // The first response is held open until the login finishes, so don't await it yet.
+        const first = fetch(`${h.redirect()}/?code=abc&state=${state}`);
+        await vi.waitFor(() => expect(tokenRequested).toBe(true)); // code reached the server
         const second = await fetch(`${h.redirect()}/?error=access_denied&state=${state}`);
         late = second.status;
-        await second.text();
+        lateBody = await second.text();
         release();
+        await (await first).text();
       },
     });
     expect(late).toBe(200);
+    expect(lateBody).toContain('Already done.');
     expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
   });
 
@@ -209,5 +235,128 @@ describe('runLoginFlow', () => {
       openUrl: browser(h, (s) => `code=abc&state=${s}`),
     });
     expect(print).toHaveBeenCalledWith(expect.stringContaining('https://accounts.example/auth'));
+  });
+  describe('browser page', () => {
+    it('shows the connected account only after verification and onVerified succeed', async () => {
+      const h = harness();
+      const seen: Seen = { status: 0, html: '' };
+      const onVerified = vi.fn(async () => {
+        expect(seen.html).toBe(''); // browser is still waiting
+      });
+      await runLoginFlow({
+        ...base,
+        createClient: h.create,
+        onVerified,
+        openUrl: capturingBrowser(h, (s) => `code=abc&state=${s}`, seen),
+      });
+      await vi.waitFor(() => expect(seen.html).not.toBe(''));
+      expect(onVerified).toHaveBeenCalledWith({ email: 'user@example.com', refreshToken: 'rt-1' });
+      expect(seen.status).toBe(200);
+      expect(seen.html).toContain('Drive connected.');
+      expect(seen.html).toContain('user@example.com');
+    });
+
+    it('explains a missing Drive scope in the browser', async () => {
+      const h = harness({
+        getToken: async () => ({
+          tokens: { refresh_token: 'rt-1', id_token: 'id-token', scope: 'openid email' },
+        }),
+      });
+      const seen: Seen = { status: 0, html: '' };
+      await expect(
+        runLoginFlow({
+          ...base,
+          createClient: h.create,
+          openUrl: capturingBrowser(h, (s) => `code=abc&state=${s}`, seen),
+        }),
+      ).rejects.toThrow(AuthFlowError);
+      await vi.waitFor(() => expect(seen.html).not.toBe(''));
+      expect(seen.status).toBe(400);
+      expect(seen.html).toContain('Couldn’t connect.');
+      expect(seen.html).toContain('Drive access was not granted');
+    });
+
+    it('shows onVerified failures (e.g. account already registered)', async () => {
+      const h = harness();
+      const seen: Seen = { status: 0, html: '' };
+      await expect(
+        runLoginFlow({
+          ...base,
+          createClient: h.create,
+          onVerified: async () => {
+            throw new ValidationError('user@example.com is already registered as "emco"');
+          },
+          openUrl: capturingBrowser(h, (s) => `code=abc&state=${s}`, seen),
+        }),
+      ).rejects.toThrow(ValidationError);
+      await vi.waitFor(() => expect(seen.html).not.toBe(''));
+      expect(seen.html).toContain('already registered as &quot;emco&quot;');
+    });
+
+    it('hides unexpected error details', async () => {
+      const h = harness();
+      const seen: Seen = { status: 0, html: '' };
+      await expect(
+        runLoginFlow({
+          ...base,
+          createClient: h.create,
+          onVerified: async () => {
+            throw new TypeError('internal detail');
+          },
+          openUrl: capturingBrowser(h, (s) => `code=abc&state=${s}`, seen),
+        }),
+      ).rejects.toThrow(TypeError);
+      await vi.waitFor(() => expect(seen.html).not.toBe(''));
+      expect(seen.html).not.toContain('internal detail');
+      expect(seen.html).toContain('see the terminal');
+    });
+
+    it('escapes Google error codes and marks stale links', async () => {
+      const h = harness();
+      const seen: Seen = { status: 0, html: '' };
+      await expect(
+        runLoginFlow({
+          ...base,
+          createClient: h.create,
+          openUrl: capturingBrowser(
+            h,
+            (s) => `error=${encodeURIComponent('<img src=x onerror=alert(1)>')}&state=${s}`,
+            seen,
+          ),
+        }),
+      ).rejects.toThrow(AuthFlowError);
+      await vi.waitFor(() => expect(seen.html).not.toBe(''));
+      expect(seen.html).not.toContain('<img');
+      expect(seen.html).toContain('&lt;img');
+
+      const h2 = harness();
+      const stale: Seen = { status: 0, html: '' };
+      await runLoginFlow({
+        ...base,
+        createClient: h2.create,
+        openUrl: async (url) => {
+          await capturingBrowser(h2, () => 'code=abc&state=evil', stale)(url);
+          await browser(h2, (s) => `code=abc&state=${s}`)(url);
+        },
+      });
+      expect(stale.status).toBe(400);
+      expect(stale.html).toContain('This link has expired.');
+    });
+
+    it('sends a strict content security policy', async () => {
+      const h = harness();
+      let csp: string | null = null;
+      await runLoginFlow({
+        ...base,
+        createClient: h.create,
+        openUrl: async (url) => {
+          const state = new URL(url).searchParams.get('state') ?? '';
+          const res = await fetch(`${h.redirect()}/?code=abc&state=${state}`);
+          csp = res.headers.get('content-security-policy');
+          await res.text();
+        },
+      });
+      await vi.waitFor(() => expect(csp).toContain("default-src 'none'"));
+    });
   });
 });

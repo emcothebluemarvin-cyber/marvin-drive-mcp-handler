@@ -40,18 +40,26 @@ const signIn = (email: string, refreshToken = `rt-${email}`): LoginResult => ({
   refreshToken,
 });
 
+/** Fake login that behaves like runLoginFlow: runs onVerified before "answering the browser". */
+const answer =
+  (result: LoginResult): AuthServiceDeps['login'] =>
+  async (opts) => {
+    await opts.onVerified(result);
+    return result;
+  };
+
 describe('AuthService.addAccount', () => {
   it('registers the account, stores the token, first account is default', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-1')));
     const record = await service.addAccount();
     expect(record).toMatchObject({ alias: 'emco', email: 'emco@example.com' });
     expect(await tokens.get('emco@example.com')).toBe('rt-1');
     expect((await registry.read()).default).toBe('emco');
-    expect(login).toHaveBeenCalledWith({ credentials: CREDS });
+    expect(login).toHaveBeenCalledWith(expect.objectContaining({ credentials: CREDS }));
   });
 
   it('checks an explicit alias before opening the browser', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com')));
     await service.addAccount('emco');
     await expect(service.addAccount('emco')).rejects.toThrow(ValidationError);
     await expect(service.addAccount('Not Valid')).rejects.toThrow(ValidationError);
@@ -59,29 +67,51 @@ describe('AuthService.addAccount', () => {
   });
 
   it('keeps the existing token when the email is already registered', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-old'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-old')));
     await service.addAccount();
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-new'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-new')));
     await expect(service.addAccount('second')).rejects.toThrow(/already registered/);
     expect(await tokens.get('emco@example.com')).toBe('rt-old');
   });
 });
 
+describe('AuthService saves inside the login flow', () => {
+  it('registers the account before the browser is answered', async () => {
+    let savedBeforeAnswer = false;
+    login.mockImplementationOnce(async (opts) => {
+      const result = signIn('emco@example.com', 'rt-1');
+      await opts.onVerified(result);
+      savedBeforeAnswer = (await tokens.get('emco@example.com')) === 'rt-1';
+      return result;
+    });
+    await service.addAccount();
+    expect(savedBeforeAnswer).toBe(true);
+  });
+
+  it('fails the flow (and saves nothing) when onVerified is never reached', async () => {
+    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    await expect(service.addAccount()).rejects.toThrow(/without saving/);
+    expect(await tokens.get('emco@example.com')).toBeNull();
+  });
+});
+
 describe('AuthService.relogin', () => {
   beforeEach(async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-old'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-old')));
     await service.addAccount();
   });
 
   it('replaces the token and passes a login hint', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-new'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-new')));
     await service.relogin('emco');
-    expect(login).toHaveBeenLastCalledWith({ credentials: CREDS, loginHint: 'emco@example.com' });
+    expect(login).toHaveBeenLastCalledWith(
+      expect.objectContaining({ credentials: CREDS, loginHint: 'emco@example.com' }),
+    );
     expect(await tokens.get('emco@example.com')).toBe('rt-new');
   });
 
   it('refuses a different Google account and saves nothing', async () => {
-    login.mockResolvedValueOnce(signIn('other@example.com', 'rt-other'));
+    login.mockImplementationOnce(answer(signIn('other@example.com', 'rt-other')));
     await expect(service.relogin('emco')).rejects.toThrow(AuthFlowError);
     expect(await tokens.get('emco@example.com')).toBe('rt-old');
     expect(await tokens.get('other@example.com')).toBeNull();
@@ -90,7 +120,7 @@ describe('AuthService.relogin', () => {
 
 describe('AuthService.removeAccount', () => {
   it('removes registry entry and token, revokes best effort', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-1')));
     await service.addAccount();
     const revoke = vi
       .spyOn(Auth.OAuth2Client.prototype, 'revokeToken')
@@ -105,7 +135,7 @@ describe('AuthService.removeAccount', () => {
 
 describe('AuthService.removeAccount token failures', () => {
   it('still removes the registry entry and revokes when token deletion fails', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-1')));
     await service.addAccount();
     tokens.delete = async () => {
       throw new Error('keychain locked');
@@ -127,7 +157,7 @@ describe('AuthService.authorize', () => {
   });
 
   it('returns a client with the refresh token and persists rotated tokens', async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-1')));
     await service.addAccount();
     const { client, refreshToken, account } = await service.authorize();
     expect(refreshToken).toBe('rt-1');
@@ -140,7 +170,7 @@ describe('AuthService.authorize', () => {
 
 describe('AuthService.status', () => {
   beforeEach(async () => {
-    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    login.mockImplementationOnce(answer(signIn('emco@example.com', 'rt-1')));
     await service.addAccount();
     await registry.add({ alias: 'notoken', email: 'notoken@example.com' });
   });
