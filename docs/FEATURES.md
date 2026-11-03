@@ -21,7 +21,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 ### 3. MCP server
 - ✅ stdio server, 12 tools, zod schemas
 - ✅ CLI: `auth add/login/list/remove/default`, `serve`
-- ⬜ Claude Code registration docs
+- ✅ Claude Code registration docs
 
 ## Later
 - ⬜ 4. Content processing (Docs/Sheets/PDF)
