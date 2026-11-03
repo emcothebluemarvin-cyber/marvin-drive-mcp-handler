@@ -22,8 +22,7 @@
 - Live-verified fact: a stale Docs `requiredRevisionId` returns HTTP 400 with message `The required revision ID '<id>' does not match the latest revision.` (reason `badRequest`).
 - Commit messages: Conventional Commits, ending with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push.
 - **Declared refinements vs the spec** (all intentional):
-  - `afterHeading` resets the paragraph style only when the inserted text forms its own paragraph (text ends with `\n`, or the heading is the last paragraph). Restyling text that merges into the next paragraph would turn that paragraph (possibly another heading) into normal text. The tool description says so.
-  - `insertedAt` is the index where the insert happens; in the heading-is-last-paragraph case that is the position of the prepended `\n` (the caller's text starts one later).
+  - **`afterHeading` (revised after Docs review):** always inserts `"\n" + text` (one trailing `\n` of `text` dropped) at the heading paragraph's `endIndex - 1`, i.e. before the heading's own newline, and always resets the new paragraph(s) to `NORMAL_TEXT` over `[index + 1, index + inserted.length + 1)`. This works whatever follows the heading (table, section break, TOC, list, end of body), never inherits the next paragraph's bullets, and always yields a separate paragraph. `insertedAt` is the index of the prepended `\n` (the caller's text starts one later).
   - `sheets_read_range` also returns `totalRows` (rows available before truncation).
   - Spec §4.3's `layout=` slide-header field and §4.3's `NotFoundError` for an unknown `objectId` are replaced as described in Tasks 11–12.
 - **Naming refinement vs spec §3:** the operation kind is `'idempotent' | 'create' | 'mutate'` (spec wrote `read`). Same semantics: `idempotent` = retry rate limits + 5xx; `create`/`mutate` = retry rate limits only. Keeping `idempotent` means `FileService` call sites don't change (move/rename/delete are idempotent but not reads).
@@ -2920,7 +2919,7 @@ export function registerDocsTools(server: McpServer, docs: DocsService, log: Log
     'docs_insert_text',
     {
       description:
-        'Insert plain text into a Google Doc (first tab). position: {at:"end"} appends (start text with "\\n" for a new paragraph); {at:"afterHeading",heading} inserts on the line after that heading (end text with "\\n" to make it its own paragraph, which is set to normal text style); {at:"index",index} inserts at a raw index from docs_read structure. Guarded by the read it does internally unless requiredRevisionId is given.',
+        'Insert plain text into a Google Doc (first tab). position: {at:"end"} appends (start text with "\\n" for a new paragraph); {at:"afterHeading",heading} inserts the text as new normal-text paragraph(s) directly under that heading (matched by its plain text); {at:"index",index} inserts at a raw index from docs_read structure. Guarded by the read it does internally unless requiredRevisionId is given.',
       inputSchema: {
         account,
         fileId: contentFileId,
@@ -3334,7 +3333,10 @@ describe.runIf(account)('Content E2E (live)', () => {
     try {
       // Docs
       const md = path.join(tmp, 'plan.md');
-      await writeFile(md, '# Plan\n\n## Goals\n\nShip it.\n');
+      await writeFile(
+        md,
+        '# Plan\n\n## Goals\n\nShip it.\n\n## Data\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n## Last\n',
+      );
       const doc = await files.upload({ account, localPath: md, parentId: root.id, convertToGoogle: true });
       const read1 = await docs.read({ account, fileId: doc.id });
       expect(read1.content).toContain('Ship it.');
@@ -3350,8 +3352,13 @@ describe.runIf(account)('Content E2E (live)', () => {
         docs.replaceText({ account, fileId: doc.id, find: 'Plan', replace: 'Plan', requiredRevisionId: read1.revisionId }),
       ).rejects.toBeInstanceOf(ConflictError);
       await docs.insertText({ account, fileId: doc.id, text: 'First goal\n', position: { at: 'afterHeading', heading: 'Goals' } });
+      // heading directly above a table, and heading as the last paragraph
+      await docs.insertText({ account, fileId: doc.id, text: 'Table intro', position: { at: 'afterHeading', heading: 'Data' } });
+      await docs.insertText({ account, fileId: doc.id, text: 'Closing\n', position: { at: 'afterHeading', heading: 'Last' } });
       const outline = await docs.read({ account, fileId: doc.id, format: 'structure' });
       expect(outline.content).toMatch(/NORMAL_TEXT "First goal"/);
+      expect(outline.content).toMatch(/NORMAL_TEXT "Table intro"\n\[\d+-\d+\] TABLE/);
+      expect(outline.content).toMatch(/HEADING_2 "Last"\n\[\d+-\d+\] NORMAL_TEXT "Closing"/);
       await docs.batchUpdate({
         account,
         fileId: doc.id,
