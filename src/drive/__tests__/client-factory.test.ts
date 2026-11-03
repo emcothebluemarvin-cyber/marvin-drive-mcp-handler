@@ -115,4 +115,26 @@ describe('DriveClientFactory', () => {
       expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ReauthRequiredError);
     }
   });
+
+  it('logs a warning and raises ReauthRequiredError when the Keychain re-read fails', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn() };
+    const f = new DriveClientFactory(auth, makeAdapter, logger);
+    const original = tokens.get.bind(tokens);
+    let broken = false;
+    vi.spyOn(tokens, 'get').mockImplementation(async (email: string) => {
+      if (broken) throw new Error('keychain locked');
+      return original(email);
+    });
+    await expect(
+      f.run(undefined, async () => {
+        broken = true;
+        throw invalidGrant();
+      }),
+    ).rejects.toThrow(ReauthRequiredError);
+    expect(warn).toHaveBeenCalledWith(
+      'Keychain re-read failed',
+      expect.objectContaining({ alias: 'emco' }),
+    );
+  });
 });

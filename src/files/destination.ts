@@ -1,9 +1,20 @@
-import { link, lstat, mkdir, open, rm, stat, unlink, type FileHandle } from 'node:fs/promises';
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  rm,
+  stat,
+  unlink,
+  type FileHandle,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { ValidationError, hasErrorCode } from '../errors.js';
+import { logger } from '../logger.js';
 import { candidateName, ensureExtension, sanitizeFileName } from './filename.js';
 
 export interface DestinationInput {
@@ -98,18 +109,41 @@ async function reserve(dest: Destination): Promise<Reservation> {
   throw new ValidationError(`Too many files named like "${dest.name}" in ${dest.dir}`);
 }
 
-/** Hard-links the part file to the first free final name (never overwrites), then drops the part. */
-async function publish(dest: Destination, partPath: string, start: number): Promise<string> {
+export interface FsOps {
+  link: (existingPath: string, newPath: string) => Promise<void>;
+}
+
+const LINK_UNSUPPORTED = ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'];
+
+/**
+ * Hard-links the part file to the first free final name (never overwrites), then drops the part.
+ * Where hard links are unsupported, falls back to an existence check + rename.
+ */
+async function publish(
+  dest: Destination,
+  partPath: string,
+  start: number,
+  ops: FsOps,
+): Promise<string> {
   for (let i = start; i < MAX_COLLISIONS; i++) {
     const finalPath = path.join(dest.dir, candidateName(dest.name, i));
     assertInside(dest.dir, finalPath);
     try {
-      await link(partPath, finalPath);
+      await ops.link(partPath, finalPath);
     } catch (err) {
       if (hasErrorCode(err, 'EEXIST')) continue;
+      if (LINK_UNSUPPORTED.some((code) => hasErrorCode(err, code))) {
+        if (await exists(finalPath)) continue;
+        await rename(partPath, finalPath);
+        return finalPath;
+      }
       throw err;
     }
-    await unlink(partPath);
+    try {
+      await unlink(partPath);
+    } catch (unlinkErr) {
+      logger.warn('Could not remove temporary download file', { partPath, error: unlinkErr });
+    }
     return finalPath;
   }
   throw new ValidationError(`Too many files named like "${dest.name}" in ${dest.dir}`);
@@ -122,20 +156,31 @@ async function publish(dest: Destination, partPath: string, start: number): Prom
 export async function writeUnique(
   dest: Destination,
   openSource: () => Promise<Readable>,
+  ops: FsOps = { link },
 ): Promise<WrittenFile> {
   await mkdir(dest.dir, { recursive: true });
   const { handle, partPath, index } = await reserve(dest);
   let streamCreated = false;
+  let finalPath: string;
+  let written = 0;
   try {
     const source = await openSource();
     const out = handle.createWriteStream();
     streamCreated = true;
+    source.on('data', (chunk: Buffer | string) => {
+      written += Buffer.byteLength(chunk);
+    });
     await pipeline(source, out);
-    const finalPath = await publish(dest, partPath, index);
-    return { path: finalPath, size: (await stat(finalPath)).size };
+    finalPath = await publish(dest, partPath, index, ops);
   } catch (err) {
     if (!streamCreated) await handle.close().catch(() => undefined);
     await rm(partPath, { force: true });
     throw err;
+  }
+  try {
+    return { path: finalPath, size: (await stat(finalPath)).size };
+  } catch (statErr) {
+    logger.warn('Could not stat downloaded file', { path: finalPath, error: statErr });
+    return { path: finalPath, size: written };
   }
 }

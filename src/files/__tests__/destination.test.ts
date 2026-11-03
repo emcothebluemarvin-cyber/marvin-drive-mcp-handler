@@ -116,4 +116,40 @@ describe('writeUnique', () => {
     const res = await writeUnique({ dir, name: 'link.txt' }, async () => Readable.from(['x']));
     expect(path.basename(res.path)).toBe('link (1).txt');
   });
+
+  it.each(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'])(
+    'falls back to rename when link fails with %s',
+    async (code) => {
+      await writeFile(path.join(dir, 'doc.txt'), 'existing');
+      const link = async (): Promise<void> => {
+        throw Object.assign(new Error('no links'), { code });
+      };
+      const res = await writeUnique(
+        { dir, name: 'fresh.txt' },
+        async () => Readable.from(['abc']),
+        {
+          link,
+        },
+      );
+      expect(res).toEqual({ path: path.join(dir, 'fresh.txt'), size: 3 });
+      expect((await readdir(dir)).sort()).toEqual(['doc.txt', 'fresh.txt']);
+    },
+  );
+
+  it('rename fallback still skips names taken after reservation', async () => {
+    const link = async (): Promise<void> => {
+      throw Object.assign(new Error('no links'), { code: 'EPERM' });
+    };
+    const res = await writeUnique(
+      { dir, name: 'report.pdf' },
+      async () => {
+        await writeFile(path.join(dir, 'report.pdf'), 'raced');
+        return Readable.from(['new']);
+      },
+      { link },
+    );
+    expect(path.basename(res.path)).toBe('report (1).pdf');
+    expect(await readFile(path.join(dir, 'report.pdf'), 'utf8')).toBe('raced');
+    expect((await readdir(dir)).sort()).toEqual(['report (1).pdf', 'report.pdf']);
+  });
 });

@@ -3,6 +3,7 @@ import type { AuthService } from '../auth/auth-service.js';
 import { isInvalidGrant } from '../auth/oauth-errors.js';
 import type { AccountRecord } from '../config/account-registry.js';
 import { ReauthRequiredError } from '../errors.js';
+import { logger as defaultLogger, type Logger } from '../logger.js';
 import { createDriveAdapter, type DriveAdapter } from './drive-adapter.js';
 
 export interface DriveContext {
@@ -28,6 +29,7 @@ export class DriveClientFactory implements DriveRunner {
   constructor(
     private readonly auth: AuthService,
     private readonly makeAdapter: (client: Auth.OAuth2Client) => DriveAdapter = createDriveAdapter,
+    private readonly logger: Logger = defaultLogger,
   ) {}
 
   async run<T>(accountRef: string | undefined, fn: (ctx: DriveContext) => Promise<T>): Promise<T> {
@@ -40,7 +42,12 @@ export class DriveClientFactory implements DriveRunner {
       if (!isInvalidGrant(err)) throw err;
       let lastErr: unknown = err;
       this.evict(ctx);
-      const latest = await this.auth.readRefreshToken(ctx.account.email).catch(() => null);
+      let latest: string | null = null;
+      try {
+        latest = await this.auth.readRefreshToken(ctx.account.email);
+      } catch (readErr) {
+        this.logger.warn('Keychain re-read failed', { alias: ctx.account.alias, error: readErr });
+      }
       if (latest && latest !== ctx.refreshToken) {
         const retryCtx = await this.context(ctx.account.alias);
         try {
