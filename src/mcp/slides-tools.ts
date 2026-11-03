@@ -56,7 +56,7 @@ export function registerSlidesTools(server: McpServer, slides: SlidesService, lo
     'slides_set_text',
     {
       description:
-        'Replace the whole text of one shape (objectId from slides_read). Empty text clears it. Tables, images and grouped elements need slides_batch_update. Guarded by the read it does internally unless requiredRevisionId is given.',
+        'Replace the whole text of one shape (objectId from slides_read). Empty text clears it. Works on shapes inside groups too. Tables, images, lines and group containers need slides_batch_update. Guarded by the read it does internally unless requiredRevisionId is given.',
       inputSchema: {
         account,
         fileId: contentFileId,

@@ -19,11 +19,13 @@ export const DOCS_TOOL_NAMES = [
   'docs_batch_update',
 ] as const;
 
-const position = z.discriminatedUnion('at', [
-  z.object({ at: z.literal('end') }),
-  z.object({ at: z.literal('afterHeading'), heading: z.string().min(1) }),
-  z.object({ at: z.literal('index'), index: z.number().int().min(1) }),
-]);
+const position = z
+  .discriminatedUnion('at', [
+    z.object({ at: z.literal('end') }),
+    z.object({ at: z.literal('afterHeading'), heading: z.string().min(1) }),
+    z.object({ at: z.literal('index'), index: z.number().int().min(1) }),
+  ])
+  .describe('Where to insert: end of the doc, under a heading, or at a raw index');
 
 export function registerDocsTools(server: McpServer, docs: DocsService, log: Logger): void {
   server.registerTool(
@@ -63,7 +65,7 @@ export function registerDocsTools(server: McpServer, docs: DocsService, log: Log
     'docs_insert_text',
     {
       description:
-        'Insert plain text into a Google Doc (first tab). position: {at:"end"} appends (start text with "\\n" for a new paragraph); {at:"afterHeading",heading} inserts the text as new normal-text paragraph(s) directly under that heading (matched by its plain text); {at:"index",index} inserts at a raw index from docs_read structure. Guarded by the read it does internally unless requiredRevisionId is given.',
+        'Insert plain text into a Google Doc (first tab). position: {at:"end"} appends (start text with "\\n" for a new paragraph); {at:"afterHeading",heading} inserts the text as new normal-text paragraph(s) directly under that heading (matched by its plain text); {at:"index",index} inserts at a raw index from docs_read structure. end/afterHeading are guarded by the read they do internally unless requiredRevisionId is given; index mode is guarded only when requiredRevisionId is given. For afterHeading, insertedAt is the index of the inserted line break, so the text starts at insertedAt + 1.',
       inputSchema: {
         account,
         fileId: contentFileId,

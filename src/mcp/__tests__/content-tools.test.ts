@@ -58,6 +58,23 @@ beforeEach(async () => {
 });
 
 describe('content MCP tools', () => {
+  it('describes tools accurately and marks required fields', async () => {
+    const { tools } = await client.listTools();
+    const tool = (name: string): (typeof tools)[number] => {
+      const t = tools.find((x) => x.name === name);
+      if (!t) throw new Error(`missing tool ${name}`);
+      return t;
+    };
+    for (const name of ['docs_batch_update', 'sheets_batch_update', 'slides_batch_update']) {
+      expect(tool(name).description).toMatch(/^ADVANCED:/);
+    }
+    expect(tool('docs_batch_update').inputSchema.required).toContain('requiredRevisionId');
+    expect(tool('slides_batch_update').inputSchema.required).toContain('requiredRevisionId');
+    expect(tool('docs_replace_text').inputSchema.required).not.toContain('requiredRevisionId');
+    expect(tool('slides_set_text').inputSchema.required).not.toContain('requiredRevisionId');
+    expect(tool('slides_set_text').description).toContain('inside groups');
+  });
+
   it('requires requiredRevisionId for docs_batch_update', async () => {
     const res = await client.callTool({
       name: 'docs_batch_update',
