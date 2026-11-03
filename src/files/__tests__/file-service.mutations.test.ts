@@ -98,6 +98,7 @@ describe('move', () => {
       .mockResolvedValueOnce({ id: 'f1', name: 'F', parents: ['n1'] });
     await service.move({ fileId: 'f1', newParentId: 'n1' });
     expect(drive.updateFile).not.toHaveBeenCalled();
+    expect(audit.entries).toEqual([]);
   });
 
   it('re-reads parents before retrying after a 5xx', async () => {
@@ -212,6 +213,15 @@ describe('delete', () => {
       permanent: true,
     });
     expect(drive.getFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a 404 on the first delete send as not found', async () => {
+    drive.getFile.mockResolvedValueOnce({ id: 'f1', name: 'F' });
+    drive.deleteFile.mockRejectedValueOnce(httpError(404));
+    await expect(service.delete({ fileId: 'f1', permanent: true })).rejects.toThrow(
+      /File not found/,
+    );
+    expect(audit.entries).toEqual([]);
   });
 
   it('reports a 404 on the first attempt as not found', async () => {

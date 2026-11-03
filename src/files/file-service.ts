@@ -172,19 +172,23 @@ export class FileService {
       const alreadyThere = oldParents.includes(input.newParentId);
       const toRemove = oldParents.filter((p) => p !== input.newParentId);
 
-      const moved =
-        alreadyThere && toRemove.length === 0
-          ? await ctx.drive.getFile(input.fileId, SUMMARY_FIELDS)
-          : await ctx.drive.updateFile({
-              fileId: input.fileId,
-              ...(alreadyThere ? {} : { addParents: input.newParentId }),
-              ...(toRemove.length > 0 ? { removeParents: toRemove.join(',') } : {}),
-              fields: SUMMARY_FIELDS,
-            });
-      await this.recordAudit(ctx, 'move', moved, {
-        oldParents: originalParents,
-        newParentId: input.newParentId,
-      });
+      const settled = alreadyThere && toRemove.length === 0;
+      // Only a no-op if it was already in place before our first attempt (not after a retried success).
+      const isNoop = settled && originalParents === oldParents;
+      const moved = settled
+        ? await ctx.drive.getFile(input.fileId, SUMMARY_FIELDS)
+        : await ctx.drive.updateFile({
+            fileId: input.fileId,
+            ...(alreadyThere ? {} : { addParents: input.newParentId }),
+            ...(toRemove.length > 0 ? { removeParents: toRemove.join(',') } : {}),
+            fields: SUMMARY_FIELDS,
+          });
+      if (!isNoop) {
+        await this.recordAudit(ctx, 'move', moved, {
+          oldParents: originalParents,
+          newParentId: input.newParentId,
+        });
+      }
       return toSummary(moved);
     });
   }
@@ -248,15 +252,18 @@ export class FileService {
     }
 
     let name: string | undefined;
-    return this.exec(input.account, 'idempotent', input.fileId, async (ctx, attempt) => {
+    let deleteSent = false;
+    return this.exec(input.account, 'idempotent', input.fileId, async (ctx) => {
       if (name === undefined) {
         name = (await ctx.drive.getFile(input.fileId, 'id, name')).name ?? '';
       }
+      const sentBefore = deleteSent;
+      deleteSent = true;
       try {
         await ctx.drive.deleteFile(input.fileId);
       } catch (err) {
-        // A 404 on a retry means the previous attempt deleted it.
-        if (!(attempt > 0 && statusOf(err) === 404)) throw err;
+        // A 404 counts as success only if an earlier delete request was already sent.
+        if (!(sentBefore && statusOf(err) === 404)) throw err;
       }
       await this.recordAudit(ctx, 'delete', { id: input.fileId, name }, { permanent });
       return { fileId: input.fileId, ...(name ? { name } : {}), permanent };

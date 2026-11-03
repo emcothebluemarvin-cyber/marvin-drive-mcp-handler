@@ -15,10 +15,23 @@ const defaultSleep = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+const NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+]);
+
 function retryKind(err: unknown): 'rate-limit' | 'server' | null {
   const status = statusOf(err);
   if (isRateLimit(status, reasonOf(err))) return 'rate-limit';
   if (status !== undefined && status >= 500) return 'server';
+  if (status === undefined && typeof err === 'object' && err !== null) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && NETWORK_CODES.has(code)) return 'server';
+  }
   return null;
 }
 

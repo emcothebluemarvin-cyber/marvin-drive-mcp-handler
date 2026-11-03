@@ -46,8 +46,11 @@ export function isAllowedExportUrl(url: string): boolean {
   }
 }
 
+/** googleapis retries by default; withRetry is the single retry layer, so disable it. */
+export const DRIVE_CLIENT_OPTIONS = { version: 'v3', retry: false } as const;
+
 export function createDriveAdapter(auth: Auth.OAuth2Client): DriveAdapter {
-  const drive = google.drive({ version: 'v3', auth });
+  const drive = google.drive({ ...DRIVE_CLIENT_OPTIONS, auth });
   const allDrives = { supportsAllDrives: true } as const;
 
   const adapter: DriveAdapter = {

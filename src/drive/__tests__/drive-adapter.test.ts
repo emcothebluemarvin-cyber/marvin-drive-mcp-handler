@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isAllowedExportUrl } from '../drive-adapter.js';
+import { DRIVE_CLIENT_OPTIONS, isAllowedExportUrl } from '../drive-adapter.js';
 
 describe('isAllowedExportUrl', () => {
   it('accepts https Google hosts', () => {
@@ -12,5 +12,11 @@ describe('isAllowedExportUrl', () => {
     expect(isAllowedExportUrl('https://evilgoogle.com/x')).toBe(false);
     expect(isAllowedExportUrl('https://google.com.evil.com/x')).toBe(false);
     expect(isAllowedExportUrl('not a url')).toBe(false);
+  });
+});
+
+describe('DRIVE_CLIENT_OPTIONS', () => {
+  it('disables googleapis built-in retry so withRetry is the only retry layer', () => {
+    expect(DRIVE_CLIENT_OPTIONS.retry).toBe(false);
   });
 });

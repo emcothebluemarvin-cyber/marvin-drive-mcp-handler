@@ -78,6 +78,14 @@ describe('mapDriveError', () => {
     expect(mapped.message).toBe('Drive API error (500): HTTP 500');
   });
 
+  it('scrubs secrets from the message detail', () => {
+    const err = Object.assign(new Error('failed https://x/upload?upload_id=abc&token=secret123'), {
+      status: 500,
+    });
+    const mapped = mapDriveError(err, ctx);
+    expect(mapped.message).not.toContain('secret123');
+  });
+
   it('adds a duplicate hint for failed creates', () => {
     expect(mapDriveError(gaxios(503), { ...ctx, createOp: true }).message).toMatch(/duplicate/);
   });

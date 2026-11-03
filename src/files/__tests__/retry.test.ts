@@ -69,4 +69,17 @@ describe('withRetry', () => {
     );
     expect(attempts).toEqual([0, 1]);
   });
+
+  it.each(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET'])(
+    'retries %s network errors for idempotent calls but not creates',
+    async (code) => {
+      const net = Object.assign(new Error(code), { code });
+      await expect(
+        withRetry(flaky([net], 'ok'), 'idempotent', { sleep: async () => {} }),
+      ).resolves.toBe('ok');
+      const fn = vi.fn(flaky([net], 'ok'));
+      await expect(withRetry(fn, 'create', { sleep: async () => {} })).rejects.toBe(net);
+      expect(fn).toHaveBeenCalledTimes(1);
+    },
+  );
 });

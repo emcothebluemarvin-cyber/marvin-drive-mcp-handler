@@ -8,7 +8,7 @@ import {
   QuotaExceededError,
   RateLimitError,
 } from '../errors.js';
-import type { Logger } from '../logger.js';
+import { scrubText, type Logger } from '../logger.js';
 
 type Loose = Record<string, unknown>;
 
@@ -92,7 +92,7 @@ export function mapDriveError(err: unknown, ctx: MapContext): AppError {
     }
   }
 
-  const detail = err instanceof Error ? err.message.slice(0, 200) : 'Unknown error';
+  const detail = err instanceof Error ? scrubText(err.message).slice(0, 200) : 'Unknown error';
   ctx.logger.error('Drive API call failed', { status, reason, target, error: err });
   const hint =
     ctx.createOp && status !== undefined && status >= 500
