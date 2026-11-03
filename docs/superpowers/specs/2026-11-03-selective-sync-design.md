@@ -1,7 +1,7 @@
 # Marvin Drive — Selective Two-Way Sync Design (Sub-project 5)
 
 - **Date:** 2026-11-03
-- **Status:** Approved in brainstorming; spec review rounds 1–2 addressed (v3: planner rewritten as a precedence-ordered state machine)
+- **Status:** Approved in brainstorming; spec review rounds 1–3 addressed (v4)
 - **Scope:** Sub-project 5 of 5 — on-demand, selective, two-way sync between a local folder and a Drive folder, with AI-assisted file selection and an optional "move to Drive" (release local copies) step
 - **Builds on:** MVP spec (`2026-11-03-drive-mcp-mvp-design.md`) and content spec (`2026-11-03-content-processing-design.md`)
 - **Delivery:** one spec, two implementation plans — **Phase A** (binary-file sync, AI selection, run) and **Phase B** (Google-native exports, release). §12 lists the split.
@@ -41,11 +41,13 @@ pair {
   id,                         // random UUID
   account,                    // alias
   localDir,                   // absolute realpath at creation
+  caseInsensitive: boolean,   // probed at creation and re-checked each run (create probe file, stat its case-flipped name)
   remoteFolderId,
   googleExport: { document: 'docx', spreadsheet: 'xlsx', presentation: 'pptx', drawing: 'pdf' },  // Phase B; validated per type with resolveExport
   selection: string[],        // NFC relative POSIX paths
   excluded: string[],         // NFC relative paths; ignored on both sides
-  remoteBaseline: string[],   // fileIds of unselected remote files present at the first applied run
+  remoteBaseline: string[],   // fileIds of all untracked remote files seen at the first applied run
+  baselineFolders: string[],  // remote folder ids that were unknown subtrees at the first applied run
   createdAt, lastAppliedRunAt: string | null, firstAppliedRunAt: string | null
 }
 record {                      // one per tracked Drive file, keyed by remoteId
@@ -93,7 +95,7 @@ Changes to existing code: `DriveAdapter.updateFile` gains optional `media` (same
 4. **Probe** every record whose `remoteId` was not in the remote scan (§6.2).
 5. **Plan** (pure). `planId` = SHA-256 over the canonical list of `(kind, remoteId|key, md5s)` — no generated names or timestamps.
 6. **Dry run** returns the plan; nothing is written (no timestamps updated). **Apply** re-scans and re-plans; if `planId` was passed and differs → abort and return the new plan.
-7. **Brake** (§6.8), **execute** (§7), then set `lastAppliedRunAt`; on the first applied run also set `firstAppliedRunAt` and `remoteBaseline` (ids of unselected, unexcluded remote files seen in this run).
+7. **Brake** (§6.8), **execute** (§7), then set `lastAppliedRunAt`; on the first applied run also set `firstAppliedRunAt` and `remoteBaseline` = ids of **every** untracked remote file seen in this run, whatever its classification (candidate, native-skipped, ambiguous, unrepresentable, ignored), plus `baselineFolders` = ids of remote folders that were unknown subtrees. Files later first seen under a folder in `baselineFolders` (or one of its descendants) are treated as baseline candidates (U5), never adopted.
 
 ## 6. Planner
 
@@ -102,9 +104,10 @@ The planner classifies every **tracked record** (§6.3) and every **untracked ke
 ### 6.1 Resolving L for a key
 
 1. Exact key match in the local scan → L.
-2. Else a local entry with the same `foldKey` → L, flagged `renamed-case` (record `localName` updated; no remote rename).
+2. Else, **only if `pair.caseInsensitive`**, a local entry with the same `foldKey` → L, flagged `renamed-case` (record `localName` updated; no remote rename). On a case-sensitive volume a fold-only match → `ambiguous`.
 3. Else, if the key lies under a local unknown subtree → `unknown-state`.
-4. Else L = absent.
+4. Else, if something exists at the key on disk but is not a regular file (symlink, directory, socket…) → `unknown-state`.
+5. Else L = absent.
 
 L state: **unchanged** (md5 = `K.localMd5`), **changed**, or **absent**.
 
@@ -114,7 +117,9 @@ From the scan by `remoteId`: **present-same** (same key) or **present-moved** (d
 
 ### 6.3 Tracked records — dispatch
 
-Order: (a) record or its key under an unknown subtree → `unknown-state`. (b) `K.native` → §6.6. (c) `K.remoteOnly` → §6.7. (d) otherwise → §6.4.
+Order: (a) record or its key under an unknown subtree → `unknown-state`. (b) key involved in an `ambiguous` collision → `ambiguous`. (c) `K.remoteOnly` → §6.7 (for native records too). (d) `K.native` → §6.6. (e) otherwise → §6.4.
+
+All tables below are **first-match-wins in the order listed**. Selection/`excluded` updates attached to an action are applied only after that action succeeds. A tracked file whose new key (B7–B9, N6, O4) is in `excluded` → `untrack` with report `moved-into-excluded`.
 
 ### 6.4 Binary tracked records
 
@@ -126,7 +131,7 @@ Order: (a) record or its key under an unknown subtree → `unknown-state`. (b) `
 | B4 | present-same, changed | changed | equal md5 → `adopt`; else `conflict` (§6.9; if `!canEdit`: conflict copy only + `remote-readonly`) |
 | B5 | present-same, unchanged | absent | `trash-remote` (needs `canTrash`, else `cannot-trash` report, record kept) |
 | B6 | present-same, changed | absent | `download-new` at the key (recreate; change beats deletion) |
-| B7 | present-moved | unchanged | `move-local` to the new key (exclusive); then `download-replace` if R changed. Selection: old key → new key |
+| B7 | present-moved | unchanged | `move-local` to the new key (exclusive); then `download-replace` if R changed. Selection: old key → new key. If old and new keys share a `foldKey` on a case-insensitive volume (remote case-only rename) → plain `rename` in place |
 | B8 | present-moved | changed | `download-new` at the new key; L stays at the old key untouched; old key → `excluded`; new key → selection; report `conflict-rename` |
 | B9 | present-moved | absent | `download-new` at the new key; old key → new key in selection (remote rename counts as a change) |
 | B10 | trashed | unchanged | `trash-local` |
@@ -141,12 +146,13 @@ Candidate keys = selection keys without a record ∪ untracked remote files (by 
 
 | # | Situation | Action |
 |---|---|---|
-| U0 | Key in `excluded`, or under an unknown subtree | ignored / `unknown-state` |
+| U0 | Key in `excluded`, or under an unknown subtree, or ignored (§6.10) | ignored / `unknown-state` |
+| U0b | Untracked native R whose export key matches a local entry (Phase B) | `ambiguous-native` (report) |
 | U1 | Selected, L present, no untracked R with same `foldKey` | `upload-new` (subfolders via `ensureRemoteFolder`) |
 | U2 | Selected, L present, untracked R with same `foldKey` | equal md5 → `adopt`; else `conflict` |
 | U3 | Selected, L absent, untracked R present | `download-new` (native: `export-new`, Phase B) |
 | U4 | Selected, L absent, no R | report `missing` |
-| U5 | Untracked R, key not selected, `R.id ∈ remoteBaseline` or `firstAppliedRunAt` null | `candidate-remote` |
+| U5 | Untracked R, key not selected, and (`R.id ∈ remoteBaseline`, or under a `baselineFolders` folder, or `firstAppliedRunAt` null) | `candidate-remote` |
 | U6 | Untracked R, key not selected, not in baseline, first applied run done, no local entry with same `foldKey` | `download-new` + add key to selection (native: `export-new`) |
 | U7 | Same as U6 but a local entry with same `foldKey` exists | `collision` (report; nothing written) |
 | U8 | Unselected L, no untracked R with same `foldKey` | `candidate-local` if mtime > `lastAppliedRunAt` (all on first run); cap 200 |
@@ -161,7 +167,7 @@ Native records never produce `upload-new`, `update-remote`, `conflict` uploads o
 |---|---|---|---|
 | N1 | present-same, unmodified | unchanged | none |
 | N2 | present-same, unmodified | edited | warning `native-readonly-edited` ("use docs_*/sheets_*/slides_*") |
-| N3 | present-same, unmodified | absent | report `native-local-missing` |
+| N3 | present-same, unmodified | absent | report `native-local-missing` ("it will be re-exported on the next remote change; use sync_select remove or sync_release to stop that") |
 | N4 | present-same, modified | unchanged or absent | `export-replace` / `export-new` |
 | N5 | present-same, modified | edited | `place-exclusive` L as `<stem> (local edit YYYY-MM-DD HH.mm)<ext>`, then `export-new`; report |
 | N6 | present-moved | any | as B7–B9 using exports instead of downloads; never uploads |
@@ -176,14 +182,23 @@ Untracked native R with L present at the export key → `ambiguous-native` (repo
 
 | # | Situation | Action |
 |---|---|---|
-| O1 | `restorePending` (set by `sync_select add`), R present | `download-new` at the key (exclusive; collision → report); clear `remoteOnly` and `restorePending` |
+| O0 | `restorePending`, L present with md5 = R md5 (native: = `K.localMd5`) | `adopt`; clear `remoteOnly` and `restorePending` |
+| O1 | `restorePending` (set by `sync_select add`), R present-same or present-moved | `download-new` (native: `export-new`) at R's current key (exclusive; collision → report); clear `remoteOnly` and `restorePending` |
 | O2 | `restorePending`, R trashed / unavailable | report; keep flags |
 | O3 | L absent, R present-same | none (changed R → record refresh) |
 | O4 | L absent, R present-moved | record path update; selection old key → new key |
 | O5 | R trashed | set `remoteTrashed`; warning every run `remote-only-trashed` ("the only copy is in Drive trash; purged after 30 days") |
 | O6 | `remoteTrashed` and R present again | clear `remoteTrashed` |
 | O7 | R moved-out / unavailable | as B13 / B14 |
-| O8 | L present again (same `foldKey`) | md5 = R md5 → clear `remoteOnly` (`adopt`); otherwise `collision` (report; nothing written) |
+| O8 | L present again (same key, or `foldKey` on a case-insensitive volume) | md5 = R md5 (native: = `K.localMd5`) → clear `remoteOnly` (`adopt`); otherwise `collision` (report; nothing written) |
+
+Remote-only native records are never exported unless `restorePending` (regression test: released Google Doc, remote modified → no export).
+
+### 6.10 Ignored entries
+
+- **Local:** names starting with `.` (incl. the marker), `*.marvin-part` (stale ones older than 1 hour are deleted at run start), non-regular files (symlinks, sockets, devices, FIFOs), anything whose realpath leaves `localDir`.
+- **Remote:** shortcuts, folders as leaves, Google-native files in Phase A (reported `native-skipped`), unsupported native types in Phase B (Forms, Sites, Apps Script, Jamboard, Maps — `resolveExport` would throw `UnsupportedTypeError`; reported `native-unsupported`), `unrepresentable` names.
+- Ignored entries never count as "L present" or "R present" for any rule; a tracked key now occupied by an ignored local entry is `unknown-state` (§6.1 step 4).
 
 ### 6.8 Mass-delete brake
 
@@ -199,6 +214,7 @@ Count planned `trash-remote` + `trash-local`. Over threshold → abort with coun
 
 - **Order:** remote folder creation → `upload-new`/`update-remote` → `move-local` → `download-*`/`export-*` → conflicts → `trash-remote` → `trash-local`.
 - **Local writes:** every new local file (`download-new`, `export-new`, `move-local`, conflict copies, local-edit renames) uses `placeExclusive` (temp `.marvin-part` + `link` + `EEXIST` → `collision`, never overwrite). Only `download-replace` / `export-replace` of a record's own path overwrite, and only after re-stat shows the target unchanged since the scan (else skip, reported).
+- **`move-local` idempotency:** if the target already exists with the same inode as the source (crash between link and unlink), only unlink the source.
 - **Re-verification:** `update-remote` re-reads R (skip if changed since planning; no If-Match exists in Drive v3); `trash-remote` re-reads R (skip if changed); `trash-local` re-hashes L (skip if changed); uploads compare the response md5 with the planned md5 (`changed-during-upload` warning, record the response).
 - **Duplicate-safe uploads:** after an upload error, look in the parent for a same-name file with the same md5 and `createdTime` within 10 minutes; adopt it instead of failing.
 - **Isolation:** failed actions go to `failures` with the mapped message; their records are untouched; the run continues. `ReauthRequiredError`, `QuotaExceededError`, `ApiDisabledError`, `RateLimitError` (after retries) abort; remaining actions `not-run`.
@@ -214,14 +230,14 @@ Count planned `trash-remote` + `trash-local`. Over threshold → abort with coun
 | `sync_create_pair` | `name`, `localDir` (absolute, `~` ok, existing), `remoteFolderId` **or** `remoteFolderName` (+ `remoteParentId?`; always creates a new folder), `account?`, `googleExport?` (Phase B) | pair; writes the marker; rejects overlap (same/nested `localDir`, same `remoteFolderId`) |
 | `sync_list_pairs` | — | pairs with counts (selected, tracked, remote-only, excluded, baseline) and `lastAppliedRunAt` |
 | `sync_scan` | `name`, `onlyUnselected?` (true), `previewChars?` (300, max 2000), `limit?` (200, max 1000), `subdir?` | `{ entries: [{ path, size, modifiedTime, mimeType, preview? }], remoteCandidates: [{ path, size, modifiedTime, mimeType }], truncated }`. Previews only for text-like files; description: open PDFs/Office files with your own file-reading tool, propose a selection, confirm with the user |
-| `sync_select` | `name`, `add?`, `remove?` | counts; rejected paths with reasons. `remove` → key to `excluded`, record dropped, no file touched. `add` → removes from `excluded`; remote candidates become U3; remote-only → `restorePending` (O1) |
+| `sync_select` | `name`, `add?`, `remove?` | counts; rejected paths with reasons. `add` is deduped by `foldKey` and rejects keys that are ignored, unrepresentable, under unknown subtrees, or present on neither side. `remove` → key to `excluded`, record dropped, no file touched. `add` → removes from `excluded`; remote candidates become U3; remote-only → `restorePending` (O0/O1) |
 | `sync_run` | `name`, `apply?` (false), `planId?`, `allowMassDelete?` | `SyncReport { planId, actions by kind, conflicts, collisions, ambiguous, unknown, warnings, failures, candidates: { local, remote }, releasable? }` |
 | `sync_release` (Phase B) | `name`, `paths?` or `all?: true`, `apply?` (false) | released / would-release; skipped with reasons |
 | `sync_remove_pair` | `name` | confirmation; removes the marker; files untouched |
 
 ## 9. CLI
 
-`marvin-drive sync list` · `marvin-drive sync run <name> [--apply] [--allow-mass-delete]` · `marvin-drive sync release <name> [--all | <paths…>] [--apply]` (Phase B). Human-readable report; exit code 1 if anything failed or the run aborted.
+`marvin-drive sync list` · `marvin-drive sync run <name> [--apply] [--allow-mass-delete]` · `marvin-drive sync repair-marker <name>` (rewrites `.marvin-sync-<name>` after confirming `localDir` interactively; keeps all pair state) · `marvin-drive sync release <name> [--all | <paths…>] [--apply]` (Phase B). Human-readable report; exit code 1 if anything failed or the run aborted.
 
 ## 10. Locking, audit, release details
 
