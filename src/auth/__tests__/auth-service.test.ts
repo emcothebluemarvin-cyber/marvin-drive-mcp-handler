@@ -103,6 +103,23 @@ describe('AuthService.removeAccount', () => {
   });
 });
 
+describe('AuthService.removeAccount token failures', () => {
+  it('still removes the registry entry and revokes when token deletion fails', async () => {
+    login.mockResolvedValueOnce(signIn('emco@example.com', 'rt-1'));
+    await service.addAccount();
+    tokens.delete = async () => {
+      throw new Error('keychain locked');
+    };
+    const revoke = vi
+      .spyOn(Auth.OAuth2Client.prototype, 'revokeToken')
+      .mockRejectedValueOnce(new Error('network down'));
+    await expect(service.removeAccount('emco')).resolves.toMatchObject({ alias: 'emco' });
+    expect((await registry.read()).accounts).toEqual([]);
+    expect(revoke).toHaveBeenCalledWith('rt-1');
+    revoke.mockRestore();
+  });
+});
+
 describe('AuthService.authorize', () => {
   it('throws ReauthRequiredError when no token is stored', async () => {
     await registry.add({ alias: 'emco', email: 'emco@example.com' });
@@ -145,6 +162,15 @@ describe('AuthService.status', () => {
     expect((await service.status())[0]?.status).toBe('reauth_required');
     service.markHealthy('emco@example.com');
     expect((await service.status())[0]?.status).toBe('ok');
+  });
+
+  it('verify=true reports unknown for non-grant errors instead of rejecting', async () => {
+    const spy = vi
+      .spyOn(Auth.OAuth2Client.prototype, 'getAccessToken')
+      .mockRejectedValueOnce(new Error('ECONNRESET'));
+    const result = await service.status(true);
+    expect(result[0]?.status).toBe('unknown');
+    spy.mockRestore();
   });
 
   it('verify=true performs a live refresh', async () => {

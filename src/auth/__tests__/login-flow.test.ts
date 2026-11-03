@@ -79,15 +79,50 @@ describe('runLoginFlow', () => {
     });
   });
 
-  it('rejects a state mismatch', async () => {
+  it('ignores callbacks with a wrong state', async () => {
     const h = harness();
-    await expect(
-      runLoginFlow({
-        ...base,
-        createClient: h.create,
-        openUrl: browser(h, () => 'code=abc&state=evil'),
-      }),
-    ).rejects.toThrow(/state mismatch/);
+    let strayStatus = 0;
+    const result = await runLoginFlow({
+      ...base,
+      createClient: h.create,
+      openUrl: async (url) => {
+        const state = new URL(url).searchParams.get('state') ?? '';
+        const stray = await fetch(`${h.redirect()}/?code=abc&state=evil`);
+        strayStatus = stray.status;
+        await stray.text();
+        await (await fetch(`${h.redirect()}/?code=abc&state=${state}`)).text();
+      },
+    });
+    expect(strayStatus).toBe(400);
+    expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
+  });
+
+  it('answers requests after completion with a neutral 200', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = harness({
+      getToken: async () => {
+        await gate; // keep the flow (and server) alive until the late request is done
+        return { tokens: { refresh_token: 'rt-1', id_token: 'id-token' } };
+      },
+    });
+    let late = 0;
+    const result = await runLoginFlow({
+      ...base,
+      createClient: h.create,
+      openUrl: async (url) => {
+        const state = new URL(url).searchParams.get('state') ?? '';
+        await (await fetch(`${h.redirect()}/?code=abc&state=${state}`)).text();
+        const second = await fetch(`${h.redirect()}/?error=access_denied&state=${state}`);
+        late = second.status;
+        await second.text();
+        release();
+      },
+    });
+    expect(late).toBe(200);
+    expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
   });
 
   it('reports access_denied', async () => {

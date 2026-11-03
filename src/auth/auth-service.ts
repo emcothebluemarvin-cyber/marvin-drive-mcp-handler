@@ -12,7 +12,7 @@ import type { LoginResult } from './login-flow.js';
 import { isInvalidGrant } from './oauth-errors.js';
 import type { TokenStore } from './token-store.js';
 
-export type AccountStatus = 'ok' | 'reauth_required';
+export type AccountStatus = 'ok' | 'reauth_required' | 'unknown';
 
 export interface AccountStatusEntry {
   alias: string;
@@ -95,8 +95,15 @@ export class AuthService {
   async removeAccount(ref: string): Promise<AccountRecord> {
     const record = await this.deps.registry.resolve(ref);
     const token = await this.deps.tokens.get(record.email);
+    try {
+      await this.deps.tokens.delete(record.email);
+    } catch (err) {
+      this.log.warn('Failed to delete stored token; removing the account anyway', {
+        alias: record.alias,
+        error: err,
+      });
+    }
     await this.deps.registry.remove(record.alias);
-    await this.deps.tokens.delete(record.email);
     this.reauthNeeded.delete(record.email);
     if (token) {
       try {
@@ -180,7 +187,8 @@ export class AuthService {
         this.reauthNeeded.add(account.email);
         return 'reauth_required';
       }
-      throw err;
+      this.log.warn('Token check failed', { alias: account.alias, error: err });
+      return 'unknown';
     }
   }
 }

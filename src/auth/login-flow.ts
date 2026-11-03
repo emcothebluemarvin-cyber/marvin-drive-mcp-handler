@@ -46,6 +46,7 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
     }, timeoutMs);
     timer.unref();
 
+    let settled = false;
     server.on('request', (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       if (url.pathname !== '/') {
@@ -55,14 +56,22 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
       const reply = (status: number, text: string): void => {
         res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' }).end(PAGE(text));
       };
+      if (settled) {
+        reply(200, 'This login is already finished. You can close this tab.');
+        return;
+      }
+      const params = url.searchParams;
+      if (params.get('state') !== state) {
+        reply(400, 'Invalid or stale login link. Return to the terminal.');
+        return;
+      }
       const fail = (message: string): void => {
+        settled = true;
         reply(400, 'Login failed. Close this tab and check the terminal.');
         clearTimeout(timer);
         reject(new AuthFlowError(message));
       };
 
-      const params = url.searchParams;
-      if (params.get('state') !== state) return fail('OAuth state mismatch; login aborted');
       const error = params.get('error');
       if (error) {
         return fail(
@@ -74,6 +83,7 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
       const code = params.get('code');
       if (!code) return fail('Callback did not include an authorization code');
 
+      settled = true;
       reply(200, 'Login complete. You can close this tab.');
       clearTimeout(timer);
       resolve(code);
@@ -84,7 +94,10 @@ function waitForCode(server: Server, state: string, timeoutMs: number): Promise<
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
   });
   return (server.address() as AddressInfo).port;
 }
