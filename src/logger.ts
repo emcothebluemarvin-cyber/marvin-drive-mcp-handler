@@ -6,7 +6,7 @@ const SECRET_IN_TEXT =
   /\b(token|access_token|refresh_token|id_token|code|client_secret)=[^&\s"']+/gi;
 const BARE_GOOGLE_TOKEN = /\b(ya29\.[\w.-]+|1\/\/[\w.-]+)/g;
 const JSON_SECRET_PAIR =
-  /"(access_token|refresh_token|id_token|client_secret|code)"\s*:\s*"[^"]*"/gi;
+  /"(access_token|refresh_token|id_token|client_secret|code|token|refreshToken|accessToken)"\s*:\s*"[^"]*"/gi;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 
 /** Removes `token=…`-style query values and bearer tokens from free text (e.g. error messages). */

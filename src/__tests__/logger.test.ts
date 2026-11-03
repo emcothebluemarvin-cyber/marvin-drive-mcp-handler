@@ -41,6 +41,14 @@ describe('scrubText coverage', () => {
   });
 });
 
+describe('JSON secret pairs', () => {
+  it('redacts token, refreshToken and accessToken pairs', () => {
+    expect(redact('{"token": "a", "refreshToken": "b", "accessToken": "c", "keep": "v"}')).toBe(
+      '{"token":"[REDACTED]", "refreshToken":"[REDACTED]", "accessToken":"[REDACTED]", "keep": "v"}',
+    );
+  });
+});
+
 describe('createLogger', () => {
   it('scrubs secrets from the message', () => {
     const lines: string[] = [];
