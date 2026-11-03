@@ -1,6 +1,8 @@
 import type { Readable } from 'node:stream';
-import { ContentService, type ContentFileRef } from './content-service.js';
-import { DOC_FIELDS, docOutline } from './docs-structure.js';
+import type { DocsRequest } from '../drive/docs-adapter.js';
+import { ValidationError } from '../errors.js';
+import { ContentService, type ContentFileRef, type Guard } from './content-service.js';
+import { DOC_FIELDS, bodyEndIndex, docOutline, headings } from './docs-structure.js';
 import { DEFAULT_MAX_CHARS, sliceText, type TextSlice } from './truncate.js';
 
 export type DocsReadFormat = 'markdown' | 'structure';
@@ -16,6 +18,34 @@ export interface DocsReadResult extends TextSlice {
   name: string;
   revisionId: string;
   format: DocsReadFormat;
+}
+
+export interface DocsReplaceInput extends ContentFileRef {
+  find: string;
+  replace: string;
+  matchCase?: boolean;
+  requiredRevisionId?: string;
+}
+
+export type InsertPosition =
+  { at: 'end' } | { at: 'afterHeading'; heading: string } | { at: 'index'; index: number };
+
+export interface DocsInsertInput extends ContentFileRef {
+  text: string;
+  position: InsertPosition;
+  requiredRevisionId?: string;
+}
+
+export interface DocsEditResult {
+  revisionId: string | null;
+}
+
+interface InsertPlan {
+  index: number;
+  text: string;
+  /** Range to reset to NORMAL_TEXT, when the insert forms its own paragraph after a heading. */
+  restyle?: { startIndex: number; endIndex: number };
+  revisionId?: string;
 }
 
 async function readAll(stream: Readable): Promise<string> {
@@ -51,5 +81,116 @@ export class DocsService extends ContentService {
         ...sliceText(text, input.offset ?? 0, input.maxChars ?? DEFAULT_MAX_CHARS),
       };
     });
+  }
+
+  async replaceText(
+    input: DocsReplaceInput,
+  ): Promise<DocsEditResult & { occurrencesChanged: number }> {
+    const file = await this.resolve(input.account, input.fileId);
+    const matchCase = input.matchCase ?? true;
+    return this.run(input.account, file, 'mutate', async (ctx) => {
+      const res = await ctx.docs.batchUpdate(
+        file.id,
+        [
+          {
+            replaceAllText: {
+              containsText: { text: input.find, matchCase },
+              replaceText: input.replace,
+            },
+          },
+        ],
+        input.requiredRevisionId,
+      );
+      const occurrencesChanged = res.replies?.[0]?.replaceAllText?.occurrencesChanged ?? 0;
+      const guarded: Guard = input.requiredRevisionId ? 'caller' : false;
+      await this.ops.audit(ctx, 'docs_replace_text', file, {
+        occurrencesChanged,
+        matchCase,
+        guarded,
+      });
+      return { occurrencesChanged, revisionId: res.writeControl?.requiredRevisionId ?? null };
+    });
+  }
+
+  async insertText(input: DocsInsertInput): Promise<DocsEditResult & { insertedAt: number }> {
+    const file = await this.resolve(input.account, input.fileId);
+    const plan = await this.planInsert(input, file);
+    const revision = input.requiredRevisionId ?? plan.revisionId;
+    const guarded: Guard = input.requiredRevisionId
+      ? 'caller'
+      : plan.revisionId
+        ? 'implicit'
+        : false;
+    const requests: DocsRequest[] = [
+      { insertText: { location: { index: plan.index }, text: plan.text } },
+    ];
+    if (plan.restyle) {
+      requests.push({
+        updateParagraphStyle: {
+          range: plan.restyle,
+          paragraphStyle: { namedStyleType: 'NORMAL_TEXT' },
+          fields: 'namedStyleType',
+        },
+      });
+    }
+    return this.run(input.account, file, 'mutate', async (ctx) => {
+      const res = await ctx.docs.batchUpdate(file.id, requests, revision);
+      await this.ops.audit(ctx, 'docs_insert_text', file, {
+        position: input.position.at,
+        insertedAt: plan.index,
+        chars: input.text.length,
+        guarded,
+      });
+      return { insertedAt: plan.index, revisionId: res.writeControl?.requiredRevisionId ?? null };
+    });
+  }
+
+  private async planInsert(
+    input: DocsInsertInput,
+    file: { id: string; name: string },
+  ): Promise<InsertPlan> {
+    const pos = input.position;
+    if (pos.at === 'index') return { index: pos.index, text: input.text };
+
+    const doc = await this.run(input.account, file, 'idempotent', (ctx) =>
+      ctx.docs.getDocument(file.id, DOC_FIELDS),
+    );
+    const revisionId = doc.revisionId ?? undefined;
+    const end = bodyEndIndex(doc);
+    const base = revisionId ? { revisionId } : {};
+    if (pos.at === 'end') return { index: end - 1, text: input.text, ...base };
+
+    const all = headings(doc);
+    const heading = all.find((h) => h.text === pos.heading);
+    if (!heading) {
+      const names =
+        all
+          .slice(0, 20)
+          .map((h) => JSON.stringify(h.text))
+          .join(', ') || '(none)';
+      throw new ValidationError(
+        `Heading "${pos.heading}" not found in "${file.name}". Available headings: ${names}`,
+      );
+    }
+    if (heading.endIndex >= end) {
+      // Heading is the last paragraph: insert before its final newline, starting a new paragraph.
+      const index = end - 1;
+      const text = `\n${input.text}`;
+      // +1 also covers the original final newline, so a trailing empty paragraph left by a
+      // caller's "\n" is not left in heading style.
+      return {
+        index,
+        text,
+        restyle: { startIndex: index + 1, endIndex: index + text.length + 1 },
+        ...base,
+      };
+    }
+    const index = heading.endIndex;
+    // Only text ending in "\n" forms its own paragraph; otherwise it merges into the next one,
+    // whose style must not be touched.
+    const restyle = input.text.endsWith('\n')
+      ? { startIndex: index, endIndex: index + input.text.length }
+      : undefined;
+    return { index, text: input.text, ...(restyle ? { restyle } : {}), ...base };
   }
 }
