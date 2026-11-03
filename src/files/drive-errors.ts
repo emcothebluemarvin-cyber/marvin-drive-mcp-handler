@@ -87,7 +87,8 @@ export function reasonOf(err: unknown): string | undefined {
 }
 
 const API_DISABLED_REASONS = new Set(['accessNotConfigured', 'SERVICE_DISABLED']);
-const API_DISABLED_MESSAGE = /API has not been used in project|API .* is disabled/;
+const API_DISABLED_MESSAGE =
+  /\bAPI has not been used in project\b|\bAPI (?:has been|is) disabled\b/;
 const REVISION_MISMATCH = /required revision ID .* does not match/i;
 
 function isApiDisabled(
@@ -113,7 +114,7 @@ export function isRateLimit(status: number | undefined, reason: string | undefin
   );
 }
 
-/** idempotent: safe to repeat; create: may duplicate; mutate: an in-place edit that may not be repeated. */
+/** idempotent: safe to repeat; create: may duplicate; mutate: an in-place edit that is unsafe to repeat. */
 export type OperationKind = 'idempotent' | 'create' | 'mutate';
 
 export interface MapContext {

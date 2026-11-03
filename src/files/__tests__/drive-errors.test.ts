@@ -196,3 +196,50 @@ describe('content API error mapping', () => {
     expect(mapDriveError(gaxios(503), ctx).message).not.toMatch(/applied|duplicate/);
   });
 });
+
+describe('content API error mapping hardening', () => {
+  const DISABLED_MSG = 'Google Docs API has not been used in project 1 before or it is disabled.';
+
+  it('M1: ErrorInfo SERVICE_DISABLED wins over a generic top-level reason', () => {
+    const err = Object.assign(errorInfo(403, 'SERVICE_DISABLED', 'x'), {
+      errors: [{ reason: 'forbidden' }],
+    });
+    expect(mapDriveError(err, { ...ctx, api: 'docs' })).toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M7: detects a disabled API from the response body message', () => {
+    const err = Object.assign(new Error('Request failed with status code 403'), {
+      status: 403,
+      response: { status: 403, data: { error: { code: 403, message: DISABLED_MSG } } },
+    });
+    expect(mapDriveError(err, { ...ctx, api: 'docs' })).toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M8: a 400 with the disabled-API wording is not ApiDisabledError', () => {
+    const mapped = mapDriveError(withMessage(400, 'badRequest', DISABLED_MSG), {
+      ...ctx,
+      api: 'docs',
+    });
+    expect(mapped).toBeInstanceOf(DriveApiError);
+    expect(mapped).not.toBeInstanceOf(ApiDisabledError);
+  });
+
+  it('M9: a 500 with the mismatch wording is not a revision mismatch', () => {
+    expect(isRevisionMismatch(withMessage(500, 'backendError', MISMATCH))).toBe(false);
+  });
+
+  it('reads ErrorInfo from an unparsed JSON string body', () => {
+    const body = {
+      error: {
+        details: [
+          { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'SERVICE_DISABLED' },
+        ],
+      },
+    };
+    const err = Object.assign(new Error('x'), {
+      status: 403,
+      response: { status: 403, data: JSON.stringify(body) },
+    });
+    expect(reasonOf(err)).toBe('SERVICE_DISABLED');
+  });
+});
