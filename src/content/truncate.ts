@@ -15,7 +15,7 @@ const isLow = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
 /** Slices `text` for paging without ever splitting a surrogate pair (e.g. emoji). */
 export function sliceText(text: string, offset: number, maxChars: number): TextSlice {
   const total = text.length;
-  let start = Math.min(Math.max(0, Math.trunc(offset)), total);
+  let start = Math.min(Math.max(0, Math.trunc(Number.isFinite(offset) ? offset : 0)), total);
   if (
     start > 0 &&
     start < total &&
@@ -24,7 +24,10 @@ export function sliceText(text: string, offset: number, maxChars: number): TextS
   ) {
     start -= 1;
   }
-  let end = Math.min(start + Math.max(1, Math.trunc(maxChars)), total);
+  let end = Math.min(
+    start + Math.max(1, Math.trunc(Number.isFinite(maxChars) ? maxChars : DEFAULT_MAX_CHARS)),
+    total,
+  );
   if (end < total && isHigh(text.charCodeAt(end - 1))) end -= 1;
   if (end === start && start < total) end = Math.min(start + 2, total); // always make progress
   const truncated = end < total;

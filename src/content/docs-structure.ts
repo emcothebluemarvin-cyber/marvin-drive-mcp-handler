@@ -82,5 +82,5 @@ export function headings(doc: DocsDocument): HeadingRef[] {
 /** endIndex of the last body element (the body always ends with a paragraph). */
 export function bodyEndIndex(doc: DocsDocument): number {
   const content = doc.body?.content ?? [];
-  return content.at(-1)?.endIndex ?? 1;
+  return Math.max(content.at(-1)?.endIndex ?? 2, 2);
 }

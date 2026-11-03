@@ -93,6 +93,15 @@ describe('DocsService.read', () => {
     expect(res.content).toHaveLength(1000);
   });
 
+  it('decodes multi-byte characters split across mixed chunks', async () => {
+    doc();
+    docs.getDocument.mockResolvedValueOnce({ revisionId: 'r1' });
+    drive.exportMedia.mockResolvedValueOnce(
+      Readable.from(['ç', Buffer.from([0xc3]), Buffer.from([0xa7])]),
+    );
+    await expect(service.read({ fileId: 'd1' })).resolves.toMatchObject({ content: 'çç' });
+  });
+
   it('retries a 5xx read', async () => {
     doc();
     docs.getDocument
@@ -151,13 +160,20 @@ describe('DocsService.replaceText', () => {
     });
     const res = await service.replaceText({
       fileId: 'd1',
-      find: 'a',
-      replace: 'b',
+      find: 'SECRET_FIND',
+      replace: 'SECRET_REPL',
       requiredRevisionId: 'r8',
     });
     expect(docs.batchUpdate).toHaveBeenCalledWith(
       'd1',
-      [{ replaceAllText: { containsText: { text: 'a', matchCase: true }, replaceText: 'b' } }],
+      [
+        {
+          replaceAllText: {
+            containsText: { text: 'SECRET_FIND', matchCase: true },
+            replaceText: 'SECRET_REPL',
+          },
+        },
+      ],
       'r8',
     );
     expect(res).toEqual({ occurrencesChanged: 3, revisionId: 'r9' });
@@ -168,7 +184,8 @@ describe('DocsService.replaceText', () => {
       name: 'Plan',
       details: { occurrencesChanged: 3, matchCase: true, guarded: 'caller' },
     });
-    expect(JSON.stringify(audit.entries)).not.toContain('"b"');
+    expect(JSON.stringify(audit.entries)).not.toContain('SECRET_FIND');
+    expect(JSON.stringify(audit.entries)).not.toContain('SECRET_REPL');
   });
 
   it('reports 0 when Docs omits occurrencesChanged', async () => {
@@ -235,7 +252,7 @@ describe('DocsService.insertText', () => {
       position: { at: 'afterHeading', heading: 'Goals' },
     });
     expect(docs.batchUpdate.mock.calls[0]?.[1]).toEqual([
-      { insertText: { location: { index: 7 }, text: 'First\n' } },
+      { insertText: { location: { index: 6 }, text: '\nFirst' } },
       {
         updateParagraphStyle: {
           range: { startIndex: 7, endIndex: 13 },
@@ -256,7 +273,56 @@ describe('DocsService.insertText', () => {
       position: { at: 'afterHeading', heading: 'Goals' },
     });
     expect(docs.batchUpdate.mock.calls[0]?.[1]).toEqual([
-      { insertText: { location: { index: 7 }, text: 'Pre: ' } },
+      { insertText: { location: { index: 6 }, text: '\nPre: ' } },
+      {
+        updateParagraphStyle: {
+          range: { startIndex: 7, endIndex: 13 },
+          paragraphStyle: { namedStyleType: 'NORMAL_TEXT' },
+          fields: 'namedStyleType',
+        },
+      },
+    ]);
+  });
+
+  it('inserts under a heading that is followed by a table', async () => {
+    doc();
+    docs.getDocument.mockResolvedValueOnce({
+      revisionId: 'r7',
+      body: {
+        content: [
+          {
+            startIndex: 1,
+            endIndex: 7,
+            paragraph: {
+              paragraphStyle: { namedStyleType: 'HEADING_1' },
+              elements: [{ textRun: { content: 'Goals\n' } }],
+            },
+          },
+          { startIndex: 7, endIndex: 30, table: { rows: 1, columns: 1, tableRows: [] } },
+          {
+            startIndex: 30,
+            endIndex: 31,
+            paragraph: { elements: [{ textRun: { content: '\n' } }] },
+          },
+        ],
+      },
+    });
+    docs.batchUpdate.mockResolvedValueOnce({});
+    const res = await service.insertText({
+      fileId: 'd1',
+      text: 'Hi',
+      position: { at: 'afterHeading', heading: 'Goals' },
+    });
+    expect(res.insertedAt).toBe(6);
+    expect(docs.batchUpdate.mock.calls[0]?.[1]).toEqual([
+      { insertText: { location: { index: 6 }, text: '\nHi' } },
+      {
+        updateParagraphStyle: {
+          range: { startIndex: 7, endIndex: 10 },
+          paragraphStyle: { namedStyleType: 'NORMAL_TEXT' },
+          fields: 'namedStyleType',
+        },
+      },
     ]);
   });
 

@@ -82,4 +82,9 @@ describe('headings / bodyEndIndex', () => {
     };
     expect(headings(doc)).toEqual([]);
   });
+
+  it('never returns an end index that would make the insert index 0', () => {
+    expect(bodyEndIndex({})).toBe(2);
+    expect(bodyEndIndex({ body: { content: [{ endIndex: 1, sectionBreak: {} }] } })).toBe(2);
+  });
 });

@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { sliceText } from '../truncate.js';
 
 describe('sliceText', () => {
+  it('treats non-finite inputs as defaults', () => {
+    const r = sliceText('hello', Number.NaN, Number.NaN);
+    expect(r).toMatchObject({ content: 'hello', offset: 0, truncated: false });
+  });
+
   it('returns everything when it fits', () => {
     expect(sliceText('hello', 0, 10)).toEqual({
       content: 'hello',

@@ -182,26 +182,17 @@ export class DocsService extends ContentService {
         `Heading "${pos.heading}" not found in "${file.name}". Available headings: ${names}`,
       );
     }
-    if (heading.endIndex >= end) {
-      // Heading is the last paragraph: insert before its final newline, starting a new paragraph.
-      const index = end - 1;
-      const text = `\n${input.text}`;
-      // +1 also covers the original final newline, so a trailing empty paragraph left by a
-      // caller's "\n" is not left in heading style.
-      return {
-        index,
-        text,
-        restyle: { startIndex: index + 1, endIndex: index + text.length + 1 },
-        ...base,
-      };
-    }
-    const index = heading.endIndex;
-    // Only text ending in "\n" forms its own paragraph; otherwise it merges into the next one,
-    // whose style must not be touched.
-    const restyle = input.text.endsWith('\n')
-      ? { startIndex: index, endIndex: index + input.text.length }
-      : undefined;
-    return { index, text: input.text, ...(restyle ? { restyle } : {}), ...base };
+    // Insert before the heading's own newline so the text becomes a separate paragraph whatever
+    // follows (table, section break, list, end of body), then reset it to NORMAL_TEXT.
+    const index = heading.endIndex - 1;
+    const body = input.text.endsWith('\n') ? input.text.slice(0, -1) : input.text;
+    const text = `\n${body}`;
+    return {
+      index,
+      text,
+      restyle: { startIndex: index + 1, endIndex: index + text.length + 1 },
+      ...base,
+    };
   }
 
   async batchUpdate(input: DocsBatchInput): Promise<DocsEditResult & { replies: unknown[] }> {

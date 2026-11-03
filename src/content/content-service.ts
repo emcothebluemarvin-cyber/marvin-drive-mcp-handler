@@ -40,7 +40,7 @@ export abstract class ContentService {
     kind: OperationKind,
     fn: (ctx: DriveContext) => Promise<T>,
   ): Promise<T> {
-    return this.ops.exec(account, kind, file.id, (ctx) => fn(ctx), {
+    return this.ops.exec(account, kind, file.id, fn, {
       api: this.api,
       name: file.name,
     });

@@ -54,4 +54,33 @@ describe('content adapters', () => {
     expect(captured[0]?.url).toContain('/v1/presentations/p1');
     expect(captured[0]?.params).toMatchObject({ fields: 'revisionId' });
   });
+
+  it('slides batchUpdate sends writeControl only when a revision is given', async () => {
+    const captured: Captured[] = [];
+    const slides = createSlidesAdapter(fakeAuth(captured));
+    const requests = [{ deleteObject: { objectId: 'o1' } }];
+    await slides.batchUpdate('p1', requests, 'rev1');
+    await slides.batchUpdate('p1', requests);
+    expect(captured[0]?.url).toContain('/v1/presentations/p1:batchUpdate');
+    expect(captured[0]?.data).toEqual({ requests, writeControl: { requiredRevisionId: 'rev1' } });
+    expect(captured[1]?.data).not.toHaveProperty('writeControl');
+  });
+
+  it('sheets updateValues sends the input option and values body', async () => {
+    const captured: Captured[] = [];
+    const sheets = createSheetsAdapter(fakeAuth(captured));
+    await sheets.updateValues('s1', 'Tab!A1', [['a', 1]], 'RAW');
+    expect(captured[0]?.method).toBe('PUT');
+    expect(captured[0]?.url).toContain('/v4/spreadsheets/s1/values/');
+    expect(captured[0]?.params).toMatchObject({ valueInputOption: 'RAW' });
+    expect(captured[0]?.data).toEqual({ values: [['a', 1]] });
+  });
+
+  it('sheets getValues passes the render option', async () => {
+    const captured: Captured[] = [];
+    const sheets = createSheetsAdapter(fakeAuth(captured));
+    await sheets.getValues('s1', 'Tab!A1:B2', 'FORMULA');
+    expect(captured[0]?.url).toContain('/v4/spreadsheets/s1/values/');
+    expect(captured[0]?.params).toMatchObject({ valueRenderOption: 'FORMULA' });
+  });
 });
