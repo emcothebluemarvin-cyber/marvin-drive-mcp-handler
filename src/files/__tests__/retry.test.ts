@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { withRetry } from '../retry.js';
+import { retryKind, withRetry } from '../retry.js';
 
 const http = (status: number, reason?: string): Error =>
   Object.assign(new Error(`HTTP ${status}`), {
@@ -82,4 +82,17 @@ describe('withRetry', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe('retryKind', () => {
+  it('reads the network code from err.cause.code', () => {
+    const err = Object.assign(new Error('fetch failed'), { cause: { code: 'UND_ERR_SOCKET' } });
+    expect(retryKind(err)).toBe('server');
+  });
+
+  it('treats an undici "terminated" TypeError as a server error', () => {
+    expect(retryKind(new TypeError('terminated'))).toBe('server');
+    expect(retryKind(new TypeError('other'))).toBeNull();
+    expect(retryKind(new Error('terminated'))).toBeNull();
+  });
 });

@@ -24,13 +24,21 @@ const NETWORK_CODES = new Set([
   'UND_ERR_SOCKET',
 ]);
 
-function retryKind(err: unknown): 'rate-limit' | 'server' | null {
+function networkCode(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const code = (value as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export function retryKind(err: unknown): 'rate-limit' | 'server' | null {
   const status = statusOf(err);
   if (isRateLimit(status, reasonOf(err))) return 'rate-limit';
   if (status !== undefined && status >= 500) return 'server';
   if (status === undefined && typeof err === 'object' && err !== null) {
-    const code = (err as { code?: unknown }).code;
-    if (typeof code === 'string' && NETWORK_CODES.has(code)) return 'server';
+    // undici (global fetch) puts the socket error code on `cause`.
+    const codes = [networkCode(err), networkCode((err as { cause?: unknown }).cause)];
+    if (codes.some((c) => c !== undefined && NETWORK_CODES.has(c))) return 'server';
+    if (err instanceof TypeError && err.message === 'terminated') return 'server';
   }
   return null;
 }

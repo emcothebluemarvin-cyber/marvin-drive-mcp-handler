@@ -64,9 +64,10 @@ export class RateLimitError extends AppError {
 export class ExportTooLargeError extends AppError {
   readonly code = 'EXPORT_TOO_LARGE';
 
-  constructor(webViewLink: string | null, options?: ErrorOptions) {
-    const tail = webViewLink ? ` or open ${webViewLink}` : '';
-    super(`Export exceeds Drive's 10 MB limit; try exportFormat "pdf"${tail}`, options);
+  constructor(webViewLink: string | null, options?: ErrorOptions & { format?: string }) {
+    const hint = options?.format === 'pdf' ? '' : '; try exportFormat "pdf"';
+    const tail = webViewLink ? `${hint ? ' or' : ';'} open ${webViewLink}` : '';
+    super(`Export exceeds Drive's 10 MB limit${hint}${tail}`, options);
   }
 }
 

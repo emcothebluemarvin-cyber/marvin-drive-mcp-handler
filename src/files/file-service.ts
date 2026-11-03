@@ -17,7 +17,7 @@ import {
   type ExportPlan,
 } from './export-formats.js';
 import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
-import { withRetry, type RetryClass, type RetryOptions } from './retry.js';
+import { retryKind, withRetry, type RetryClass, type RetryOptions } from './retry.js';
 import { googleTargetMime, uploadMimeType } from './upload-mime.js';
 
 export const SUMMARY_FIELDS = 'id, name, mimeType, size, modifiedTime, parents';
@@ -405,10 +405,11 @@ export class FileService {
         try {
           return await ctx.drive.fetchExportLink(link);
         } catch (fallbackErr) {
+          if (retryKind(fallbackErr) !== null) throw fallbackErr;
           this.log.warn('exportLinks fallback failed', { fileId, error: fallbackErr });
         }
       }
-      throw new ExportTooLargeError(file.webViewLink ?? null, { cause: err });
+      throw new ExportTooLargeError(file.webViewLink ?? null, { cause: err, format: plan.format });
     }
   }
 

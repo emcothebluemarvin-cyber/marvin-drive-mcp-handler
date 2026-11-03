@@ -176,4 +176,65 @@ describe('download', () => {
     await expect(service.download({ fileId: 'f1' })).rejects.toThrow(/socket hang up/);
     expect(await readdir(dir)).toEqual([]);
   });
+
+  it('retries a mid-stream connection drop and leaves exactly one file', async () => {
+    drive.getFile.mockResolvedValue({
+      id: 'f1',
+      name: 'big.bin',
+      mimeType: 'application/octet-stream',
+    });
+    const dropped = new Readable({
+      read() {
+        this.destroy(
+          Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET' } }),
+        );
+      },
+    });
+    drive.downloadMedia.mockResolvedValueOnce(dropped).mockResolvedValueOnce(stream('OK'));
+    const res = await service.download({ fileId: 'f1' });
+    expect(drive.downloadMedia).toHaveBeenCalledTimes(2);
+    expect(await readFile(res.path, 'utf8')).toBe('OK');
+    expect(await readdir(dir)).toEqual(['big.bin']);
+  });
+
+  it('retries the whole download when exportMedia returns 503', async () => {
+    drive.getFile.mockResolvedValue({ id: 'd1', name: 'Plan', mimeType: GOOGLE_MIME.document });
+    drive.exportMedia.mockRejectedValueOnce(httpError(503)).mockResolvedValueOnce(stream('DOCX'));
+    const res = await service.download({ fileId: 'd1' });
+    expect(drive.exportMedia).toHaveBeenCalledTimes(2);
+    expect(await readdir(dir)).toEqual(['Plan.docx']);
+    expect(res.exportFormat).toBe('docx');
+  });
+
+  it('exports a shortcut whose target is a Google Doc', async () => {
+    drive.getFile
+      .mockResolvedValueOnce({
+        id: 's1',
+        name: 'link',
+        mimeType: GOOGLE_MIME.shortcut,
+        shortcutDetails: { targetId: 't1' },
+      })
+      .mockResolvedValueOnce({ id: 't1', name: 'Target', mimeType: GOOGLE_MIME.document });
+    drive.exportMedia.mockResolvedValueOnce(stream('DOCX'));
+    const res = await service.download({ fileId: 's1' });
+    expect(drive.exportMedia).toHaveBeenCalledWith('t1', DOCX);
+    expect(path.basename(res.path)).toBe('Target.docx');
+    expect(res.exportFormat).toBe('docx');
+  });
+
+  it('rethrows a retryable fetchExportLink failure so the download is retried', async () => {
+    drive.getFile.mockResolvedValue({
+      id: 'd1',
+      name: 'Big',
+      mimeType: GOOGLE_MIME.document,
+      exportLinks: { [DOCX]: 'https://export/d1.docx' },
+    });
+    drive.exportMedia.mockRejectedValue(httpError(403, 'exportSizeLimitExceeded'));
+    drive.fetchExportLink
+      .mockRejectedValueOnce(httpError(503))
+      .mockResolvedValueOnce(stream('BIG'));
+    const res = await service.download({ fileId: 'd1' });
+    expect(drive.fetchExportLink).toHaveBeenCalledTimes(2);
+    expect(await readFile(res.path, 'utf8')).toBe('BIG');
+  });
 });

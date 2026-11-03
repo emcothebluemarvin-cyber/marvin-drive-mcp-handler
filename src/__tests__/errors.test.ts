@@ -24,6 +24,10 @@ describe('errors', () => {
     expect(new NotFoundError('abc').message).toBe('File not found: abc');
     expect(new ExportTooLargeError('https://x/y').message).toContain('open https://x/y');
     expect(new ExportTooLargeError(null).message).not.toContain('open');
+    expect(new ExportTooLargeError(null, { format: 'docx' }).message).toContain(
+      'exportFormat "pdf"',
+    );
+    expect(new ExportTooLargeError(null, { format: 'pdf' }).message).not.toContain('exportFormat');
     expect(new DriveApiError(500, 'boom').message).toBe('Drive API error (500): boom');
     expect(new DriveApiError(undefined, 'boom').message).toBe('Drive API error: boom');
   });
