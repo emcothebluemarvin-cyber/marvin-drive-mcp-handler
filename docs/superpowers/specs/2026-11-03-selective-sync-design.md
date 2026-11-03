@@ -63,7 +63,7 @@ record {                      // one per tracked Drive file, keyed by remoteId
 
 **Root identity marker:** `sync_create_pair` writes `<localDir>/.marvin-sync-<name>` containing `pair.id`. (Dot-files are ignored by sync.) Moving the folder elsewhere = remove and recreate the pair (records re-adopt by md5, §6.5 U2).
 
-**Keys:** `key` = NFC relative path. `foldKey` = NFC → `toUpperCase` → `toLowerCase` → NFC (approximates APFS folding incl. `ß`/`SS`, ligatures, final sigma; over-folding only adds ambiguity, never data loss). Whether two names are the same file is ultimately decided by the filesystem: an on-disk `lstat` inode equal to a scanned entry ⇒ same file. Remote names containing `/` or NUL, or a segment longer than 255 UTF-8 bytes, are `unrepresentable` (skipped, reported).
+**Keys:** `key` = NFC relative path. `foldKey` = NFC → per character `toUpperCase` except Turkish dotless `ı` (kept as is, APFS keeps `ı` ≠ `i`) → `toLowerCase` → NFC (matches APFS for `ı`/`I`/`i`, `İ`, `ß`/`SS`, ligatures, final sigma). A fold-only match is accepted as the same file only when the filesystem agrees (on-disk `lstat` of the key returns the same inode); otherwise `ambiguous`. Whether two names are the same file is ultimately decided by the filesystem: an on-disk `lstat` inode equal to a scanned entry ⇒ same file. Remote names containing `/` or NUL, or a segment longer than 255 UTF-8 bytes, are `unrepresentable` (skipped, reported).
 
 ## 4. Architecture
 
