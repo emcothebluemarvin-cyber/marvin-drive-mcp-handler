@@ -1,0 +1,102 @@
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { ValidationError } from '../../errors.js';
+import { assertInside, resolveDestination, writeUnique } from '../destination.js';
+
+let dir: string;
+beforeEach(async () => {
+  dir = await mkdtemp(path.join(os.tmpdir(), 'marvin-dest-'));
+});
+
+describe('resolveDestination', () => {
+  const base = { driveName: 'Plan', fileId: 'f1', extension: 'docx' };
+
+  it('uses the default directory when destPath is omitted', async () => {
+    await expect(resolveDestination({ ...base, defaultDir: dir })).resolves.toEqual({
+      dir,
+      name: 'Plan.docx',
+    });
+  });
+
+  it('treats an existing directory or a trailing slash as a directory', async () => {
+    await expect(
+      resolveDestination({ ...base, defaultDir: '/unused', destPath: dir }),
+    ).resolves.toEqual({ dir, name: 'Plan.docx' });
+    const fresh = path.join(dir, 'new-folder');
+    await expect(
+      resolveDestination({ ...base, defaultDir: '/unused', destPath: `${fresh}/` }),
+    ).resolves.toEqual({ dir: fresh, name: 'Plan.docx' });
+  });
+
+  it('treats any other destPath as the full target file path', async () => {
+    const target = path.join(dir, 'custom.bin');
+    await expect(
+      resolveDestination({ ...base, defaultDir: '/unused', destPath: target }),
+    ).resolves.toEqual({ dir, name: 'custom.bin' });
+  });
+
+  it('expands ~ to the home directory', async () => {
+    const res = await resolveDestination({ ...base, defaultDir: '/unused', destPath: '~/x.txt' });
+    expect(res).toEqual({ dir: os.homedir(), name: 'x.txt' });
+  });
+
+  it('sanitizes hostile Drive names so they stay inside the directory', async () => {
+    const res = await resolveDestination({
+      driveName: '../../.zshrc',
+      fileId: 'f1',
+      defaultDir: dir,
+    });
+    expect(res).toEqual({ dir, name: '_.._.zshrc' });
+  });
+});
+
+describe('assertInside', () => {
+  it('rejects paths that escape the directory', () => {
+    expect(() => assertInside(dir, path.join(dir, '..', 'evil'))).toThrow(ValidationError);
+    expect(() => assertInside(dir, dir)).toThrow(ValidationError);
+    expect(() => assertInside(dir, path.join(dir, 'ok.txt'))).not.toThrow();
+    expect(() => assertInside(dir, path.join(dir, '..notes'))).not.toThrow();
+  });
+});
+
+describe('writeUnique', () => {
+  it('writes the stream, creating missing directories', async () => {
+    const target = { dir: path.join(dir, 'a', 'b'), name: 'hello.txt' };
+    const res = await writeUnique(target, async () => Readable.from(['hello']));
+    expect(res).toEqual({ path: path.join(dir, 'a', 'b', 'hello.txt'), size: 5 });
+    expect(await readFile(res.path, 'utf8')).toBe('hello');
+  });
+
+  it('never overwrites: picks the next free suffix', async () => {
+    await writeFile(path.join(dir, 'report.pdf'), 'old');
+    await writeFile(path.join(dir, 'report (1).pdf.part'), 'in progress elsewhere');
+    const res = await writeUnique({ dir, name: 'report.pdf' }, async () => Readable.from(['new']));
+    expect(path.basename(res.path)).toBe('report (2).pdf');
+    expect(await readFile(path.join(dir, 'report.pdf'), 'utf8')).toBe('old');
+  });
+
+  it('removes the partial file when the stream fails', async () => {
+    const failing = (): Readable =>
+      new Readable({
+        read() {
+          this.destroy(new Error('network reset'));
+        },
+      });
+    await expect(writeUnique({ dir, name: 'x.bin' }, async () => failing())).rejects.toThrow(
+      'network reset',
+    );
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('removes the reservation when opening the source fails', async () => {
+    await expect(
+      writeUnique({ dir, name: 'x.bin' }, async () => {
+        throw new Error('403');
+      }),
+    ).rejects.toThrow('403');
+    expect(await readdir(dir)).toEqual([]);
+  });
+});
