@@ -2,7 +2,22 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 export type AuditOp =
-  'upload' | 'create_folder' | 'move' | 'rename' | 'copy' | 'delete' | 'restore';
+  | 'upload'
+  | 'create_folder'
+  | 'move'
+  | 'rename'
+  | 'copy'
+  | 'delete'
+  | 'restore'
+  | 'docs_replace_text'
+  | 'docs_insert_text'
+  | 'docs_batch_update'
+  | 'sheets_write_range'
+  | 'sheets_append_rows'
+  | 'sheets_batch_update'
+  | 'slides_replace_text'
+  | 'slides_set_text'
+  | 'slides_batch_update';
 
 export interface AuditEntry {
   ts: string;

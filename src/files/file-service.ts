@@ -3,12 +3,12 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
-import { isInvalidGrant } from '../auth/oauth-errors.js';
+import { OperationRunner } from '../core/operation.js';
 import type { DriveContext, DriveRunner } from '../drive/client-factory.js';
 import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
 import { ExportTooLargeError, NotFoundError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import { mapDriveError, reasonOf, statusOf } from './drive-errors.js';
+import { reasonOf, statusOf } from './drive-errors.js';
 import { expandHome, resolveDestination, writeUnique } from './destination.js';
 import {
   GOOGLE_MIME,
@@ -18,7 +18,7 @@ import {
   type ExportPlan,
 } from './export-formats.js';
 import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
-import { retryKind, withRetry, type RetryClass, type RetryOptions } from './retry.js';
+import { retryKind, type RetryClass, type RetryOptions } from './retry.js';
 import { googleTargetMime, uploadMimeType } from './upload-mime.js';
 
 export const SUMMARY_FIELDS = 'id, name, mimeType, size, modifiedTime, parents';
@@ -155,9 +155,11 @@ function clampPageSize(pageSize: number | undefined): number {
 
 export class FileService {
   protected readonly log: Logger;
+  private readonly ops: OperationRunner;
 
   constructor(protected readonly deps: FileServiceDeps) {
     this.log = deps.logger ?? defaultLogger;
+    this.ops = new OperationRunner(deps);
   }
 
   list(input: ListInput): Promise<ListResult> {
@@ -436,38 +438,16 @@ export class FileService {
     target: string | undefined,
     operation: (ctx: DriveContext, attempt: number) => Promise<T>,
   ): Promise<T> {
-    return this.deps.runner.run(account, async (ctx) => {
-      try {
-        return await withRetry((attempt) => operation(ctx, attempt), retryClass, this.deps.retry);
-      } catch (err) {
-        if (isInvalidGrant(err)) throw err;
-        throw mapDriveError(err, {
-          target,
-          alias: ctx.account.alias,
-          logger: this.log,
-          kind: retryClass,
-        });
-      }
-    });
+    return this.ops.exec(account, retryClass, target, operation);
   }
 
   /** Writes an audit entry; failures are logged, never thrown (the Drive change already happened). */
-  protected async recordAudit(
+  protected recordAudit(
     ctx: DriveContext,
     op: AuditOp,
     file: { id?: string | null; name?: string | null },
     details: Record<string, unknown>,
   ): Promise<void> {
-    try {
-      await this.deps.audit.record({
-        account: ctx.account.alias,
-        op,
-        fileId: file.id ?? '',
-        ...(file.name ? { name: file.name } : {}),
-        details,
-      });
-    } catch (err) {
-      this.log.warn('Audit log write failed', { op, fileId: file.id, error: err });
-    }
+    return this.ops.audit(ctx, op, file, details);
   }
 }
