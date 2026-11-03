@@ -10,6 +10,9 @@ import { DocsService } from './content/docs-service.js';
 import { SheetsService } from './content/sheets-service.js';
 import { SlidesService } from './content/slides-service.js';
 import { DriveClientFactory } from './drive/client-factory.js';
+import { PairStore } from './sync/pair-store.js';
+import { SyncService } from './sync/sync-service.js';
+import { defaultExec } from './sync/trash.js';
 import { FileService } from './files/file-service.js';
 
 export interface App {
@@ -19,6 +22,7 @@ export interface App {
   docs: DocsService;
   sheets: SheetsService;
   slides: SlidesService;
+  sync: SyncService;
 }
 
 /** Composition root: wires real implementations together. */
@@ -48,5 +52,11 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
   const docs = new DocsService({ runner, audit });
   const sheets = new SheetsService({ runner, audit });
   const slides = new SlidesService({ runner, audit });
-  return { paths, auth, files, docs, sheets, slides };
+  const sync = new SyncService({
+    runner,
+    audit,
+    store: new PairStore({ dir: paths.syncDir }),
+    trashExec: defaultExec,
+  });
+  return { paths, auth, files, docs, sheets, slides, sync };
 }

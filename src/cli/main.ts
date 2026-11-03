@@ -76,6 +76,7 @@ program
       docs: app.docs,
       sheets: app.sheets,
       slides: app.slides,
+      sync: app.sync,
       auth: app.auth,
       version: VERSION,
     });
