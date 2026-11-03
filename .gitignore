@@ -1,0 +1,22 @@
+# Dependencies & build
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Google OAuth credentials & tokens (never commit)
+*client_secret*
+*credentials*.json
+*token*.json
+marvin-drive-mcp-*.txt
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.log
