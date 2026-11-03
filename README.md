@@ -5,7 +5,7 @@ Local MCP server + CLI that lets Claude Code manage files in one or more Google 
 ## Requirements
 
 - macOS (tokens are stored in the login Keychain), Node.js ≥ 22.12
-- A Google Cloud project with **Google Drive API** enabled and an OAuth client of type **Desktop app**
+- A Google Cloud project with **Google Drive API** enabled (plus **Google Docs API**, **Google Sheets API** and **Google Slides API** for the content tools; the server reports a clear error if one is not enabled) and an OAuth client of type **Desktop app**
 - While the OAuth app is in **Testing** mode: every account must be listed under _Google Auth Platform → Audience → Test users_, and logins expire after 7 days (re-run `auth login`)
 
 ## Setup
@@ -55,6 +55,38 @@ All tools accept an optional `account` (alias or email).
 | `drive_create_folder`, `drive_move`, `drive_rename`, `drive_copy` | Organize files                                                                                            |
 | `drive_delete`                                                    | Trash by default; `permanent: true` deletes forever                                                       |
 | `drive_restore`                                                   | Restore from trash                                                                                        |
+
+### Docs
+
+| Tool                | Purpose                                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `docs_read`         | Read a Doc as Markdown, or as an indexed structure outline; returns `revisionId`; paged                     |
+| `docs_replace_text` | Replace every occurrence of a string                                                                        |
+| `docs_insert_text`  | Insert text at the end, as new paragraph(s) directly under a heading (also above tables), or at a raw index |
+| `docs_batch_update` | Advanced: raw Docs API requests (formatting, tables, deletions); requires `requiredRevisionId`              |
+
+### Sheets
+
+| Tool                  | Purpose                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `sheets_info`         | Tabs (sheetId, title, size, hidden, sheetType), locale and time zone                        |
+| `sheets_read_range`   | Read cell values (formatted, unformatted or formulas); truncates whole rows beyond maxCells |
+| `sheets_write_range`  | Overwrite a range with values (`null` clears a cell)                                        |
+| `sheets_append_rows`  | Append rows after the last row of a table                                                   |
+| `sheets_batch_update` | Advanced: raw Sheets API requests (tabs, formatting, sorting); no concurrency guard         |
+
+### Slides
+
+| Tool                  | Purpose                                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `slides_read`         | Per slide: element ids, text (including shapes in groups), tables, speaker notes; returns `revisionId` |
+| `slides_replace_text` | Replace every occurrence across the deck or only on given slides                                       |
+| `slides_set_text`     | Replace the whole text of one shape, including shapes inside groups                                    |
+| `slides_batch_update` | Advanced: raw Slides API requests (create slides/shapes, styling); requires `requiredRevisionId`       |
+
+### Editing safely
+
+Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools such as `docs_insert_text` and `slides_set_text` apply this guard implicitly. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
 
 ## Files
 
