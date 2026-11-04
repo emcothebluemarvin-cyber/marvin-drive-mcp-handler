@@ -17,6 +17,7 @@ import { ValidationError, hasErrorCode } from '../errors.js';
 import { EXPORT_FORMATS } from '../files/export-formats.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { PAIR_NAME, type Pair, type PairFile } from './types.js';
+import { renameReplacing } from '../files/rename-replacing.js';
 
 const exportFormat = z.enum(EXPORT_FORMATS);
 
@@ -175,7 +176,7 @@ export class PairStore {
       await handle.close();
     }
     try {
-      await rename(tmp, target);
+      await renameReplacing(tmp, target);
     } catch (err) {
       await rm(tmp, { force: true });
       throw err;
@@ -304,7 +305,7 @@ export async function writeMarker(localDir: string, name: string, id: string): P
   } finally {
     await handle.close();
   }
-  await rename(tmp, target);
+  await renameReplacing(tmp, target);
 }
 
 /** The marker's pair id, or null when it is missing. */

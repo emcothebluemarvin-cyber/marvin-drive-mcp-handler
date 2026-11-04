@@ -11,6 +11,7 @@ describe('resolvePaths', () => {
       configDir: dir,
       clientSecret: path.join(dir, 'client_secret.json'),
       accounts: path.join(dir, 'accounts.json'),
+      tokens: path.join(dir, 'tokens.json'),
       audit: path.join(dir, 'audit.jsonl'),
       syncDir: path.join(dir, 'sync'),
       downloadsDir: path.join(os.homedir(), 'Downloads', 'marvin-drive'),
@@ -27,8 +28,9 @@ describe('resolvePaths', () => {
 
   it('honours MARVIN_DRIVE_CONFIG_DIR', () => {
     const p = resolvePaths({ MARVIN_DRIVE_CONFIG_DIR: '/tmp/x' });
-    expect(p.configDir).toBe('/tmp/x');
-    expect(p.accounts).toBe('/tmp/x/accounts.json');
-    expect(p.syncDir).toBe('/tmp/x/sync');
+    const dir = path.resolve('/tmp/x'); // D:\tmp\x on Windows
+    expect(p.configDir).toBe(dir);
+    expect(p.accounts).toBe(path.join(dir, 'accounts.json'));
+    expect(p.syncDir).toBe(path.join(dir, 'sync'));
   });
 });

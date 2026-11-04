@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, type Stats } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { ValidationError, hasErrorCode } from '../errors.js';
-import { PART_SUFFIX, absInside, foldKey, isIgnoredName, toKey } from './paths.js';
+import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
 import type { LocalScan, OnDiskProbe } from './types.js';
 
 export interface LocalScanOptions {
@@ -95,11 +95,12 @@ async function walk(
 export async function probeOnDisk(
   root: string,
   keys: readonly string[],
+  lstatFn: (p: string) => Promise<Stats> = lstat,
 ): Promise<Map<string, OnDiskProbe>> {
   const found = new Map<string, OnDiskProbe>();
   for (const key of keys) {
     try {
-      const info = await lstat(absInside(root, key));
+      const info = await lstatFn(absInside(root, key));
       const kind = info.isFile()
         ? 'file'
         : info.isDirectory()
@@ -109,10 +110,32 @@ export async function probeOnDisk(
             : 'other';
       found.set(key, { kind, ino: info.ino });
     } catch (err) {
-      if (!hasErrorCode(err, 'ENOENT')) found.set(key, { kind: 'error', ino: 0 });
+      if (!hasErrorCode(err, 'ENOENT') || (await blockedByNonDirectory(root, key, lstatFn))) {
+        found.set(key, { kind: 'error', ino: 0 });
+      }
     }
   }
   return found;
+}
+
+/**
+ * True when an existing ancestor of `key` is not a directory. POSIX reports that case as
+ * ENOTDIR, but Windows reports ENOENT; both must count as an error, never as absence.
+ */
+async function blockedByNonDirectory(
+  root: string,
+  key: string,
+  lstatFn: (p: string) => Promise<Stats>,
+): Promise<boolean> {
+  for (const ancestor of ancestorKeys(key)) {
+    try {
+      if (!(await lstatFn(absInside(root, ancestor))).isDirectory()) return true;
+    } catch (err) {
+      if (hasErrorCode(err, 'ENOENT')) return false; // a missing folder: the key is absent
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function md5File(abs: string): Promise<string> {

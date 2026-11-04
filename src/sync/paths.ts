@@ -34,18 +34,41 @@ export function isIgnoredName(name: string): boolean {
   return name.startsWith('.') || name.endsWith(PART_SUFFIX);
 }
 
-/** A Drive name that cannot be a single local path segment (spec §3). */
-export function isRepresentable(name: string): boolean {
+// eslint-disable-next-line no-control-regex -- control characters are exactly what Windows forbids
+const WINDOWS_FORBIDDEN_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i;
+
+/** Why Windows cannot store `name` as a file or folder name, or null when it can. */
+export function windowsNameProblem(name: string): string | null {
+  if (WINDOWS_FORBIDDEN_CHARS.test(name)) {
+    return 'contains a character Windows does not allow (< > : " / \\ | ? * or a control character)';
+  }
+  if (/[. ]$/.test(name)) return 'ends with a dot or a space';
+  if (WINDOWS_RESERVED.test((name.split('.')[0] ?? '').trimEnd())) {
+    return 'is a reserved Windows device name (CON, PRN, AUX, NUL, COM1–9, LPT1–9)';
+  }
+  return null;
+}
+
+/** A Drive name that cannot be a single local path segment on this platform (spec §3). */
+export function isRepresentable(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   return (
     name !== '' &&
     !name.includes('/') &&
     !name.includes('\0') &&
-    Buffer.byteLength(name.normalize('NFC')) <= MAX_SEGMENT_BYTES
+    Buffer.byteLength(name.normalize('NFC')) <= MAX_SEGMENT_BYTES &&
+    (platform !== 'win32' || windowsNameProblem(name) === null)
   );
 }
 
 /** Validates a user-supplied relative path and returns its key. */
-export function validateRelPath(input: string): string {
+export function validateRelPath(
+  input: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   if (input === '' || input.includes('\0')) throw new ValidationError('Path must not be empty');
   if (path.posix.isAbsolute(input) || input.startsWith('~')) {
     throw new ValidationError(`"${input}" must be relative to the pair folder`);
@@ -58,6 +81,8 @@ export function validateRelPath(input: string): string {
     if (Buffer.byteLength(seg.normalize('NFC')) > MAX_SEGMENT_BYTES) {
       throw new ValidationError(`"${input}" has a name longer than 255 bytes`);
     }
+    const problem = platform === 'win32' ? windowsNameProblem(seg) : null;
+    if (problem) throw new ValidationError(`"${input}": "${seg}" ${problem}`);
   }
   return input.normalize('NFC');
 }

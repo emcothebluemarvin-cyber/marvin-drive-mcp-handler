@@ -54,6 +54,8 @@ describe('plan composition', () => {
       ['native-skipped', 'Plan'],
       ['unrepresentable', 'a/b'],
     ]);
+    expect(p.notes[1]?.message).toMatch(/rename it in Drive/);
+    expect(p.notes[1]?.message).toMatch(/Windows/);
   });
 
   it('computes the first-run baseline from every untracked Drive file, unknown and ignored folder', () => {

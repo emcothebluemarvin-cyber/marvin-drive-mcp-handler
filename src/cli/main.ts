@@ -24,6 +24,68 @@ async function confirm(question: string): Promise<boolean> {
   }
 }
 
+interface LineReader {
+  readLine: (prompt: string, signal: AbortSignal) => Promise<string | null>;
+  close: () => void;
+}
+
+/**
+ * Queues stdin lines for the no-browser login, so lines pasted (or piped) before a prompt
+ * are never dropped. readLine resolves null once stdin is closed.
+ */
+function stdinLineReader(): LineReader {
+  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
+  const queue: string[] = [];
+  let closed = false;
+  let waiter: ((line: string | null) => void) | null = null;
+  const deliver = (line: string | null): void => {
+    const w = waiter;
+    waiter = null;
+    w?.(line);
+  };
+  rl.on('line', (line) => (waiter ? deliver(line) : queue.push(line)));
+  rl.once('close', () => {
+    closed = true;
+    deliver(null);
+  });
+  return {
+    readLine: (prompt, signal): Promise<string | null> => {
+      process.stderr.write(prompt);
+      const queued = queue.shift();
+      if (queued !== undefined) return Promise.resolve(queued);
+      if (closed) return Promise.resolve(null);
+      return new Promise<string | null>((resolve, reject) => {
+        waiter = resolve;
+        signal.addEventListener(
+          'abort',
+          () => {
+            if (waiter === resolve) waiter = null;
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+    },
+    close: () => rl.close(),
+  };
+}
+
+/** Runs a login with a browser, or with `--no-browser` by reading the pasted redirect URL. */
+async function withLoginApp<T>(
+  opts: { browser?: boolean },
+  run: (app: ReturnType<typeof buildApp>) => Promise<T>,
+): Promise<T> {
+  if (opts.browser !== false) return run(buildApp());
+  const reader = stdinLineReader();
+  try {
+    return await run(buildApp(process.env, { manualLogin: { readLine: reader.readLine } }));
+  } finally {
+    reader.close();
+  }
+}
+
+const NO_BROWSER_HELP = 'do not open a browser; paste the redirect URL instead (servers, SSH)';
+
 const program = new Command()
   .name('marvin-drive')
   .description('Multi-account Google Drive MCP server and CLI')
@@ -35,9 +97,10 @@ auth
   .command('add')
   .description('Sign in with a Google account and register it')
   .option('--alias <alias>', 'short name for the account (default: email local part)')
-  .action(async (opts: { alias?: string }) => {
+  .option('--no-browser', NO_BROWSER_HELP)
+  .action(async (opts: { alias?: string; browser?: boolean }) => {
     process.stderr.write(`${TESTING_MODE_HINT}\n`);
-    const record = await buildApp().auth.addAccount(opts.alias);
+    const record = await withLoginApp(opts, (app) => app.auth.addAccount(opts.alias));
     out(`Added ${record.alias} (${record.email})`);
   });
 
@@ -45,9 +108,10 @@ auth
   .command('login')
   .description('Sign in again for an existing account (expired session)')
   .argument('<account>', 'alias or email')
-  .action(async (ref: string) => {
+  .option('--no-browser', NO_BROWSER_HELP)
+  .action(async (ref: string, opts: { browser?: boolean }) => {
     process.stderr.write(`${TESTING_MODE_HINT}\n`);
-    const record = await buildApp().auth.relogin(ref);
+    const record = await withLoginApp(opts, (app) => app.auth.relogin(ref));
     out(`Signed in again: ${record.alias} (${record.email})`);
   });
 

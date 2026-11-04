@@ -1,9 +1,10 @@
-import { chmod, mkdir, mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AccountNotFoundError, ConfigError, ValidationError } from '../../errors.js';
 import { AccountRegistry, defaultAlias } from '../account-registry.js';
+import { expectMode } from '../../__tests__/fs-mode.js';
 
 let file: string;
 let registry: AccountRegistry;
@@ -38,7 +39,7 @@ describe('AccountRegistry', () => {
       { alias: 'emco', email: 'emco@example.com', addedAt: NOW.toISOString() },
       { alias: 'work', email: 'work@example.com', addedAt: NOW.toISOString() },
     ]);
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    await expectMode(file, 0o600);
   });
 
   it('rejects invalid aliases, duplicate emails and duplicate aliases', async () => {
@@ -65,7 +66,7 @@ describe('AccountRegistry', () => {
     await mkdir(dir, { mode: 0o755 });
     await chmod(dir, 0o755);
     await registry.add({ alias: 'emco', email: 'emco@example.com' }, NOW);
-    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    await expectMode(dir, 0o700);
   });
 
   it('resolves by alias, email, default, or single account', async () => {

@@ -9,6 +9,7 @@ import { uploadMimeType } from '../files/upload-mime.js';
 import { ChecksumMismatchError, CollisionError, TargetChangedError } from './errors.js';
 import { PART_SUFFIX } from './paths.js';
 import { SYNC_FILE_FIELDS } from './types.js';
+import { renameReplacing } from '../files/rename-replacing.js';
 
 export type LinkFn = (existingPath: string, newPath: string) => Promise<void>;
 
@@ -64,7 +65,11 @@ async function writeTemp(
 }
 
 /** fsync a directory so a new entry survives a crash (best effort where unsupported). */
-export async function syncDir(dir: string): Promise<void> {
+export async function syncDir(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform === 'win32') return; // Windows has no directory fsync; NTFS journals the rename
   const handle = await open(dir, 'r');
   try {
     await handle.sync();
@@ -154,7 +159,7 @@ export async function downloadReplace(
       throw new ChecksumMismatchError(target, opts.expectedMd5, md5);
     }
     await assertUnchanged(target, opts.expect);
-    await rename(tmp, target);
+    await renameReplacing(tmp, target);
   } finally {
     await rm(tmp, { force: true });
   }

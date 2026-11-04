@@ -15,6 +15,7 @@ import {
   prepareParent,
   toKey,
   validateRelPath,
+  windowsNameProblem,
 } from '../paths.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
@@ -120,5 +121,45 @@ describe('filesystem containment', () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Windows names', () => {
+  it('rejects names Windows cannot store, only on win32', () => {
+    for (const bad of [
+      'CON',
+      'con.txt',
+      'Nul.tar.gz',
+      'COM1',
+      'lpt9.log',
+      'COM¹',
+      'aux .txt',
+      'a:b',
+      'what?',
+      'x*y',
+      'quote"d',
+      '<tag>',
+      'pipe|',
+      'back\\slash',
+      'tab\there',
+      'dot.',
+      'space ',
+    ]) {
+      expect(isRepresentable(bad, 'win32'), bad).toBe(false);
+      expect(windowsNameProblem(bad), bad).not.toBeNull();
+    }
+    for (const ok of ['console.txt', 'CON-notes', 'COM10', 'nul_', 'a.b', '.env', 'ılık']) {
+      expect(isRepresentable(ok, 'win32'), ok).toBe(true);
+      expect(windowsNameProblem(ok), ok).toBeNull();
+    }
+    expect(isRepresentable('a:b', 'darwin')).toBe(true);
+    expect(isRepresentable('CON', 'linux')).toBe(true);
+  });
+
+  it('validateRelPath rejects Windows-invalid segments on win32 with the reason', () => {
+    expect(() => validateRelPath('docs/CON/x.txt', 'win32')).toThrow(/reserved/);
+    expect(() => validateRelPath('a\\b', 'win32')).toThrow(ValidationError);
+    expect(() => validateRelPath('C:/x', 'win32')).toThrow(ValidationError);
+    expect(validateRelPath('docs/a:b', 'darwin')).toBe('docs/a:b');
   });
 });

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -68,14 +69,36 @@ describe('scanLocal', () => {
     expect(onDisk.get('f/x.pdf')).toEqual({ kind: 'error', ino: 0 });
   });
 
-  it.skipIf(isRoot)('reports unreadable directories as unknown subtrees', async () => {
-    await mkdir(path.join(root, 'locked'));
-    await writeFile(path.join(root, 'locked', 'secret.pdf'), 'x');
-    await chmod(path.join(root, 'locked'), 0o000);
-    const scan = await scanLocal(root);
-    expect(scan.unknownSubtrees).toEqual(['locked']);
-    expect(scan.entries).toEqual([]);
+  it('probeOnDisk treats ENOENT under a non-directory ancestor as error (Windows reports ENOENT, not ENOTDIR)', async () => {
+    await mkdir(path.join(root, 'd'));
+    await writeFile(path.join(root, 'd', 'f'), 'x');
+    const target = path.join(root, 'd', 'f', 'x.pdf');
+    const windowsLike = async (p: string): Promise<Stats> => {
+      if (p === target) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return lstat(p);
+    };
+    const onDisk = await probeOnDisk(
+      root,
+      ['d/f/x.pdf', 'd/missing.pdf', 'gone/x.pdf'],
+      windowsLike,
+    );
+    expect(onDisk.get('d/f/x.pdf')).toEqual({ kind: 'error', ino: 0 });
+    expect(onDisk.has('d/missing.pdf')).toBe(false); // plain absence stays absent
+    expect(onDisk.has('gone/x.pdf')).toBe(false); // missing ancestor folder: absent too
   });
+
+  // chmod 000 does not make a directory unreadable on Windows.
+  it.skipIf(isRoot || process.platform === 'win32')(
+    'reports unreadable directories as unknown subtrees',
+    async () => {
+      await mkdir(path.join(root, 'locked'));
+      await writeFile(path.join(root, 'locked', 'secret.pdf'), 'x');
+      await chmod(path.join(root, 'locked'), 0o000);
+      const scan = await scanLocal(root);
+      expect(scan.unknownSubtrees).toEqual(['locked']);
+      expect(scan.entries).toEqual([]);
+    },
+  );
 
   it('restricts the walk to a subdir and rejects a missing one', async () => {
     await mkdir(path.join(root, 'a'));

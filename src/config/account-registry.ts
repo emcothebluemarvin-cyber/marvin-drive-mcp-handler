@@ -1,7 +1,8 @@
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { AccountNotFoundError, ConfigError, ValidationError, hasErrorCode } from '../errors.js';
+import { renameReplacing } from '../files/rename-replacing.js';
 
 export const ALIAS_PATTERN = /^[a-z0-9-]{1,32}$/;
 
@@ -164,7 +165,7 @@ export class AccountRegistry {
     const tmp = `${this.file}.${process.pid}.tmp`;
     try {
       await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-      await rename(tmp, this.file);
+      await renameReplacing(tmp, this.file);
     } catch (err) {
       await rm(tmp, { force: true });
       throw err;

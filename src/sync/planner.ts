@@ -94,7 +94,8 @@ export function plan(input: PlanInput): Plan {
         path: ignored.path,
         rule: 'ignored',
         remoteId: ignored.id,
-        message: 'name cannot be a local file name',
+        message:
+          'name cannot be a local file name here (too long, or reserved/invalid on Windows: CON, NUL, a:b, trailing dot…); rename it in Drive to sync it',
       });
     }
   }
