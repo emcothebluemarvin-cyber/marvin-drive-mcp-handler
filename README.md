@@ -4,7 +4,7 @@ Local MCP server + CLI that lets Claude Code manage files in one or more Google 
 
 ## Requirements
 
-- macOS (tokens are stored in the login Keychain), Node.js ≥ 22.12
+- Node.js ≥ 22.12; tokens go to the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or, with `MARVIN_DRIVE_TOKEN_STORE=file`, to a `0600` file (see [Headless servers](#headless-servers)). Sync is tested on macOS only
 - A Google Cloud project with **Google Drive API** enabled (plus **Google Docs API**, **Google Sheets API** and **Google Slides API** for the content tools; the server reports a clear error if one is not enabled) and an OAuth client of type **Desktop app**
 - While the OAuth app is in **Testing** mode: every account must be listed under _Google Auth Platform → Audience → Test users_, and logins expire after 7 days (re-run `auth login`)
 
@@ -29,12 +29,40 @@ claude mcp add marvin-drive --scope user -- node "$PWD/dist/cli/main.js" serve
 
 After changing code, run `npm run build` again — Claude Code runs the compiled `dist/` output.
 
+### Headless servers
+
+Headless Linux hosts usually have no Secret Service (D-Bus keyring), so keep tokens in a file instead:
+
+```bash
+export MARVIN_DRIVE_TOKEN_STORE=file      # tokens in ~/.config/google-handler/tokens.json (0600)
+marvin-drive auth add --alias emco --no-browser
+claude mcp add marvin-drive --scope user -e MARVIN_DRIVE_TOKEN_STORE=file -- node "$PWD/dist/cli/main.js" serve
+```
+
+Sign in without a browser on the server: `marvin-drive auth add --no-browser` (or `auth login <alias> --no-browser`) prints the Google URL. Open it on any device, sign in, and paste the URL Google redirects to (`http://127.0.0.1:<PORT>/?state=…&code=…`) back into the terminal. That page failing to load is expected. The loopback listener stays up as well, so an SSH tunnel (`ssh -N -L <PORT>:127.0.0.1:<PORT> user@server`) also works; whichever arrives first wins. A no-browser login waits up to 10 minutes.
+
+The file store protects tokens only with file permissions: use it only on hosts where your user account is trusted.
+
+### Windows
+
+Not yet tested on Windows (CI is planned). What is expected to work and what is not:
+
+```powershell
+npm install; npm run build
+claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
+```
+
+- Tokens are kept in Windows Credential Manager (service `marvin-drive`); the config folder is `%USERPROFILE%\.config\google-handler`. `chmod` has no effect on Windows, so these files are protected only by your user profile's ACLs.
+- Sync skips Drive files Windows cannot store (`CON`, `NUL.txt`, `COM1`, names with `< > : " \ | ? *` or ending in a dot or space) and lists them under `unrepresentable` in the plan, so rename them in Drive to sync them.
+- Saves that replace a file retry for about 1.5 s when the target is briefly locked (antivirus, indexer, an open editor).
+- **Sync deletions do not work yet:** local deletions use the macOS Trash and fail safely (nothing is deleted) on Windows and Linux.
+
 ## CLI
 
 | Command                                                                         | Purpose                                                         |
 | ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `marvin-drive auth add [--alias a]`                                             | Browser login, register account (first = default)               |
-| `marvin-drive auth login <alias>`                                               | Re-login an expired account                                     |
+| `marvin-drive auth add [--alias a] [--no-browser]`                              | Browser login, register account (first = default)               |
+| `marvin-drive auth login <alias> [--no-browser]`                                | Re-login an expired account                                     |
 | `marvin-drive auth list [--verify]`                                             | Accounts and token status                                       |
 | `marvin-drive auth remove <alias>`                                              | Remove account, delete + revoke token                           |
 | `marvin-drive auth default <alias>`                                             | Set the default account                                         |
@@ -124,7 +152,8 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 | `~/.config/google-handler/audit.jsonl`        | Every mutating operation             |
 | `~/.config/google-handler/sync/<name>.json`   | Sync pair state (selection, records) |
 | `<local folder>/.marvin-sync-<name>`          | Sync folder marker (pair id)         |
-| Keychain service `marvin-drive`               | Refresh tokens                       |
+| Keychain service `marvin-drive`               | Refresh tokens (default)             |
+| `~/.config/google-handler/tokens.json`        | Refresh tokens (`…TOKEN_STORE=file`) |
 | `~/Downloads/marvin-drive/`                   | Default download folder              |
 
 ## Development

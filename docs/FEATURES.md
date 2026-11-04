@@ -38,7 +38,15 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_remove_pair`; CLI `sync list/run/repair-marker`
 - ⬜ Phase B: Google-native exports, release ("move to Drive"), `sync_release`
 
+### 6. Cross-platform (desktop: macOS, Windows, Linux; mobile needs a separate remote MCP)
+- ✅ File token store (`MARVIN_DRIVE_TOKEN_STORE=file`) for headless Linux / servers; keychain error hint
+- ✅ `auth add --no-browser`: paste the redirect URL instead of an SSH tunnel
+- ✅ Windows hardening: reserved/invalid sync names skipped + reported, `rename` retry on `EPERM`, README section
+- ⬜ GitHub Actions matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) running `npm run check`
+- ⬜ Local trash for sync deletions on Windows (Recycle Bin) and Linux (`gio trash` / XDG Trash); today only macOS `/usr/bin/trash`
+
 ## Later
+- ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)
 - ⬜ Sync watch mode (continuous sync)
 - ⬜ GUI with Claude-API file classification for sync selection (plugs into `sync_select`; terminal use keeps Claude Code as the selector)
 - ⬜ Resumable upload for large files

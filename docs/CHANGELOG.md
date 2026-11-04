@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- File token store for hosts without an OS credential store (headless Linux servers): `MARVIN_DRIVE_TOKEN_STORE=file` keeps refresh tokens in `~/.config/google-handler/tokens.json` (`0600`, directory `0700`).
+- `auth add --no-browser` / `auth login <alias> --no-browser`: sign in from a server by pasting the redirect URL; the loopback callback (SSH tunnel) keeps working in parallel. No-browser logins wait up to 10 minutes.
+
+### Changed
+- Sync skips and reports Drive names Windows cannot store (reserved device names, `< > : " \ | ? *`, trailing dot or space) when running on Windows; `sync_select` paths are validated the same way.
+- Saves that replace an existing file (accounts, tokens, sync pairs, markers, sync downloads) retry briefly on Windows when the target is locked (`EPERM`/`EACCES`/`EBUSY`).
+- Directory fsync is skipped on Windows.
+- OS credential store failures now raise a clear `CONFIG_ERROR` that points to the file store instead of a raw keyring error.
+
 ## 0.3.0 — 2026-11-03
 
 ### Added
