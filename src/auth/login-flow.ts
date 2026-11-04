@@ -9,6 +9,7 @@ import { CALLBACK_PAGE_HEADERS, renderCallbackPage, type CallbackPage } from './
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 export const OAUTH_SCOPES = [DRIVE_SCOPE, 'openid', 'email'] as const;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MANUAL_TIMEOUT_MS = 600_000;
 const DEFAULT_FINISH_TIMEOUT_MS = 60_000;
 
 /** The subset of Auth.OAuth2Client used by the login flow (injectable for tests). */
@@ -39,6 +40,12 @@ export interface LoginFlowOptions {
    * account. If it throws, the browser shows the failure instead of a success page.
    */
   onVerified?: (result: LoginResult) => Promise<void>;
+  /**
+   * No-browser mode (servers): the URL is only printed and the user pastes the redirect URL back.
+   * The loopback callback keeps working too (SSH tunnel); whichever arrives first wins.
+   * `readLine` resolves null when input is closed and must stop when `signal` aborts.
+   */
+  manual?: { readLine: (prompt: string, signal: AbortSignal) => Promise<string | null> };
 }
 
 export interface LoginResult {
@@ -143,6 +150,58 @@ function waitForCallback(server: Server, state: string, timeoutMs: number): Prom
   });
 }
 
+const PASTE_PROMPT = 'Paste the full URL from the address bar: ';
+
+/** Parses a pasted redirect URL (or just its query string). */
+function parsePasted(input: string): URLSearchParams | null {
+  const text = input.trim();
+  if (!text) return null;
+  try {
+    const url = text.includes('://')
+      ? new URL(text)
+      : new URL(`http://127.0.0.1/?${text.replace(/^\?/, '')}`);
+    return url.searchParams;
+  } catch {
+    return null;
+  }
+}
+
+/** Reads pasted redirect URLs until one carries a code for this attempt. Never settles on EOF. */
+async function waitForPaste(
+  manual: NonNullable<LoginFlowOptions['manual']>,
+  state: string,
+  print: (message: string) => void,
+  signal: AbortSignal,
+): Promise<Callback> {
+  for (;;) {
+    const line = await manual.readLine(PASTE_PROMPT, signal);
+    if (line === null) return new Promise<never>(() => {}); // stdin closed: rely on the callback
+    const params = parsePasted(line);
+    if (!params || (!params.has('code') && !params.has('error'))) {
+      print('That does not look like the redirect URL (it contains "code=" and "state=").');
+      continue;
+    }
+    if (params.get('state') !== state) {
+      print('That URL belongs to a different login attempt; use the URL printed above.');
+      continue;
+    }
+    const error = params.get('error');
+    if (error) {
+      throw new AuthFlowError(
+        error === 'access_denied'
+          ? 'Access was denied in the browser'
+          : `Google returned an error: ${error}`,
+      );
+    }
+    const code = params.get('code');
+    if (!code) {
+      print('That URL has no authorization code; paste the full URL.');
+      continue;
+    }
+    return { code, respond: async (): Promise<void> => {} };
+  }
+}
+
 async function exchangeAndVerify(
   client: OAuthFlowClient,
   code: string,
@@ -185,6 +244,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
   const state = randomBytes(16).toString('hex');
   const server = createServer();
   const port = await listen(server);
+  const pasteAbort = new AbortController();
   try {
     const redirectUri = `http://127.0.0.1:${port}`;
     const client: OAuthFlowClient =
@@ -196,7 +256,9 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       });
 
     const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
-    const callbackPromise = waitForCallback(server, state, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const timeoutMs =
+      opts.timeoutMs ?? (opts.manual ? DEFAULT_MANUAL_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+    const callbackPromise = waitForCallback(server, state, timeoutMs);
     callbackPromise.catch(() => undefined); // awaited below; prevents an unhandled rejection if we throw first
 
     const authUrl = client.generateAuthUrl({
@@ -208,12 +270,25 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       code_challenge_method: Auth.CodeChallengeMethod.S256,
       ...(opts.loginHint ? { login_hint: opts.loginHint } : {}),
     });
-    opts.print(`Opening the browser for Google sign-in. If it does not open, visit:\n${authUrl}`);
-    opts.openUrl(authUrl).catch(() => {
-      opts.print('Could not open a browser automatically; use the URL above.');
-    });
+    let incoming: Promise<Callback> = callbackPromise;
+    if (opts.manual) {
+      opts.print(
+        `Open this URL in a browser on any device and sign in:\n${authUrl}\n\n` +
+          `Google then redirects to ${redirectUri}/?…, which usually fails to load on that device — ` +
+          'that is expected. Copy the full URL from the address bar and paste it here.',
+      );
+      const pasted = waitForPaste(opts.manual, state, opts.print, pasteAbort.signal);
+      pasted.catch(() => undefined); // awaited via the race below
+      incoming = Promise.race([callbackPromise, pasted]);
+    } else {
+      opts.print(`Opening the browser for Google sign-in. If it does not open, visit:\n${authUrl}`);
+      opts.openUrl(authUrl).catch(() => {
+        opts.print('Could not open a browser automatically; use the URL above.');
+      });
+    }
 
-    const { code, respond } = await callbackPromise;
+    const { code, respond } = await incoming;
+    pasteAbort.abort();
     try {
       // Network calls get a deadline; onVerified (local save) is not raced, to avoid half-saves.
       const result = await withDeadline(
@@ -230,6 +305,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       throw err;
     }
   } finally {
+    pasteAbort.abort();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

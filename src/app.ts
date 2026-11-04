@@ -1,7 +1,7 @@
 import open from 'open';
 import { AuthService } from './auth/auth-service.js';
 import { selectTokenStore } from './auth/select-token-store.js';
-import { runLoginFlow, type LoginResult } from './auth/login-flow.js';
+import { runLoginFlow, type LoginFlowOptions, type LoginResult } from './auth/login-flow.js';
 import { FileAuditLog } from './audit/audit-log.js';
 import { AccountRegistry } from './config/account-registry.js';
 import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
@@ -25,8 +25,13 @@ export interface App {
   sync: SyncService;
 }
 
+export interface BuildAppOptions {
+  /** No-browser login: print the URL and read the pasted redirect URL with this reader. */
+  manualLogin?: NonNullable<LoginFlowOptions['manual']>;
+}
+
 /** Composition root: wires real implementations together. */
-export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
+export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildAppOptions = {}): App {
   const paths = resolvePaths(env);
   const auth = new AuthService({
     registry: new AccountRegistry(paths.accounts),
@@ -38,6 +43,7 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
         clientSecret: credentials.clientSecret,
         ...(loginHint ? { loginHint } : {}),
         onVerified,
+        ...(options.manualLogin ? { manual: options.manualLogin } : {}),
         openUrl: async (url) => {
           await open(url);
         },

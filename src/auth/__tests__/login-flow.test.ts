@@ -405,4 +405,133 @@ describe('runLoginFlow', () => {
       await vi.waitFor(() => expect(seen.html).toContain('did not finish'));
     });
   });
+
+  describe('manual (--no-browser) mode', () => {
+    /** Feeds pasted lines; null = stdin closed. Records prompts and abort signals. */
+    function paste(lines: (string | null | ((authUrl: string) => string))[]) {
+      const signals: AbortSignal[] = [];
+      let authUrl = '';
+      const readLine = vi.fn(async (_prompt: string, signal: AbortSignal) => {
+        signals.push(signal);
+        const next = lines.shift();
+        if (next === undefined) {
+          return new Promise<string | null>((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')));
+          });
+        }
+        return typeof next === 'function' ? next(authUrl) : next;
+      });
+      const print = (message: string): void => {
+        authUrl = /https:\/\/\S+/.exec(message)?.[0] ?? authUrl;
+      };
+      return { readLine, signals, print };
+    }
+    const stateOf = (authUrl: string): string => new URL(authUrl).searchParams.get('state') ?? '';
+
+    it('completes from a pasted redirect URL without opening a browser', async () => {
+      const h = harness();
+      const p = paste([
+        (u) => `  http://127.0.0.1:5555/?state=${stateOf(u)}&code=pasted&scope=x  `,
+      ]);
+      const openUrl = vi.fn(async () => {});
+      const result = await runLoginFlow({
+        ...base,
+        print: p.print,
+        createClient: h.create,
+        openUrl,
+        manual: { readLine: p.readLine },
+      });
+      expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(h.client.getToken).toHaveBeenCalledWith({ code: 'pasted', codeVerifier: 'verifier' });
+    });
+
+    it('accepts a pasted query string', async () => {
+      const h = harness();
+      const p = paste([(u) => `?code=q1&state=${stateOf(u)}`]);
+      await runLoginFlow({
+        ...base,
+        print: p.print,
+        createClient: h.create,
+        openUrl: async () => {},
+        manual: { readLine: p.readLine },
+      });
+      expect(h.client.getToken).toHaveBeenCalledWith({ code: 'q1', codeVerifier: 'verifier' });
+    });
+
+    it('asks again after garbage, a missing code or a stale state', async () => {
+      const h = harness();
+      const messages: string[] = [];
+      const p = paste([
+        'not a url',
+        'http://127.0.0.1:1/?code=x&state=old',
+        (u) => `http://127.0.0.1:1/?state=${stateOf(u)}`,
+        (u) => `http://127.0.0.1:1/?code=ok&state=${stateOf(u)}`,
+      ]);
+      await runLoginFlow({
+        ...base,
+        print: (m) => {
+          messages.push(m);
+          p.print(m);
+        },
+        createClient: h.create,
+        openUrl: async () => {},
+        manual: { readLine: p.readLine },
+      });
+      expect(p.readLine).toHaveBeenCalledTimes(4);
+      expect(messages.join('\n')).toMatch(/different login attempt/);
+      expect(h.client.getToken).toHaveBeenCalledWith({ code: 'ok', codeVerifier: 'verifier' });
+    });
+
+    it('reports an error returned by Google in the pasted URL', async () => {
+      const h = harness();
+      const p = paste([(u) => `http://127.0.0.1:1/?error=access_denied&state=${stateOf(u)}`]);
+      await expect(
+        runLoginFlow({
+          ...base,
+          print: p.print,
+          createClient: h.create,
+          openUrl: async () => {},
+          manual: { readLine: p.readLine },
+        }),
+      ).rejects.toThrow('Access was denied');
+    });
+
+    it('still accepts the loopback callback (SSH tunnel) and stops waiting for input', async () => {
+      const h = harness();
+      const p = paste([]); // user never pastes
+      let authUrl = '';
+      const flow = runLoginFlow({
+        ...base,
+        print: (m) => {
+          authUrl = /https:\/\/\S+/.exec(m)?.[0] ?? authUrl;
+        },
+        createClient: h.create,
+        openUrl: async () => {},
+        manual: { readLine: p.readLine },
+      });
+      await vi.waitFor(() => expect(p.readLine).toHaveBeenCalled());
+      await (await fetch(`${h.redirect()}/?code=tunnel&state=${stateOf(authUrl)}`)).text();
+      await expect(flow).resolves.toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
+      expect(p.signals.at(-1)?.aborted).toBe(true);
+    });
+
+    it('keeps waiting for the callback when stdin closes', async () => {
+      const h = harness();
+      const p = paste([null]);
+      let authUrl = '';
+      const flow = runLoginFlow({
+        ...base,
+        print: (m) => {
+          authUrl = /https:\/\/\S+/.exec(m)?.[0] ?? authUrl;
+        },
+        createClient: h.create,
+        openUrl: async () => {},
+        manual: { readLine: p.readLine },
+      });
+      await vi.waitFor(() => expect(p.readLine).toHaveBeenCalled());
+      await (await fetch(`${h.redirect()}/?code=late&state=${stateOf(authUrl)}`)).text();
+      await expect(flow).resolves.toMatchObject({ refreshToken: 'rt-1' });
+    });
+  });
 });
