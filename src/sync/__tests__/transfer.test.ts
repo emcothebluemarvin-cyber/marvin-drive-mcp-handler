@@ -10,6 +10,7 @@ import {
   downloadReplace,
   moveLocal,
   placeExclusive,
+  syncDir,
   updateContent,
   uploadNew,
   type StatExpect,
@@ -228,5 +229,13 @@ describe('moveLocal on folding volumes (review regressions)', () => {
       moveLocal(from, path.join(dir, 'b.pdf'), { inPlace: true, expect: await statOf(from) }),
     ).rejects.toBeInstanceOf(CollisionError);
     expect(await readFile(path.join(dir, 'b.pdf'), 'utf8')).toBe('other');
+  });
+});
+
+describe('syncDir on Windows', () => {
+  it('is a no-op on win32 (no directory fsync there)', async () => {
+    await expect(
+      syncDir(path.join(os.tmpdir(), 'does-not-exist-xyz'), 'win32'),
+    ).resolves.toBeUndefined();
   });
 });
