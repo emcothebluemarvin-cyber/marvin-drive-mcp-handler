@@ -7,7 +7,6 @@ import {
   readFile,
   readdir,
   rm,
-  stat,
   utimes,
   writeFile,
 } from 'node:fs/promises';
@@ -26,6 +25,7 @@ import {
   writeMarker,
 } from '../pair-store.js';
 import { makePair, makePairFile, record } from './fixtures.js';
+import { expectMode } from '../../__tests__/fs-mode.js';
 
 let tmp: string;
 let dir: string;
@@ -47,15 +47,15 @@ describe('PairStore', () => {
     await mkdir(dir, { recursive: true });
     await chmod(dir, 0o755);
     await store().save(makePairFile({}, []));
-    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    await expectMode(dir, 0o700);
   });
 
   it('saves atomically with 0600 file and 0700 dir, and loads it back', async () => {
     const s = store();
     const data = makePairFile({}, [record('r1', 'a.pdf')]);
     await s.save(data);
-    expect((await stat(dir)).mode & 0o777).toBe(0o700);
-    expect((await stat(path.join(dir, 'docs.json'))).mode & 0o777).toBe(0o600);
+    await expectMode(dir, 0o700);
+    await expectMode(path.join(dir, 'docs.json'), 0o600);
     expect(await s.load('docs')).toEqual(data);
     expect(await s.exists('docs')).toBe(true);
     expect((await s.list()).map((p) => p.pair.name)).toEqual(['docs']);
