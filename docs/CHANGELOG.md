@@ -10,6 +10,10 @@
 - Sync skips and reports Drive names Windows cannot store (reserved device names, `< > : " \ | ? *`, trailing dot or space) when running on Windows; `sync_select` paths are validated the same way.
 - Saves that replace an existing file (accounts, tokens, sync pairs, markers, sync downloads) retry briefly on Windows when the target is locked (`EPERM`/`EACCES`/`EBUSY`).
 - Directory fsync is skipped on Windows.
+- CI also runs on Windows; macOS on manual dispatch.
+
+### Fixed
+- Windows: a tracked path whose parent folder had been replaced by a file was probed as absent (Windows reports `ENOENT`, not `ENOTDIR`), so sync could treat it as locally deleted; it is now reported as unknown, as on macOS/Linux.
 - OS credential store failures now raise a clear `CONFIG_ERROR` that points to the file store instead of a raw keyring error.
 
 ## 0.3.0 — 2026-11-03

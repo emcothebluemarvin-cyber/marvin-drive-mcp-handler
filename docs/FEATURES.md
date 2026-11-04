@@ -42,7 +42,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ File token store (`MARVIN_DRIVE_TOKEN_STORE=file`) for headless Linux / servers; keychain error hint
 - ✅ `auth add --no-browser`: paste the redirect URL instead of an SSH tunnel
 - ✅ Windows hardening: reserved/invalid sync names skipped + reported, `rename` retry on `EPERM`, README section
-- ⬜ GitHub Actions matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) running `npm run check`
+- ✅ GitHub Actions matrix: `ubuntu-latest` (Node 22, 24) + `windows-latest` (Node 24) on every PR; `macos-latest` on manual dispatch (hosted macOS runners kept timing out in the capacity queue)
 - ⬜ Local trash for sync deletions on Windows (Recycle Bin) and Linux (`gio trash` / XDG Trash); today only macOS `/usr/bin/trash`
 
 ## Later
