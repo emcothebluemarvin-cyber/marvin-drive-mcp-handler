@@ -11,6 +11,7 @@ describe('resolvePaths', () => {
       configDir: dir,
       clientSecret: path.join(dir, 'client_secret.json'),
       accounts: path.join(dir, 'accounts.json'),
+      tokens: path.join(dir, 'tokens.json'),
       audit: path.join(dir, 'audit.jsonl'),
       syncDir: path.join(dir, 'sync'),
       downloadsDir: path.join(os.homedir(), 'Downloads', 'marvin-drive'),

@@ -1,6 +1,6 @@
 import open from 'open';
 import { AuthService } from './auth/auth-service.js';
-import { KeychainTokenStore } from './auth/keychain-token-store.js';
+import { selectTokenStore } from './auth/select-token-store.js';
 import { runLoginFlow, type LoginResult } from './auth/login-flow.js';
 import { FileAuditLog } from './audit/audit-log.js';
 import { AccountRegistry } from './config/account-registry.js';
@@ -30,7 +30,7 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env): App {
   const paths = resolvePaths(env);
   const auth = new AuthService({
     registry: new AccountRegistry(paths.accounts),
-    tokens: new KeychainTokenStore(),
+    tokens: selectTokenStore(env, paths.tokens),
     loadCredentials: (): Promise<ClientCredentials> => loadClientSecret(paths.clientSecret),
     login: ({ credentials, loginHint, onVerified }): Promise<LoginResult> =>
       runLoginFlow({
