@@ -1,7 +1,7 @@
 # Marvin Drive — Local Trash on Windows and Linux
 
 - **Date:** 2026-11-05
-- **Status:** Approved in brainstorming; spec review round 3
+- **Status:** Approved in brainstorming; Approved (spec review round 3)
 - **Scope:** Sync deletions of local files (`trash-local`, and later Phase B release) work on Windows and Linux as well as macOS
 - **Builds on:** selective sync spec (`2026-11-03-selective-sync-design.md`) §7 "Local trash"; cross-platform work in FEATURES §6
 
@@ -53,13 +53,13 @@ export interface WindowsTrashDeps {
   now?: () => Date;
   random?: () => string;                  // 6 chars A–Z0–9; default uses crypto.randomInt
   fs?: TrashFs;
-  realpath?: (p: string) => Promise<string>; // default fs.realpath.native
 }
 export class WindowsTrash implements LocalTrash { constructor(deps?: WindowsTrashDeps) }
 export function encodeRecycleRecord(r: { path: string; size: bigint; deletedAt: Date }): Buffer;
 
 // TrashFs = { lstat, stat, mkdir, open, unlink, rename, realpath } with the node:fs/promises signatures
 // (unlink is used only to remove our own metadata file on failure)
+// WindowsTrash defaults TrashFs.realpath to fs.realpath.native
 ```
 
 `ExecFn` now resolves to `{ stdout }`. Existing fakes that return `undefined` (e.g. `sync-service.run.test.ts`) are not adapted: the sync tests stop faking `ExecFn` and fake `LocalTrash` instead; only `MacTrash` and `WindowsTrash` tests use `ExecFn`.
@@ -78,7 +78,7 @@ export function encodeRecycleRecord(r: { path: string; size: bigint; deletedAt: 
 2. `rename(file, target)`. Atomic; keeps the file's data, inode and attributes (Windows read-only stays).
    - `ENOENT` (source vanished after the shared check) → rethrown after the caller removed its metadata, so the executor reports "already gone".
    - `EXDEV` (another volume than we determined, e.g. a volume mounted into a folder) → `LocalTrashError`.
-   - Windows `EPERM`/`EBUSY` → `LocalTrashError` "file is in use by another program".
+   - Windows `EPERM`/`EBUSY` → `LocalTrashError` "file is in use or access was denied".
 3. POSIX: `fsync` the trash `files` directory and the source directory (skipped on win32, where directories cannot be opened for fsync).
 
 **Why `rename` and not `link` + `unlink`:** `unlink(file)` removes whatever is at that name. If an editor saves the file again between the check and the `unlink`, the new content would be lost for good. `rename` moves whatever is at the name into the trash, so a racing save still ends up recoverable there. `rename` also works on filesystems without hard links (FAT/exFAT), and needs no inode comparison or rollback.
@@ -149,7 +149,7 @@ Let `F` = `realpath(dirname(file))/basename(file)` (resolves a symlinked `localD
 4. `placeInTrash(F, bin\$R<suffix>)` (§4). The `lstat` check in §4 step 1 exists because Node's `rename` on Windows replaces an existing target (`MOVEFILE_REPLACE_EXISTING`). `EEXIST` → remove our `$I`, new suffix.
 5. On any other failure: remove the `$I` file (best effort), then rethrow `ENOENT` of the source unchanged, or throw `LocalTrashError`.
 
-The file size for `$I` comes from `lstat(F, { bigint: true }).size`. If the volume is mounted into a folder without a drive letter, `realpath.native` or the `rename` (`EXDEV`) fails, so the action fails.
+The file size for `$I` comes from `lstat(F, { bigint: true }).size`. It is read before the rename, so a racing save can make Explorer show the old size (cosmetic). If the volume is mounted into a folder without a drive letter, `realpath.native` or the `rename` (`EXDEV`) fails, so the action fails.
 
 ### 6.3 Risk and manual check
 
@@ -170,9 +170,9 @@ The `$I` format is not officially documented, but it has been stable since Windo
 
 ## 8. Testing
 
-- **`trash-move.test.ts`** (`placeInTrash`, every platform, temp dirs): moves and keeps content; an existing target gives `EEXIST` and is not replaced; source `ENOENT` is rethrown; injected `rename` → `EXDEV`/`EBUSY` gives `LocalTrashError` and leaves the source. On `windows-latest`: a read-only file keeps its read-only attribute after the move, and a file held open without delete sharing fails with "in use" and stays.
+- **`trash-move.test.ts`** (`placeInTrash`, every platform, temp dirs): moves and keeps content; an existing target gives `EEXIST` and is not replaced; source `ENOENT` is rethrown; injected `rename` → `EXDEV`/`EBUSY` gives `LocalTrashError` and leaves the source. On `windows-latest`: a read-only file keeps its read-only attribute after the move, and a file held open without delete sharing by a child process (PowerShell `[IO.File]::Open(p,'Open','Read','Read')`; Node always opens with `FILE_SHARE_DELETE`) fails and stays.
 - **`trash-xdg.test.ts`** (POSIX, skipped on win32): temp dir as `XDG_DATA_HOME`; checks `files/`, `info/*.trashinfo` (percent-encoding of spaces, Turkish letters, `%`), name collisions (`a.pdf` → `a.2.pdf`), orphan `files/<name>`, info removed on failure, regular-file and relative-path checks, symlinked parent dir gives the resolved `Path`. Top-directory selection via injected `stat`/`lstat` reporting another `dev` for the home trash: admin trash with and without sticky bit, symlinked `.Trash-$uid`, wrong owner, group-writable → rejected.
-- **`trash-windows.test.ts`**: `encodeRecycleRecord` exact bytes with a fixed date and path (every platform). Move logic with injected `binDir`, `realpath` and `random` pointing to a temp dir (every platform). UNC / device / `C:/` normalisation, mapped drive (injected `realpath` returns `\\srv\share\…`) → fail. `whoami` CSV parsing incl. a comma in a quoted user name. On `windows-latest`, one read-only test runs the real `whoami.exe` and checks the SID format.
+- **`trash-windows.test.ts`**: `encodeRecycleRecord` exact bytes with a fixed date and path (every platform). Move logic with injected `binDir`, `fs` and `random` pointing to a temp dir (every platform). UNC / device / `C:/` normalisation, mapped drive (injected `fs.realpath` returns `\\srv\share\…`) → fail. `whoami` CSV parsing incl. a comma in a quoted user name. On `windows-latest`, one read-only test runs the real `whoami.exe` and checks the SID format.
 - **`trash.test.ts`**: `createLocalTrash` per platform; `MacTrash` keeps today's tests.
 - **Executor / service / e2e:** switch to `LocalTrash` fakes; executor test for `ENOENT` from `trash()` → "already gone".
 
