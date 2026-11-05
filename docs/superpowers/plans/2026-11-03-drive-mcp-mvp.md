@@ -17,7 +17,7 @@
 - No `any`. Use `unknown` + narrowing.
 - Before every commit run `npx prettier --write <files you changed>` so `npm run format:check` stays green; code in this plan is not guaranteed to be Prettier-formatted.
 - Commit messages: Conventional Commits, ending with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Repo-local git identity is already set (`emcothebluemarvin <emcothebluemarvin@gmail.com>`). Do not change it.
+- Repo-local git identity is already set (the maintainer's name and e-mail). Do not change it.
 - Do not push; the human pushes after review.
 
 ---
@@ -803,7 +803,7 @@ beforeEach(async () => {
 
 describe('defaultAlias', () => {
   it('derives a valid alias from the email local part', () => {
-    expect(defaultAlias('emcothebluemarvin@gmail.com')).toBe('emcothebluemarvin');
+    expect(defaultAlias('alice@example.com')).toBe('alice');
     expect(defaultAlias('John.Doe+x@ex.com')).toBe('john-doe-x');
     expect(defaultAlias('___@ex.com')).toBe('account');
     expect(defaultAlias(`${'a'.repeat(40)}@ex.com`)).toHaveLength(32);
@@ -5590,9 +5590,9 @@ MARVIN_E2E_ACCOUNT=emco npm run test:e2e        # live Drive test (creates and d
 - [ ] **Step 5: Human step — real login (needs the user at the browser)**
 
 Ask the user whether to run `npm link` (it installs a global `marvin-drive` symlink); run it only on a yes.
-Ask the user to run (in this session: `! node dist/cli/main.js auth add --alias emco`), sign in with `emcothebluemarvin@gmail.com`, and accept the "unverified app" warning (*Advanced → Go to Marvin Drive Handler*).
+Ask the user to run (in this session: `! node dist/cli/main.js auth add --alias emco`), sign in with your test Google account, and accept the "unverified app" warning (*Advanced → Go to Marvin Drive Handler*).
 Then run: `node dist/cli/main.js auth list --verify`
-Expected: one line starting with `*`, showing alias `emco`, email `emcothebluemarvin@gmail.com` and status `ok` (columns are space-padded).
+Expected: one line starting with `*`, showing alias `emco`, your account's email and status `ok` (columns are space-padded).
 
 - [ ] **Step 6: Live E2E and Claude Code registration**
 
@@ -5602,7 +5602,7 @@ Expected: 1 test passes; the temporary `marvin-e2e-*` folder no longer exists in
 If the `md` export assertion fails because Drive returned a different MIME/extension, record the actual behaviour, adjust `FORMAT_MIME.md` only if Drive rejected `text/markdown`, and re-run.
 
 Ask the user before running (it changes their user-scope Claude Code config):
-`claude mcp add marvin-drive --scope user -- node /Users/emcomacpro/google-handler/dist/cli/main.js serve`
+`claude mcp add marvin-drive --scope user -- node "$PWD/dist/cli/main.js" serve`
 Then `claude mcp list` should show `marvin-drive` as connected.
 
 - [ ] **Step 7: Final check and commit**

@@ -14,7 +14,7 @@
 
 ## Ground rules (read before Task 1)
 
-- Run everything from `/Users/emcomacpro/google-handler`. Work on the branch you were given; never push.
+- Run everything from the repository root. Work on the branch you were given; never push.
 - Quality gate after every task: `npm run check` (typecheck + eslint + prettier check + vitest). It must be fully green — and eslint must stay at **zero warnings** — before committing. Run `npx prettier --write <changed files>` before every `npm run check` (the code below is prettier-formatted, but re-run it anyway).
 - Imports use the `.js` suffix (ESM, NodeNext), e.g. `import { x } from './y.js';`.
 - Existing test helpers: `src/files/__tests__/fakes.ts` (`createFakeDrive`, `createRunner`, `createAudit`, `noSleep`, `silentLogger`, `httpError`). New sync helpers live in `src/sync/__tests__/` and are **not** `*.test.ts` files: `fixtures.ts` (pairs, records, entries, `refuseTrash`), `drive-tree.ts` (fake folder lister), `plan-input.ts` (planner input builder), `memory-drive.ts` (in-memory Drive behind `FakeDrive`).

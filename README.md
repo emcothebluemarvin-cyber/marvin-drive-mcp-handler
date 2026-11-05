@@ -163,3 +163,7 @@ npm run check                                   # typecheck, lint, format, unit 
 MARVIN_KEYCHAIN_TEST=1 npx vitest run src/auth  # real Keychain round-trip
 MARVIN_E2E_ACCOUNT=emco npm run test:e2e        # live Drive tests (temp Drive folder + temp local dir; sync uses a temp trash)
 ```
+
+## License
+
+[MIT](LICENSE). Bring your own Google OAuth client; none is shipped with the code.
