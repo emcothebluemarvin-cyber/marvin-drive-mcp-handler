@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Marvin Drive Handler</title>
+    <meta
+      name="description"
+      content="A local, open-source tool that lets Claude Code work with your Google Drive, Docs, Sheets and Slides on your own computer."
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="mark" href="./">Marvin <span>Drive</span> Handler</a>
+        <nav aria-label="Site">
+          <a href="./" aria-current="page">Home</a>
+          <a href="privacy.html">Privacy</a>
+          <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler">Source</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <p class="eyebrow">Open source · runs on your computer</p>
+      <h1>Marvin Drive Handler</h1>
+      <p class="tagline">Your Google Drive, in reach of your coding assistant.</p>
+      <p class="lede">
+        Marvin Drive Handler is a local MCP server and command-line tool. It lets Claude Code find,
+        organise and edit the files in your Google Drive and keep chosen local folders in sync with
+        Drive, using an OAuth client you control.
+      </p>
+
+      <ul class="facts">
+        <li>
+          <strong>Local only</strong>
+          <span>No server, no account with us. It runs as a process on your machine.</span>
+        </li>
+        <li>
+          <strong>Your sign-in</strong>
+          <span>Google OAuth; tokens stay in your OS keychain or a private file.</span>
+        </li>
+        <li>
+          <strong>Nothing is lost</strong>
+          <span>Deletions go to the Drive trash or your system trash, never permanent.</span>
+        </li>
+      </ul>
+
+      <h2>What it does</h2>
+      <ul>
+        <li>
+          <strong>Drive files:</strong> list, search, read metadata, download, upload, create
+          folders, rename, move, copy, move to trash and restore.
+        </li>
+        <li>
+          <strong>Docs, Sheets and Slides:</strong> read content and make the edits you ask for,
+          such as replacing text, writing cell ranges or updating slides.
+        </li>
+        <li>
+          <strong>Selective two-way sync:</strong> keep a set of files you pick in a local folder
+          and a Drive folder in step, with a preview before anything changes.
+        </li>
+        <li><strong>Several accounts:</strong> switch between Google accounts by alias.</li>
+      </ul>
+
+      <h2>Why it asks for access to Google Drive</h2>
+      <p>
+        The app requests the Google Drive scope (<code>https://www.googleapis.com/auth/drive</code>)
+        so it can work with the files you already have in Drive, not only files it created itself.
+        It also requests <code>openid</code> and <code>email</code> to show which account you are
+        signed in with. Every action runs because you or your assistant asked for it in your own
+        session; the app does nothing in the background.
+      </p>
+      <p>
+        Google user data is used only to provide these features to you. It is not sold, not used for
+        advertising and not used to train AI models. Read the
+        <a href="privacy.html">privacy policy</a> for details.
+      </p>
+
+      <h2>Get started</h2>
+      <p>
+        Install it from the
+        <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler#setup"
+          >setup guide on GitHub</a
+        >. You need Node.js 22.12 or newer, macOS, Windows or Linux, and Claude Code.
+      </p>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span>Marvin Drive Handler · MIT licence</span>
+        <span>
+          <a href="privacy.html">Privacy policy</a> ·
+          <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler/issues"
+            >Contact</a
+          >
+        </span>
+      </div>
+    </footer>
+  </body>
+</html>

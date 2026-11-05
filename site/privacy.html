@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy · Marvin Drive Handler</title>
+    <meta
+      name="description"
+      content="How Marvin Drive Handler accesses, uses, stores and shares Google user data."
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="mark" href="./">Marvin <span>Drive</span> Handler</a>
+        <nav aria-label="Site">
+          <a href="./">Home</a>
+          <a href="privacy.html" aria-current="page">Privacy</a>
+          <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler">Source</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <p class="eyebrow">Privacy policy</p>
+      <h1>Your data stays with you.</h1>
+      <p class="updated">Effective 5 November 2026</p>
+
+      <p>
+        Marvin Drive Handler (“the app”) is open-source software that you install and run on your
+        own computer. It connects your computer to your Google account so that Claude Code, the
+        coding assistant you use, can work with your Google Drive, Docs, Sheets and Slides. This
+        policy explains what Google user data the app accesses and what happens to it.
+      </p>
+
+      <div class="note">
+        <p>
+          <strong>In short:</strong> the developer runs no server and receives none of your data.
+          Everything the app reads from Google stays on your computer or goes only where you send
+          it.
+        </p>
+      </div>
+
+      <h2>Data the app accesses</h2>
+      <p>When you sign in with Google and allow access, the app can access:</p>
+      <ul>
+        <li>
+          <strong>Your email address and basic account identity</strong> (scopes
+          <code>openid</code>, <code>email</code>), to show which account is signed in and to tell
+          several accounts apart.
+        </li>
+        <li>
+          <strong>Files in your Google Drive</strong> (scope
+          <code>https://www.googleapis.com/auth/drive</code>): file names, folders, metadata and
+          content, and the content of Google Docs, Sheets and Slides, through the Drive, Docs,
+          Sheets and Slides APIs.
+        </li>
+      </ul>
+
+      <h2>How the app uses this data</h2>
+      <p>The app uses Google user data only to provide the features you ask for:</p>
+      <ul>
+        <li>
+          listing, searching, downloading, uploading, renaming, moving, copying, trashing and
+          restoring Drive files;
+        </li>
+        <li>reading Docs, Sheets and Slides and making the edits you request;</li>
+        <li>keeping the files you select in sync between a local folder and a Drive folder.</li>
+      </ul>
+      <p>
+        The app acts only when you, or Claude Code on your instruction, call one of its tools. It
+        does not run in the background, does not collect analytics or telemetry and does not contact
+        any server other than Google's.
+      </p>
+
+      <h2>Storage on your computer</h2>
+      <p>Everything the app keeps is stored locally, under your user account:</p>
+      <ul>
+        <li>
+          <strong>OAuth refresh tokens:</strong> in your operating system's credential store (macOS
+          Keychain, Windows Credential Manager, Linux Secret Service) or, if you choose, in
+          <code>~/.config/google-handler/tokens.json</code> readable only by you.
+        </li>
+        <li>
+          <strong>Account list:</strong> aliases and email addresses in
+          <code>~/.config/google-handler/accounts.json</code>.
+        </li>
+        <li>
+          <strong>Audit log:</strong> a local record of each change the app made (such as file IDs
+          and names) in <code>~/.config/google-handler/audit.jsonl</code>.
+        </li>
+        <li>
+          <strong>Sync state:</strong> the files you selected for sync and their last known
+          versions, under <code>~/.config/google-handler/sync/</code>.
+        </li>
+        <li>
+          <strong>Downloads:</strong> files you download, in
+          <code>~/Downloads/marvin-drive/</code> or the folder you choose.
+        </li>
+      </ul>
+      <p>
+        You can delete any of this at any time.
+        <code>marvin-drive auth remove &lt;alias&gt;</code> deletes an account's token and revokes
+        it at Google; deleting the <code>~/.config/google-handler</code> folder removes the rest.
+      </p>
+
+      <h2>Sharing</h2>
+      <p>
+        The developer of Marvin Drive Handler does not receive, store or share your Google user
+        data. The app passes data to exactly one place you choose: the Claude Code session on your
+        computer that called the tool. What Claude Code then sends to its AI provider is covered by
+        your agreement with that provider (for Claude, Anthropic's privacy policy), not by this app.
+        The app does not sell data, does not transfer it to advertising platforms, data brokers or
+        other third parties, and does not use it for advertising.
+      </p>
+
+      <h2>AI and machine learning</h2>
+      <p>
+        The app does not use Google user data to develop, improve or train generalised AI or
+        machine-learning models, and does not transfer it to anyone for that purpose.
+      </p>
+
+      <h2>Google API Services User Data Policy</h2>
+      <p>
+        Marvin Drive Handler's use and transfer of information received from Google APIs adheres to
+        the
+        <a href="https://developers.google.com/terms/api-services-user-data-policy"
+          >Google API Services User Data Policy</a
+        >, including the Limited Use requirements.
+      </p>
+
+      <h2>Revoking access</h2>
+      <p>
+        You can withdraw the app's access at any time in your Google Account under
+        <a href="https://myaccount.google.com/connections">Third-party connections</a>. Once
+        revoked, the stored token stops working.
+      </p>
+
+      <h2>Security</h2>
+      <p>
+        All traffic to Google uses HTTPS. Tokens are never written to logs; the app redacts them.
+        Because the app runs on your computer, the security of the stored data also depends on the
+        security of that computer.
+      </p>
+
+      <h2>Children</h2>
+      <p>The app is a developer tool and is not directed at children under 13.</p>
+
+      <h2>Changes</h2>
+      <p>
+        Changes to this policy are published on this page with a new effective date. The full
+        history is visible in the
+        <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler"
+          >public repository</a
+        >.
+      </p>
+
+      <h2>Contact</h2>
+      <p>
+        Questions about this policy:
+        <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler/issues"
+          >open an issue on GitHub</a
+        >.
+      </p>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span>Marvin Drive Handler · MIT licence</span>
+        <span>
+          <a href="./">Home</a> ·
+          <a href="https://github.com/emcothebluemarvin-cyber/marvin-drive-mcp-handler/issues"
+            >Contact</a
+          >
+        </span>
+      </div>
+    </footer>
+  </body>
+</html>
