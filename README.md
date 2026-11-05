@@ -4,7 +4,7 @@ Local MCP server + CLI that lets Claude Code manage files in one or more Google 
 
 ## Requirements
 
-- Node.js ≥ 22.12; tokens go to the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or, with `MARVIN_DRIVE_TOKEN_STORE=file`, to a `0600` file (see [Headless servers](#headless-servers)). Sync is tested on macOS only
+- Node.js ≥ 22.12; tokens go to the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or, with `MARVIN_DRIVE_TOKEN_STORE=file`, to a `0600` file (see [Headless servers](#headless-servers)). The live end-to-end tests (Drive, content, sync) pass on macOS and Ubuntu; Windows is covered by the CI unit and integration tests
 - A Google Cloud project with **Google Drive API** enabled (plus **Google Docs API**, **Google Sheets API** and **Google Slides API** for the content tools; the server reports a clear error if one is not enabled) and an OAuth client of type **Desktop app**
 - While the OAuth app is in **Testing** mode: every account must be listed under _Google Auth Platform → Audience → Test users_, and logins expire after 7 days (re-run `auth login`)
 
