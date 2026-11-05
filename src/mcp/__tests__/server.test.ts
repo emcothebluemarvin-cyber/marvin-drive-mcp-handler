@@ -39,7 +39,7 @@ function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides' | 'sync'>
     sync: new SyncService({
       ...deps,
       store: new PairStore({ dir: '/tmp/unused-sync' }),
-      trashExec: refuseTrash,
+      trash: refuseTrash,
     }),
   };
 }

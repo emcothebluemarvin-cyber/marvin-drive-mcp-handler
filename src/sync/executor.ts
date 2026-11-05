@@ -19,7 +19,7 @@ import {
   uploadNew,
   type StatExpect,
 } from './transfer.js';
-import { trashLocal, type ExecFn } from './trash.js';
+import type { LocalTrash } from './trash.js';
 import {
   SYNC_FILE_FIELDS,
   type Action,
@@ -52,8 +52,8 @@ export interface ExecutorDeps {
   logger: Logger;
   clock: () => Date;
   save: (file: PairFile) => Promise<void>;
-  /** Runs /usr/bin/trash (tests pass a fake). */
-  trashExec: ExecFn;
+  /** Moves local files to the OS trash (tests pass a fake). */
+  trash: LocalTrash;
 }
 
 interface RemoteFields {
@@ -699,7 +699,13 @@ export class Executor {
     }
     if (md5 !== action.localMd5)
       throw new TargetChangedError(`${action.key} changed locally since planning`);
-    await trashLocal(abs, this.deps.trashExec);
+    try {
+      await this.deps.trash.trash(abs);
+    } catch (err) {
+      if (hasErrorCode(err, 'ENOENT'))
+        throw new TargetChangedError(`${action.key} is already gone`);
+      throw err;
+    }
     await this.commit(action, () => dropRecord(this.file, record.remoteId));
     await this.audit('sync_trash_local', action, record.remoteId);
     return {};

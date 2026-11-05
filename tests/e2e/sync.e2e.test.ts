@@ -9,7 +9,7 @@ import { DriveClientFactory } from '../../src/drive/client-factory.js';
 import { FileService } from '../../src/files/file-service.js';
 import { PairStore } from '../../src/sync/pair-store.js';
 import { SyncService } from '../../src/sync/sync-service.js';
-import type { ExecFn } from '../../src/sync/trash.js';
+import type { LocalTrash } from '../../src/sync/trash.js';
 
 const account = process.env.MARVIN_E2E_ACCOUNT;
 
@@ -21,10 +21,11 @@ describe.runIf(account)('Sync E2E (live)', () => {
     const trashDir = path.join(tmp, 'trash');
     await mkdir(local);
     await mkdir(trashDir);
-    // Local "Trash" is redirected into the temp dir: the user's real macOS Trash is never touched.
-    const trashExec: ExecFn = async (_bin, args) => {
-      const target = args[1] ?? '';
-      await rename(target, path.join(trashDir, path.basename(target)));
+    // Local trash is redirected into the temp dir: the user's real trash is never touched.
+    const trash: LocalTrash = {
+      trash: async (abs) => {
+        await rename(abs, path.join(trashDir, path.basename(abs)));
+      },
     };
     // Every audit entry of this test (sync and plain file operations) goes to a temp file.
     const runner = new DriveClientFactory(app.auth);
@@ -34,7 +35,7 @@ describe.runIf(account)('Sync E2E (live)', () => {
       runner,
       audit,
       store: new PairStore({ dir: path.join(tmp, 'sync') }),
-      trashExec,
+      trash,
     });
     const at = (name: string): string => path.join(local, name);
     const setRemote = (fileId: string, text: string): Promise<unknown> =>

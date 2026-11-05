@@ -34,7 +34,7 @@ import {
   validateRelPath,
 } from './paths.js';
 import { SYNC_LIST_FIELDS, SYNC_PAGE_SIZE, childrenQuery, scanRemote } from './remote-scanner.js';
-import type { ExecFn } from './trash.js';
+import type { LocalTrash } from './trash.js';
 import {
   DEFAULT_GOOGLE_EXPORT,
   PAIR_NAME,
@@ -52,8 +52,8 @@ const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|yaml|x-sh|s
 
 export interface SyncServiceDeps extends OperationDeps {
   store: PairStore;
-  /** Runs /usr/bin/trash (the app passes `defaultExec`; tests pass a fake, never the real Trash). */
-  trashExec: ExecFn;
+  /** Moves local files to the OS trash (the app passes `createLocalTrash()`; tests pass a fake, never the real trash). */
+  trash: LocalTrash;
   clock?: () => Date;
 }
 
@@ -577,7 +577,7 @@ export class SyncService {
           logger: this.log,
           clock: this.clock,
           save: (f): Promise<void> => this.store.save(f),
-          trashExec: this.deps.trashExec,
+          trash: this.deps.trash,
         },
         file,
         remote.folders,

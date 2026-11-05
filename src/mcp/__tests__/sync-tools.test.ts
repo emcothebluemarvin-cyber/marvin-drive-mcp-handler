@@ -58,7 +58,7 @@ beforeEach(async () => {
     sync: new SyncService({
       ...deps,
       store: new PairStore({ dir: path.join(tmp, 'sync'), logger: silentLogger() }),
-      trashExec: refuseTrash,
+      trash: refuseTrash,
     }),
     auth: { status: async () => [] },
     version: '0.0.0-test',
