@@ -113,6 +113,32 @@ describe.skipIf(process.platform === 'win32')('XdgTrash', () => {
     expect(await readFile(f, 'utf8')).toBe('A');
   });
 
+  it('refuses a home trash whose files dir is a symlink', async () => {
+    const elsewhere = path.join(tmp, 'elsewhere');
+    await mkdir(elsewhere);
+    await mkdir(path.join(home, 'info'), { recursive: true });
+    await symlink(elsewhere, path.join(home, 'files'));
+    const f = await file('a.pdf');
+    await expect(make().trash(f)).rejects.toThrow(/home trash is not safe/);
+    expect(await readdir(elsewhere)).toEqual([]);
+    expect(await readFile(f, 'utf8')).toBe('A');
+  });
+
+  it('reports a trash dir that vanishes mid-way as LocalTrashError, not ENOENT', async () => {
+    const fs: TrashFs = {
+      ...nodeTrashFs,
+      lstat: (async (p: string, o?: object) => {
+        if (String(p).endsWith(`${path.sep}info`)) {
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        }
+        return nodeTrashFs.lstat(p, o as never);
+      }) as TrashFs['lstat'],
+    };
+    const f = await file('a.pdf');
+    await expect(make({ fs }).trash(f)).rejects.toBeInstanceOf(LocalTrashError);
+    expect(await readFile(f, 'utf8')).toBe('A');
+  });
+
   it('rejects directories and relative paths', async () => {
     await expect(make().trash(docs)).rejects.toBeInstanceOf(ValidationError);
     await expect(make().trash('a.pdf')).rejects.toBeInstanceOf(ValidationError);
@@ -143,6 +169,40 @@ describe.skipIf(process.platform === 'win32')('XdgTrash', () => {
       await chmod(admin, 0o777);
       await make({ fs: otherDevice() }).trash(await file('a.pdf'));
       expect(await readdir(admin)).toEqual([]);
+      expect(await readdir(path.join(tmp, 'vol', `.Trash-${uid}`, 'files'))).toEqual(['a.pdf']);
+    });
+
+    it('ignores .Trash when it is a symlink', async () => {
+      const real = path.join(tmp, 'shared');
+      await mkdir(real);
+      await chmod(real, 0o1777);
+      await symlink(real, path.join(tmp, 'vol', '.Trash'));
+      await make({ fs: otherDevice() }).trash(await file('a.pdf'));
+      expect(await readdir(real)).toEqual([]);
+      expect(await readdir(path.join(tmp, 'vol', `.Trash-${uid}`, 'files'))).toEqual(['a.pdf']);
+    });
+
+    it('falls back to .Trash-$uid when .Trash/$uid is group-writable', async () => {
+      const admin = path.join(tmp, 'vol', '.Trash');
+      await mkdir(path.join(admin, String(uid), 'files'), { recursive: true });
+      await mkdir(path.join(admin, String(uid), 'info'), { recursive: true });
+      await chmod(admin, 0o1777);
+      await chmod(path.join(admin, String(uid)), 0o770);
+      await make({ fs: otherDevice() }).trash(await file('a.pdf'));
+      expect(await readdir(path.join(admin, String(uid), 'files'))).toEqual([]);
+      expect(await readdir(path.join(tmp, 'vol', `.Trash-${uid}`, 'files'))).toEqual(['a.pdf']);
+    });
+
+    it('skips a home trash that cannot be created', async () => {
+      const blocked = path.join(tmp, 'blocked');
+      await writeFile(blocked, 'not a dir');
+      const t = new XdgTrash({
+        env: { XDG_DATA_HOME: blocked },
+        now: () => NOW,
+        uid,
+        fs: otherDevice(),
+      });
+      await t.trash(await file('a.pdf'));
       expect(await readdir(path.join(tmp, 'vol', `.Trash-${uid}`, 'files'))).toEqual(['a.pdf']);
     });
 

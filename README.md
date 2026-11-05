@@ -55,7 +55,7 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 - Tokens are kept in Windows Credential Manager (service `marvin-drive`); the config folder is `%USERPROFILE%\.config\google-handler`. `chmod` has no effect on Windows, so these files are protected only by your user profile's ACLs.
 - Sync skips Drive files Windows cannot store (`CON`, `NUL.txt`, `COM1`, names with `< > : " \ | ? *` or ending in a dot or space) and lists them under `unrepresentable` in the plan, so rename them in Drive to sync them.
 - Saves that replace a file retry for about 1.5 s when the target is briefly locked (antivirus, indexer, an open editor).
-- Sync deletions go to the Recycle Bin of the file's drive (`<drive>:\$Recycle.Bin\<your SID>`). That folder exists once you have deleted anything on that drive in Explorer; until then, and on network or `subst` drives, the deletion fails safely and the file stays. Marvin writes the Recycle Bin's `$I` record itself (the format Windows 10+ uses, not officially documented), so Explorer shows the file with its original location and _Restore_ puts it back.
+- Sync deletions go to the Recycle Bin of the file's drive (`<drive>:\$Recycle.Bin\<your SID>`). That folder exists once you have deleted anything on that drive in Explorer; until then, and on network drives, the deletion fails safely and the file stays. Marvin writes the Recycle Bin's `$I` record itself (the format Windows 10+ uses, not officially documented), so Explorer shows the file with its original location and _Restore_ puts it back.
 
 ## CLI
 

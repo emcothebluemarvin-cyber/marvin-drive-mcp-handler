@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   chmod,
   mkdir,
@@ -153,6 +154,54 @@ describe('WindowsTrash path checks', () => {
   });
 });
 
+describe('WindowsTrash SID lookup failure', () => {
+  const fs = {
+    ...nodeTrashFs,
+    lstat: (async () => ({
+      isFile: () => true,
+      isDirectory: () => true,
+    })) as unknown as typeof nodeTrashFs.lstat,
+    realpath: async () => 'C:\\D\\a.pdf',
+  };
+  const abs = process.platform === 'win32' ? 'C:\\D\\a.pdf' : '/d/a.pdf';
+
+  it('fails with LocalTrashError and retries whoami on the next call', async () => {
+    const exec = vi.fn<ExecFn>(async () => {
+      throw new Error('whoami failed');
+    });
+    const t = new WindowsTrash({ exec, fs });
+    await expect(t.trash(abs)).rejects.toThrow(/whoami failed\)/);
+    await expect(t.trash(abs)).rejects.toBeInstanceOf(LocalTrashError);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('normalises C:/ paths to backslashes before locating the bin', async () => {
+    const roots: string[] = [];
+    const input = process.platform === 'win32' ? 'C:/D/a.pdf' : '/d/a.pdf';
+    const realpaths: string[] = [];
+    const t = new WindowsTrash({
+      fs: {
+        ...fs,
+        lstat: (async () => ({
+          isFile: () => true,
+          isDirectory: () => false,
+        })) as unknown as typeof nodeTrashFs.lstat,
+        realpath: async (p: string) => {
+          realpaths.push(p);
+          return 'C:\\D\\a.pdf';
+        },
+      },
+      binDir: async (root) => {
+        roots.push(root);
+        return 'C:\\nope';
+      },
+    });
+    await expect(t.trash(input)).rejects.toThrow(/no Recycle Bin on drive C:/);
+    expect(roots).toEqual(['C:\\']);
+    if (process.platform === 'win32') expect(realpaths).toEqual(['C:\\D\\a.pdf']);
+  });
+});
+
 describe.runIf(process.platform === 'win32')('WindowsTrash on Windows', () => {
   let tmp: string;
   let bin: string;
@@ -162,7 +211,7 @@ describe.runIf(process.platform === 'win32')('WindowsTrash on Windows', () => {
     await mkdir(bin);
   });
   afterEach(async () => {
-    await rm(tmp, { recursive: true, force: true });
+    await rm(tmp, { recursive: true, force: true, maxRetries: 5 });
   });
 
   it('real whoami.exe returns a SID', async () => {
@@ -200,13 +249,32 @@ describe.runIf(process.platform === 'win32')('WindowsTrash on Windows', () => {
   it('fails and keeps a file another process holds open without delete sharing', async () => {
     const file = path.join(tmp, 'busy.txt');
     await writeFile(file, 'x');
-    const hold = execFile('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      `$f=[IO.File]::Open('${file.replace(/'/g, "''")}','Open','Read','Read'); Start-Sleep 20; $f.Close()`,
-    ]);
+    const hold = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$f=[IO.File]::Open('${file.replace(/'/g, "''")}','Open','Read','Read'); ` +
+          `[Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); Start-Sleep 30; $f.Close()`,
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    const exited = once(hold, 'exit');
     try {
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('PowerShell did not open the file')),
+          25_000,
+        );
+        hold.once('error', reject);
+        hold.stdout.on('data', (chunk: Buffer) => {
+          if (chunk.toString().includes('ready')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      });
       await expect(
         new WindowsTrash({ binDir: async () => bin, random: () => 'BUSY01' }).trash(file),
       ).rejects.toThrow(/in use or access was denied/);
@@ -214,6 +282,7 @@ describe.runIf(process.platform === 'win32')('WindowsTrash on Windows', () => {
       expect(await readdir(bin)).toEqual([]);
     } finally {
       hold.kill();
+      await exited;
     }
-  }, 30_000);
+  }, 60_000);
 });

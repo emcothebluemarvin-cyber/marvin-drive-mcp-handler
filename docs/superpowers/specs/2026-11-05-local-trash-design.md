@@ -98,7 +98,7 @@ Follows the freedesktop.org Trash specification 1.0.
 
 Let `F` = `realpath(dirname(file))/basename(file)` (resolves a symlinked `localDir`), `dev` = `lstat(F).dev`.
 
-1. **Home trash** `H` = `$XDG_DATA_HOME/Trash`, or `$HOME/.local/share/Trash` when `XDG_DATA_HOME` is unset or not absolute. Create `H`, `H/files`, `H/info` (0700, recursive) if missing, then check `stat(H).dev === dev`. If the device differs, `H` is not used (directories we just created stay; they are empty and harmless).
+1. **Home trash** `H` = `$XDG_DATA_HOME/Trash`, or `$HOME/.local/share/Trash` when `XDG_DATA_HOME` is unset or not absolute. Create `H`, `H/files`, `H/info` (0700, recursive) if missing, then check `stat(H).dev === dev`. If they cannot be created (read-only or missing `$HOME` on servers), or the device differs, `H` is not used (directories we just created stay; they are empty and harmless).
 2. Otherwise find the **top directory** `T`: walk up from `dirname(F)` while the parent's `st_dev === dev`; `T` is the last directory on the same device.
 3. **Admin trash** `T/.Trash/$uid`: only if `T/.Trash` exists, is a directory (not a symlink, by `lstat`) and has the sticky bit. Create `$uid`, `files`, `info` (0700) if missing.
 4. Else **user trash** `T/.Trash-$uid`: create it and `files`, `info` (0700) if missing.

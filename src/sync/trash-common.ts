@@ -68,6 +68,33 @@ async function exists(p: string, fs: TrashFs): Promise<boolean> {
   }
 }
 
+/** True only when the path is confirmed absent; any other outcome counts as "still there". */
+async function confirmedGone(p: string, fs: TrashFs): Promise<boolean> {
+  return exists(p, fs).then(
+    (present) => !present,
+    () => false,
+  );
+}
+
+/**
+ * Runs the part of a trash() after the shared checks (spec §3): every failure becomes a
+ * LocalTrashError, except ENOENT when the file itself is confirmed gone, so the executor
+ * reports "already gone" only when that is true.
+ */
+export async function afterChecks(
+  absPath: string,
+  fs: TrashFs,
+  body: () => Promise<void>,
+): Promise<void> {
+  try {
+    await body();
+  } catch (err) {
+    if (err instanceof LocalTrashError) throw err;
+    if (hasErrorCode(err, 'ENOENT') && (await confirmedGone(absPath, fs))) throw err;
+    throw trashFailure(absPath, 'the trash could not be prepared', err);
+  }
+}
+
 /**
  * fsync a directory so a rename or a new entry survives a crash (POSIX only; Windows
  * cannot open directories for fsync). Durability hint only: the operation it follows
@@ -146,7 +173,7 @@ export async function reserveAndMove(job: ReserveAndMove): Promise<void> {
     } catch (err) {
       await removeOwnRecord(meta, fs);
       if (err instanceof NameTakenError) continue;
-      if (hasErrorCode(err, 'ENOENT') && !(await exists(file, fs))) throw err;
+      if (hasErrorCode(err, 'ENOENT') && (await confirmedGone(file, fs))) throw err;
       throw trashFailure(file, describeMoveError(err), err);
     }
   }

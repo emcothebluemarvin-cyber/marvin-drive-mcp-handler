@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalTrashError } from '../errors.js';
 import { nodeTrashFs, placeInTrash, reserveAndMove, type TrashFs } from '../trash-common.js';
 
@@ -35,7 +35,11 @@ describe('placeInTrash', () => {
 
   it('never replaces an existing target', async () => {
     await writeFile(path.join(bin, 'a.pdf'), 'OLD');
-    await expect(placeInTrash(file, path.join(bin, 'a.pdf'), nodeTrashFs)).rejects.toThrow();
+    const rename = vi.fn(nodeTrashFs.rename);
+    await expect(
+      placeInTrash(file, path.join(bin, 'a.pdf'), { ...nodeTrashFs, rename }),
+    ).rejects.toThrow(path.join(bin, 'a.pdf'));
+    expect(rename).not.toHaveBeenCalled();
     expect(await readFile(path.join(bin, 'a.pdf'), 'utf8')).toBe('OLD');
     expect(await readFile(file, 'utf8')).toBe('A');
   });

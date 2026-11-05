@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import {
+  afterChecks,
   checkTrashable,
   nodeTrashFs,
   reserveAndMove,
@@ -71,6 +72,11 @@ export class XdgTrash implements LocalTrash {
   async trash(absPath: string): Promise<void> {
     const fs = this.fs;
     await checkTrashable(absPath, fs);
+    await afterChecks(absPath, fs, () => this.move(absPath));
+  }
+
+  private async move(absPath: string): Promise<void> {
+    const fs = this.fs;
     const file = path.join(await fs.realpath(path.dirname(absPath)), path.basename(absPath));
     const { dev } = await fs.lstat(file);
     const trash = await this.chooseTrash(file, dev);
@@ -103,12 +109,13 @@ export class XdgTrash implements LocalTrash {
     const fs = this.fs;
     const uid = this.uid(file);
     const home = this.homeTrashDir();
-    try {
-      await ensureTrashDirs(home, fs);
-    } catch (err) {
-      throw trashFailure(file, `could not create the home trash ${home}`, err);
-    }
-    if ((await fs.stat(home)).dev === dev) {
+    // A home that cannot hold a trash (read-only or missing $HOME on servers) is skipped;
+    // the top-directory trash below is validated just as strictly.
+    const homeReady = await ensureTrashDirs(home, fs).then(
+      () => true,
+      () => false,
+    );
+    if (homeReady && (await fs.stat(home)).dev === dev) {
       const problem = await trashProblem(home, uid, dev, fs);
       if (problem) throw trashFailure(file, `home trash is not safe: ${problem}`);
       return { dir: home, top: null };

@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import path from 'node:path';
 import { LocalTrashError } from './errors.js';
 import {
+  afterChecks,
   checkTrashable,
   defaultExec,
   nodeTrashFs,
@@ -94,13 +95,16 @@ export class WindowsTrash implements LocalTrash {
   }
 
   async trash(absPath: string): Promise<void> {
+    await checkTrashable(absPath, this.fs);
+    await afterChecks(absPath, this.fs, () => this.move(absPath));
+  }
+
+  private async move(absPath: string): Promise<void> {
     const fs = this.fs;
-    await checkTrashable(absPath, fs);
     const file = await fs.realpath(path.win32.resolve(absPath));
     const root = recycleRoot(file);
-    const bin = await (this.deps.binDir ?? ((r: string): Promise<string> => this.defaultBinDir(r)))(
-      root,
-    );
+    const binDir = this.deps.binDir ?? ((r: string): Promise<string> => this.defaultBinDir(r));
+    const bin = await binDir(root);
     const drive = root.slice(0, 2);
     const isDir = await fs.lstat(bin).then(
       (info) => info.isDirectory(),
