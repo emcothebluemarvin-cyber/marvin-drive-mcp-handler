@@ -6,7 +6,7 @@
 
 ## 1. Goal
 
-Let Claude Code operate on one or more Google Drive accounts (first: `emcothebluemarvin@gmail.com`) through a local MCP server that uses our own Google OAuth client, independent of the claude.ai Drive connector.
+Let Claude Code operate on one or more Google Drive accounts through a local MCP server that uses our own Google OAuth client, independent of the claude.ai Drive connector.
 
 ## 2. Roadmap context
 

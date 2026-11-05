@@ -14,7 +14,7 @@
 
 ## Ground rules (read before Task 1)
 
-- Run everything from `/Users/emcomacpro/google-handler`.
+- Run everything from the repository root.
 - Quality gate after every task: `npm run check` (typecheck + eslint + prettier check + vitest). It must be fully green — and eslint must stay at **zero warnings** — before committing. The plan's code is not prettier-formatted: run `npx prettier --write <changed files>` before every `npm run check`.
 - Imports use the `.js` suffix (ESM, NodeNext), e.g. `import { x } from './y.js';`.
 - Test helpers live in `src/files/__tests__/fakes.ts`: `createFakeDrive`, `createRunner`, `createAudit`, `noSleep`, `silentLogger`, `httpError`, `ACCOUNT`.

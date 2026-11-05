@@ -2,6 +2,7 @@
   "name": "marvin-drive-mcp-handler",
   "version": "0.3.0",
   "private": true,
+  "license": "MIT",
   "description": "Multi-account Google Drive MCP server and CLI for Claude Code, with tools to read and edit Google Docs, Sheets and Slides",
   "type": "module",
   "bin": {

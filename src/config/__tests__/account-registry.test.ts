@@ -18,7 +18,7 @@ beforeEach(async () => {
 
 describe('defaultAlias', () => {
   it('derives a valid alias from the email local part', () => {
-    expect(defaultAlias('emcothebluemarvin@gmail.com')).toBe('emcothebluemarvin');
+    expect(defaultAlias('alice@example.com')).toBe('alice');
     expect(defaultAlias('John.Doe+x@ex.com')).toBe('john-doe-x');
     expect(defaultAlias('___@ex.com')).toBe('account');
     expect(defaultAlias(`${'a'.repeat(40)}@ex.com`)).toHaveLength(32);
