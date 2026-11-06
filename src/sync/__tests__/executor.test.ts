@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -18,7 +18,8 @@ import {
 import { Executor, conflictName } from '../executor.js';
 import { foldKey } from '../paths.js';
 import type { Action, LocalEntry, PairFile, RemoteEntry, SyncRecord } from '../types.js';
-import { ROOT_ID, makePairFile, record, remoteEntry } from './fixtures.js';
+import type { LocalTrash } from '../trash.js';
+import { ROOT_ID, dirTrash, makePairFile, record, remoteEntry } from './fixtures.js';
 
 const NOW = new Date('2026-11-03T10:15:00');
 const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
@@ -47,6 +48,7 @@ function executor(
   save: (f: PairFile) => Promise<void> = async (f) => {
     saves.push(structuredClone(f));
   },
+  trash: LocalTrash = dirTrash(trashDir),
 ): Executor {
   const ops = new OperationRunner({
     runner: createRunner(drive),
@@ -61,10 +63,7 @@ function executor(
       logger: silentLogger(),
       clock: () => NOW,
       save,
-      trashExec: async (_bin, args) => {
-        const target = args[1] ?? '';
-        await rename(target, path.join(trashDir, path.basename(target)));
-      },
+      trash,
     },
     file,
     folders,
@@ -406,6 +405,29 @@ describe('Executor', () => {
     ]);
     expect(out.map((o) => o.status)).toEqual(['skipped', 'skipped']);
     expect(await readdir(trashDir)).toEqual([]);
+    expect(saves).toEqual([]);
+  });
+
+  it('reports trash-local as skipped when the file vanished during the move', async () => {
+    const l = await put('a.pdf', 'A');
+    const vanished: LocalTrash = {
+      trash: async () => {
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      },
+    };
+    const out = await executor(
+      pairFile([record('r1', 'a.pdf')]),
+      undefined,
+      undefined,
+      vanished,
+    ).run([
+      action('trash-local', 'a.pdf', {
+        record: record('r1', 'a.pdf'),
+        local: l,
+        localMd5: md5('A'),
+      }),
+    ]);
+    expect(out[0]).toMatchObject({ status: 'skipped', message: 'a.pdf is already gone' });
     expect(saves).toEqual([]);
   });
 

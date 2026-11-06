@@ -4,7 +4,7 @@ Local MCP server + CLI that lets Claude Code manage files in one or more Google 
 
 ## Requirements
 
-- Node.js ≥ 22.12; tokens go to the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or, with `MARVIN_DRIVE_TOKEN_STORE=file`, to a `0600` file (see [Headless servers](#headless-servers)). Sync is tested on macOS only
+- Node.js ≥ 22.12; tokens go to the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or, with `MARVIN_DRIVE_TOKEN_STORE=file`, to a `0600` file (see [Headless servers](#headless-servers)). The live end-to-end tests (Drive, content, sync) pass on macOS and Ubuntu; Windows is covered by the CI unit and integration tests
 - A Google Cloud project with **Google Drive API** enabled (plus **Google Docs API**, **Google Sheets API** and **Google Slides API** for the content tools; the server reports a clear error if one is not enabled) and an OAuth client of type **Desktop app**
 - While the OAuth app is in **Testing** mode: every account must be listed under _Google Auth Platform → Audience → Test users_, and logins expire after 7 days (re-run `auth login`)
 
@@ -56,7 +56,7 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 - Tokens are kept in Windows Credential Manager (service `marvin-drive`); the config folder is `%USERPROFILE%\.config\google-handler`. `chmod` has no effect on Windows, so these files are protected only by your user profile's ACLs.
 - Sync skips Drive files Windows cannot store (`CON`, `NUL.txt`, `COM1`, names with `< > : " \ | ? *` or ending in a dot or space) and lists them under `unrepresentable` in the plan, so rename them in Drive to sync them.
 - Saves that replace a file retry for about 1.5 s when the target is briefly locked (antivirus, indexer, an open editor).
-- **Sync deletions do not work yet:** local deletions use the macOS Trash and fail safely (nothing is deleted) on Windows and Linux.
+- Sync deletions go to the Recycle Bin of the file's drive (`<drive>:\$Recycle.Bin\<your SID>`). That folder exists once you have deleted anything on that drive in Explorer; until then, and on network drives, the deletion fails safely and the file stays. Marvin writes the Recycle Bin's `$I` record itself (the format Windows 10+ uses, not officially documented), so Explorer shows the file with its original location and _Restore_ puts it back.
 
 ## CLI
 
@@ -133,7 +133,7 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder 
 
 - Only selected files sync. Drive files that already existed at the first applied run stay **candidates** until you select them; Drive files added later are downloaded and selected automatically (unless a local file of the same name exists — then it is reported as a collision).
 - Changes are detected three-way (local, Drive, last sync) by MD5. Edits on both sides become a **conflict**: the Drive version is saved next to yours as `<name> (Drive conflict YYYY-MM-DD HH.mm).<ext>`, then your version is uploaded (Drive keeps the old revision).
-- Deletions are propagated but never permanent: Drive files go to the Drive trash, local files to the macOS Trash via `/usr/bin/trash` (volumes without a Trash, e.g. some SMB/FAT disks, cannot delete — the action fails). A safety brake stops runs that would delete more than max(10, 20 %) of tracked files, or every tracked file of one side.
+- Deletions are propagated but never permanent: Drive files go to the Drive trash, local files to the system trash: the macOS Trash via `/usr/bin/trash`, the Windows Recycle Bin, or the freedesktop.org trash on Linux (`~/.local/share/Trash`, or `.Trash-<uid>` at the top of another disk), restorable from Files/Dolphin/`gio trash --restore`. If no trash can be used with certainty — network drives, Linux FAT/exFAT USB disks, some SMB volumes — the action fails and the file stays; nothing is ever deleted permanently. A safety brake stops runs that would delete more than max(10, 20 %) of tracked files, or every tracked file of one side.
 - A local file is only ever overwritten when it is the tracked file itself and unchanged since the scan; every new local file is created exclusively (never replaces anything). Anything the planner cannot classify — unreadable folders, duplicate names, case-only clashes on case-sensitive disks — is reported and left alone.
 - Each run checks that the local folder still has its marker (catches unmounted or replaced disks) and that the Drive folder still exists; if the marker is missing, run `marvin-drive sync repair-marker <name>`.
 - Google Docs/Sheets/Slides inside a synced Drive folder are reported as `native-skipped` in this version. Hashing a file that iCloud has evicted makes macOS download it first (slow but correct).

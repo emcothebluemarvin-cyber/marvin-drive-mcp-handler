@@ -6,6 +6,7 @@
 - MIT license; the repository is public.
 - File token store for hosts without an OS credential store (headless Linux servers): `MARVIN_DRIVE_TOKEN_STORE=file` keeps refresh tokens in `~/.config/google-handler/tokens.json` (`0600`, directory `0700`).
 - `auth add --no-browser` / `auth login <alias> --no-browser`: sign in from a server by pasting the redirect URL; the loopback callback (SSH tunnel) keeps working in parallel. No-browser logins wait up to 10 minutes.
+- Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
 - Sync skips and reports Drive names Windows cannot store (reserved device names, `< > : " \ | ? *`, trailing dot or space) when running on Windows; `sync_select` paths are validated the same way.
@@ -14,6 +15,7 @@
 - CI also runs on Windows; macOS on manual dispatch.
 
 ### Fixed
+- Sync: a local file that vanished while being moved to the trash is reported as "already gone" instead of an unclassified failure.
 - Windows: a `drive_download` destination ending in `\` is treated as a folder (it used to become a file of that name); `~\` expands to the home folder.
 - Windows: symlink tests no longer fail for ordinary users (directory links use junctions; file-symlink tests are skipped without Developer Mode).
 - Windows: a tracked path whose parent folder had been replaced by a file was probed as absent (Windows reports `ENOENT`, not `ENOTDIR`), so sync could treat it as locally deleted; it is now reported as unknown, as on macOS/Linux.

@@ -7,6 +7,7 @@ import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__
 import { SyncRootError } from '../errors.js';
 import { PairStore, markerName } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
+import { dirTrash, refuseTrash } from './fixtures.js';
 import { memoryDrive, type MemoryDrive } from './memory-drive.js';
 
 let tmp: string;
@@ -33,10 +34,7 @@ beforeEach(async () => {
     logger: silentLogger(),
     store,
     clock: () => now,
-    trashExec: async (_bin, args) => {
-      const target = args[1] ?? '';
-      await rename(target, path.join(trashDir, path.basename(target)));
-    },
+    trash: dirTrash(trashDir),
   });
   await sync.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' });
 });
@@ -273,7 +271,7 @@ describe('run (review regressions)', () => {
       retry: noSleep,
       logger: silentLogger(),
       store,
-      trashExec: async () => undefined,
+      trash: refuseTrash,
       clock: () => {
         const t = new Date(Date.UTC(2026, 10, 3, 12, 0, stamps.length));
         stamps.push(t);
