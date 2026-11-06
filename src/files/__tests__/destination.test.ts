@@ -34,7 +34,7 @@ describe('path separators', () => {
   });
 
   it.runIf(process.platform === 'win32')(
-    'creates the folder for a destPath ending in a backslash',
+    'resolves a destPath ending in a backslash to that folder',
     async () => {
       const fresh = path.join(dir, 'verify') + '\\';
       await expect(
