@@ -12,7 +12,7 @@ import { SlidesService } from './content/slides-service.js';
 import { DriveClientFactory } from './drive/client-factory.js';
 import { PairStore } from './sync/pair-store.js';
 import { SyncService } from './sync/sync-service.js';
-import { defaultExec } from './sync/trash.js';
+import { createLocalTrash } from './sync/trash.js';
 import { FileService } from './files/file-service.js';
 
 export interface App {
@@ -62,7 +62,7 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
     runner,
     audit,
     store: new PairStore({ dir: paths.syncDir }),
-    trashExec: defaultExec,
+    trash: createLocalTrash(),
   });
   return { paths, auth, files, docs, sheets, slides, sync };
 }

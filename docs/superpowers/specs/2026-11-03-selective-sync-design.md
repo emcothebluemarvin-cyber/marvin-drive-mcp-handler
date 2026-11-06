@@ -25,7 +25,7 @@ Keep a chosen set of files in a local folder and a Drive folder in sync in both 
 | Identity | Records keyed by Drive `fileId`; local paths matched by NFC key, with case-/normalization-fold lookup |
 | Change detection | Three-way: current local, current remote, last-synced record. MD5 (local hash vs `md5Checksum`); Google-native uses `modifiedTime` |
 | Conflicts | Keep both; reported |
-| Deletions | Propagated, never permanent: Drive trash / macOS Trash via `/usr/bin/trash -s` |
+| Deletions | Propagated, never permanent: Drive trash / OS trash (macOS `/usr/bin/trash -s`; Windows and Linux: `2026-11-05-local-trash-design.md`) |
 | Google-native files | Pull-only read-only exports (Phase B) |
 | Release ("move to Drive") | On request after an applied run; verified; to macOS Trash; released files become remote-only (Phase B) |
 | Safety | Dry run by default; apply re-plans and can be bound to the dry run's `planId`; root identity checks; unknown-subtree protection; mass-delete brake; exclusive local writes; re-verification before every destructive or overwriting action; per-pair lock for every writer |
@@ -220,7 +220,7 @@ Count planned `trash-remote` + `trash-local`. Over threshold → abort with coun
 - **Isolation:** failed actions go to `failures` with the mapped message; their records are untouched; the run continues. `ReauthRequiredError`, `QuotaExceededError`, `ApiDisabledError`, `RateLimitError` (after retries) abort; remaining actions `not-run`.
 - **Persistence:** the pair file is rewritten atomically after every successful action.
 - **Retry kinds:** reads/probes `idempotent`; `upload-new` `create`; `update-remote` `mutate`; Drive trash `idempotent`.
-- **Local trash:** `/usr/bin/trash -s <path>`, one path per call, `execFile` (no shell). Non-zero exit → action fails; never `unlink`. Volumes without a trash (some SMB/FAT) always fail `trash-local`/release — documented.
+- **Local trash:** (Windows/Linux: see `2026-11-05-local-trash-design.md`) macOS `/usr/bin/trash -s <path>`, one path per call, `execFile` (no shell). Non-zero exit → action fails; never `unlink`. Volumes without a trash (some SMB/FAT) always fail `trash-local`/release — documented.
 - **iCloud:** hashing an evicted iCloud file makes macOS download it (slow but correct; documented).
 
 ## 8. MCP tools

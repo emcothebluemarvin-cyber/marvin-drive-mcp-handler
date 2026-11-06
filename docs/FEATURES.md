@@ -34,7 +34,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ Pairs: create (existing or new Drive folder), list, remove; root marker + case-sensitivity probe; overlap check
 - ✅ AI-assisted selection: `sync_scan` (previews, remote candidates) → `sync_select` (add/remove/exclude)
 - ✅ Pure three-way planner (B1–B14, U0–U8), ambiguity/unknown-state protection, mass-delete brake, stable `planId`
-- ✅ Executor: spec order, re-verification, exclusive local writes, conflict copies, Drive/macOS trash, per-action persistence, audit
+- ✅ Executor: spec order, re-verification, exclusive local writes, conflict copies, Drive/OS trash, per-action persistence, audit
 - ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_remove_pair`; CLI `sync list/run/repair-marker`
 - ⬜ Phase B: Google-native exports, release ("move to Drive"), `sync_release`
 
@@ -43,7 +43,8 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ `auth add --no-browser`: paste the redirect URL instead of an SSH tunnel
 - ✅ Windows hardening: reserved/invalid sync names skipped + reported, `rename` retry on `EPERM`, README section
 - ✅ GitHub Actions matrix: `ubuntu-latest` (Node 22, 24) + `windows-latest` (Node 24) on every PR; `macos-latest` on manual dispatch (hosted macOS runners kept timing out in the capacity queue)
-- ⬜ Local trash for sync deletions on Windows (Recycle Bin) and Linux (`gio trash` / XDG Trash); today only macOS `/usr/bin/trash`
+- ✅ Local trash for sync deletions on Windows (Recycle Bin, `$I` record) and Linux/Unix (freedesktop.org trash); fails safely when no trash is usable (spec `2026-11-05-local-trash-design.md`)
+- ⬜ Manual check on a real Windows machine: trashed file shows in the Recycle Bin and *Restore* works
 
 ## Later
 - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)

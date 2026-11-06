@@ -100,7 +100,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_run',
     {
       description:
-        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the macOS Trash, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion.',
+        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion.',
       inputSchema: {
         name,
         apply: z.boolean().optional().describe('Default false (dry run)'),

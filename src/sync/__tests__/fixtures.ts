@@ -1,11 +1,25 @@
+import { rename } from 'node:fs/promises';
+import path from 'node:path';
+import type { LocalTrash } from '../trash.js';
 import type { LocalEntry, Pair, PairFile, RemoteEntry, SyncRecord } from '../types.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
 
-/** trashExec for tests that must never trash anything. */
-export const refuseTrash = async (): Promise<never> => {
-  throw new Error('unexpected local trash in this test');
+/** LocalTrash for tests that must never trash anything. */
+export const refuseTrash: LocalTrash = {
+  trash: async (): Promise<never> => {
+    throw new Error('unexpected local trash in this test');
+  },
 };
+
+/** LocalTrash that moves the file into `dir` (never the user's real trash). */
+export function dirTrash(dir: string): LocalTrash {
+  return {
+    trash: async (abs) => {
+      await rename(abs, path.join(dir, path.basename(abs)));
+    },
+  };
+}
 
 export const ROOT_ID = 'root-folder';
 

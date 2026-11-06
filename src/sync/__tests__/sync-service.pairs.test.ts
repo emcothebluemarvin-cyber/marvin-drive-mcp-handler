@@ -29,7 +29,7 @@ beforeEach(async () => {
     retry: noSleep,
     logger: silentLogger(),
     store,
-    trashExec: refuseTrash,
+    trash: refuseTrash,
     clock: () => new Date('2026-11-03T12:00:00.000Z'),
   });
 });
