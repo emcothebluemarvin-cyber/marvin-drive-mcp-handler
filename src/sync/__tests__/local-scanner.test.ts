@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { Stats } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
 import { hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
@@ -32,10 +33,10 @@ describe('scanLocal', () => {
     expect(scan.occupied).toEqual(['sub']);
   });
 
-  it('records ignored and non-regular entries as occupied and collects part files', async () => {
+  it('records ignored and non-regular entries as occupied and collects part files', async (ctx) => {
     await writeFile(path.join(root, '.marvin-sync-docs'), 'id');
     await writeFile(path.join(root, 'x.pdf.ab12.marvin-part'), 'partial');
-    await symlink('/etc/hosts', path.join(root, 'link.pdf'));
+    await linkFileOrSkip(ctx, path.resolve('/etc/hosts'), path.join(root, 'link.pdf'));
     await mkdir(path.join(root, '.git'));
     await writeFile(path.join(root, '.git', 'config'), 'x');
     const scan = await scanLocal(root);
@@ -51,7 +52,7 @@ describe('scanLocal', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'sync-ext-'));
     try {
       await writeFile(path.join(outside, 'x.pdf'), 'x');
-      await symlink(outside, path.join(root, 'a'));
+      await linkDir(outside, path.join(root, 'a'));
       const scan = await scanLocal(root);
       expect(scan.entries).toEqual([]);
       expect(scan.blocking).toEqual(['a']);

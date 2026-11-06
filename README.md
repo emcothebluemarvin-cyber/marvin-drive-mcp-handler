@@ -45,13 +45,14 @@ The file store protects tokens only with file permissions: use it only on hosts 
 
 ### Windows
 
-Not yet tested on Windows (CI is planned). What is expected to work and what is not:
+Tested on Windows 11 (Node 24, ordinary user account) with the MCP tools and a live sync; CI runs on `windows-latest`.
 
 ```powershell
 npm install; npm run build
 claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 ```
 
+- Paths: `C:\...` and `C:/...` both work; a `drive_download` destination ending in `\` or `/` is a folder (created if missing). In Git Bash, MSYS rewrites arguments that start with `\\` (UNC paths), so run the CLI with `MSYS_NO_PATHCONV=1` or from PowerShell.
 - Tokens are kept in Windows Credential Manager (service `marvin-drive`); the config folder is `%USERPROFILE%\.config\google-handler`. `chmod` has no effect on Windows, so these files are protected only by your user profile's ACLs.
 - Sync skips Drive files Windows cannot store (`CON`, `NUL.txt`, `COM1`, names with `< > : " \ | ? *` or ending in a dot or space) and lists them under `unrepresentable` in the plan, so rename them in Drive to sync them.
 - Saves that replace a file retry for about 1.5 s when the target is briefly locked (antivirus, indexer, an open editor).

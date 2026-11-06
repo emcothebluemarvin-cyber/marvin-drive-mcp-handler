@@ -1,17 +1,8 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  symlink,
-  utimes,
-  writeFile,
-} from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { linkDir } from '../../__tests__/links.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
 import { SyncRootError } from '../errors.js';
 import { PairStore, markerName } from '../pair-store.js';
@@ -242,7 +233,7 @@ describe('run (review regressions)', () => {
     await apply();
     const external = path.join(tmp, 'External');
     await rename(at('a'), external);
-    await symlink(external, at('a'));
+    await linkDir(external, at('a'));
     const reachable = await apply();
     expect(reachable.actions).toEqual({});
     expect(reachable.unknown.map((u) => u.path)).toEqual(['a/x.pdf']);

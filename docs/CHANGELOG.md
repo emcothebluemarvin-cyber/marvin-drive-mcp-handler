@@ -14,6 +14,8 @@
 - CI also runs on Windows; macOS on manual dispatch.
 
 ### Fixed
+- Windows: a `drive_download` destination ending in `\` is treated as a folder (it used to become a file of that name); `~\` expands to the home folder.
+- Windows: symlink tests no longer fail for ordinary users (directory links use junctions; file-symlink tests are skipped without Developer Mode).
 - Windows: a tracked path whose parent folder had been replaced by a file was probed as absent (Windows reports `ENOENT`, not `ENOTDIR`), so sync could treat it as locally deleted; it is now reported as unknown, as on macOS/Linux.
 - OS credential store failures now raise a clear `CONFIG_ERROR` that points to the file store instead of a raw keyring error.
 

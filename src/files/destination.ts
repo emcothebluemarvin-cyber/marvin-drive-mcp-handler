@@ -37,10 +37,23 @@ export interface WrittenFile {
 
 const MAX_COLLISIONS = 1000;
 
-export function expandHome(p: string): string {
+/** Characters that end a path segment here: '/' everywhere, also '\\' on Windows. */
+function isSeparator(ch: string | undefined, platform: NodeJS.Platform): boolean {
+  return ch === '/' || (platform === 'win32' && ch === '\\');
+}
+
+export function expandHome(p: string, platform: NodeJS.Platform = process.platform): string {
   if (p === '~') return os.homedir();
-  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  if (p.startsWith('~') && isSeparator(p[1], platform)) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+/** A trailing separator means "this is a folder", even if it does not exist yet. */
+export function endsWithSeparator(
+  p: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return isSeparator(p.at(-1), platform);
 }
 
 async function isDirectory(p: string): Promise<boolean> {
@@ -76,7 +89,7 @@ export async function resolveDestination(input: DestinationInput): Promise<Desti
     throw new ValidationError(`destPath must be an absolute path (got "${input.destPath}")`);
   }
   const resolved = path.resolve(expanded);
-  if (input.destPath.endsWith('/') || (await isDirectory(resolved))) {
+  if (endsWithSeparator(input.destPath) || (await isDirectory(resolved))) {
     return { dir: resolved, name: generated };
   }
   return { dir: path.dirname(resolved), name: path.basename(resolved) };
