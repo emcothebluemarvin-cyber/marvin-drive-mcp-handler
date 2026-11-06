@@ -15,6 +15,7 @@
 - CI also runs on Windows; macOS on manual dispatch.
 
 ### Fixed
+- `package-lock.json` records the MIT license, so `npm install` no longer rewrites it.
 - Sync: a local file that vanished while being moved to the trash is reported as "already gone" instead of an unclassified failure.
 - Windows: a `drive_download` destination ending in `\` is treated as a folder (it used to become a file of that name); `~\` expands to the home folder.
 - Windows: symlink tests no longer fail for ordinary users (directory links use junctions; file-symlink tests are skipped without Developer Mode).
