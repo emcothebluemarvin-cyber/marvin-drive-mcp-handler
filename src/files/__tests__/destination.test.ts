@@ -1,14 +1,52 @@
-import { mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { linkFileOrSkip } from '../../__tests__/links.js';
 import { ValidationError } from '../../errors.js';
-import { assertInside, resolveDestination, writeUnique } from '../destination.js';
+import {
+  assertInside,
+  endsWithSeparator,
+  expandHome,
+  resolveDestination,
+  writeUnique,
+} from '../destination.js';
 
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), 'marvin-dest-'));
+});
+
+describe('path separators', () => {
+  it('treats a trailing backslash as a folder only on Windows', () => {
+    expect(endsWithSeparator('C:\\out\\', 'win32')).toBe(true);
+    expect(endsWithSeparator('C:/out/', 'win32')).toBe(true);
+    expect(endsWithSeparator('/tmp/out\\', 'linux')).toBe(false);
+    expect(endsWithSeparator('/tmp/out/', 'darwin')).toBe(true);
+    expect(endsWithSeparator('/tmp/out', 'win32')).toBe(false);
+  });
+
+  it('expands ~\\ only on Windows', () => {
+    expect(expandHome('~\\Downloads', 'win32')).toBe(path.join(os.homedir(), 'Downloads'));
+    expect(expandHome('~\\Downloads', 'linux')).toBe('~\\Downloads');
+    expect(expandHome('~/Downloads', 'linux')).toBe(path.join(os.homedir(), 'Downloads'));
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'resolves a destPath ending in a backslash to that folder',
+    async () => {
+      const fresh = path.join(dir, 'verify') + '\\';
+      await expect(
+        resolveDestination({
+          driveName: 'Plan',
+          fileId: 'f1',
+          defaultDir: '/unused',
+          destPath: fresh,
+        }),
+      ).resolves.toEqual({ dir: path.join(dir, 'verify'), name: 'Plan' });
+    },
+  );
 });
 
 describe('resolveDestination', () => {
@@ -117,8 +155,8 @@ describe('writeUnique', () => {
     expect((await readdir(dir)).sort()).toEqual(['report (1).pdf', 'report.pdf']);
   });
 
-  it('treats a dangling symlink as a taken name', async () => {
-    await symlink(path.join(dir, 'nowhere'), path.join(dir, 'link.txt'));
+  it('treats a dangling symlink as a taken name', async (ctx) => {
+    await linkFileOrSkip(ctx, path.join(dir, 'nowhere'), path.join(dir, 'link.txt'));
     const res = await writeUnique({ dir, name: 'link.txt' }, async () => Readable.from(['x']));
     expect(path.basename(res.path)).toBe('link (1).txt');
   });

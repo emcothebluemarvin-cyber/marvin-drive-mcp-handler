@@ -29,6 +29,12 @@ describe.runIf(account)('Drive E2E (live)', () => {
       const dl = await files.download({ account, fileId: up.id, destPath: `${tmp}/` });
       expect(await readFile(dl.path, 'utf8')).toBe('hello drive');
 
+      // A missing folder named with the platform separator (\ on Windows) is created.
+      const fresh = path.join(tmp, 'fresh');
+      const into = await files.download({ account, fileId: up.id, destPath: fresh + path.sep });
+      expect(path.dirname(into.path)).toBe(fresh);
+      expect(await readFile(into.path, 'utf8')).toBe('hello drive');
+
       const doc = await files.upload({
         account,
         localPath: local,

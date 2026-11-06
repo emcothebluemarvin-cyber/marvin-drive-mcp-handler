@@ -94,7 +94,7 @@ export function registerDriveTools(
           .min(1)
           .optional()
           .describe(
-            'Absolute directory (existing or ending with "/") or absolute file path; ~ allowed. Default ~/Downloads/marvin-drive/',
+            'Absolute directory (existing, or ending with "/"; "\\" also on Windows) or absolute file path; ~ allowed. Default ~/Downloads/marvin-drive/',
           ),
         exportFormat: z.enum(EXPORT_FORMATS).optional(),
       },

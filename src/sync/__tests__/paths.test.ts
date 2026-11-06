@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { linkDir } from '../../__tests__/links.js';
 import { ValidationError } from '../../errors.js';
 import {
   absInside,
@@ -112,7 +113,7 @@ describe('filesystem containment', () => {
   it('prepareParent refuses symlinked and file components', async () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'sync-out-'));
     try {
-      await symlink(outside, path.join(root, 'link'));
+      await linkDir(outside, path.join(root, 'link'));
       await expect(prepareParent(root, 'link/x.pdf')).rejects.toThrow(ValidationError);
       await writeFile(path.join(root, 'file'), 'x');
       await expect(prepareParent(root, 'file/x.pdf')).rejects.toThrow(ValidationError);
