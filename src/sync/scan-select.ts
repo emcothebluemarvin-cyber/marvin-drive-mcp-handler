@@ -71,12 +71,9 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
   }
 }
 
-export async function scanBoth(
-  env: SyncEnv,
-  pair: Pair,
-): Promise<{ local: LocalScan; remote: RemoteScan }> {
-  const local = await scanLocal(pair.localDir);
-  const remote = await scanRemote(pair.remoteFolderId, (folderId, pageToken) =>
+/** Breadth-first scan of the pair's Drive folder (no local work). */
+export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
+  return scanRemote(pair.remoteFolderId, (folderId, pageToken) =>
     env.ops.exec(pair.account, 'idempotent', folderId, (ctx) =>
       ctx.drive.listFiles({
         q: childrenQuery(folderId),
@@ -86,6 +83,14 @@ export async function scanBoth(
       }),
     ),
   );
+}
+
+export async function scanBoth(
+  env: SyncEnv,
+  pair: Pair,
+): Promise<{ local: LocalScan; remote: RemoteScan }> {
+  const local = await scanLocal(pair.localDir);
+  const remote = await scanRemoteTree(env, pair);
   return { local, remote };
 }
 
@@ -98,7 +103,7 @@ export async function scanPair(env: SyncEnv, input: ScanInput): Promise<ScanResu
   const limit = input.limit ?? 200;
   const previewChars = input.previewChars ?? 300;
   const local = await scanLocal(pair.localDir, subdir ? { subdir } : {});
-  const { remote } = await scanBoth(env, pair);
+  const remote = await scanRemoteTree(env, pair);
   const selected = new Set(pair.selection.map(foldKey));
   const excluded = new Set(pair.excluded.map(foldKey));
   const tracked = new Set(file.records.map((r) => r.remoteId));
