@@ -6,6 +6,7 @@ export type SheetsUpdateResponse = sheets_v4.Schema$UpdateValuesResponse;
 export type SheetsAppendResponse = sheets_v4.Schema$AppendValuesResponse;
 export type SheetsRequest = sheets_v4.Schema$Request;
 export type SheetsBatchResponse = sheets_v4.Schema$BatchUpdateSpreadsheetResponse;
+export type SheetsBatchValues = sheets_v4.Schema$BatchGetValuesResponse;
 export type ValueRender = 'FORMATTED_VALUE' | 'UNFORMATTED_VALUE' | 'FORMULA';
 export type ValueInput = 'USER_ENTERED' | 'RAW';
 export type CellValue = string | number | boolean;
@@ -14,6 +15,12 @@ export type CellValue = string | number | boolean;
 export interface SheetsAdapter {
   getSpreadsheet(spreadsheetId: string, fields: string): Promise<Spreadsheet>;
   getValues(spreadsheetId: string, range: string, render: ValueRender): Promise<SheetsValueRange>;
+  /** values.batchGet: one value range per requested range, in request order. */
+  batchGetValues(
+    spreadsheetId: string,
+    ranges: string[],
+    render: ValueRender,
+  ): Promise<SheetsBatchValues>;
   updateValues(
     spreadsheetId: string,
     range: string,
@@ -38,6 +45,15 @@ export function createSheetsAdapter(auth: Auth.OAuth2Client): SheetsAdapter {
     async getValues(spreadsheetId, range, render) {
       return (
         await sheets.spreadsheets.values.get({ spreadsheetId, range, valueRenderOption: render })
+      ).data;
+    },
+    async batchGetValues(spreadsheetId, ranges, render) {
+      return (
+        await sheets.spreadsheets.values.batchGet({
+          spreadsheetId,
+          ranges,
+          valueRenderOption: render,
+        })
       ).data;
     },
     async updateValues(spreadsheetId, range, values, input) {
