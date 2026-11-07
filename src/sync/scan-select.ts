@@ -1,7 +1,7 @@
 import { open } from 'node:fs/promises';
 import { AppError } from '../errors.js';
 import { uploadMimeType } from '../files/upload-mime.js';
-import { scanLocal } from './local-scanner.js';
+import { hashLocal, probeOnDisk, scanLocal } from './local-scanner.js';
 import { checkRoots, type SyncEnv } from './pair-admin.js';
 import {
   absInside,
@@ -9,10 +9,13 @@ import {
   foldKey,
   isIgnoredName,
   isUnder,
+  toKey,
   validateRelPath,
 } from './paths.js';
+import { probeRecords } from './remote-probe.js';
 import { SYNC_LIST_FIELDS, SYNC_PAGE_SIZE, childrenQuery, scanRemote } from './remote-scanner.js';
-import type { LocalScan, Pair, RemoteScan } from './types.js';
+import { hashTargets, onDiskProbeKeys, type PlanInput } from './resolve.js';
+import type { LocalScan, Pair, PairFile, RemoteScan } from './types.js';
 
 const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|yaml|x-sh|sql|toml))/;
 
@@ -95,6 +98,34 @@ export async function scanBoth(
   const local = await scanLocal(pair.localDir);
   const remote = await scanRemoteTree(env, pair);
   return { local, remote };
+}
+
+/** Spec §5 steps 3–4: scan both sides, lstat, hash and probe → the planner's input. */
+export async function gatherInput(
+  env: SyncEnv,
+  file: PairFile,
+): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan }> {
+  const { pair, records } = file;
+  const { local, remote } = await scanBoth(env, pair);
+  // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
+  // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
+  const onDisk = await probeOnDisk(
+    pair.localDir,
+    onDiskProbeKeys({ pair, records, local, remote }),
+  );
+  const base = { pair, records, local, remote, probes: new Map(), onDisk };
+  const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
+  for (const name of failed) local.unknownSubtrees.push(toKey(name));
+  const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
+  const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
+  const probes = await probeRecords(
+    missing,
+    remote,
+    (id, fields) =>
+      env.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
+    pair.googleExport,
+  );
+  return { input: { ...base, probes, md5s }, local, remote };
 }
 
 /** sync_scan: local files (with text previews) and remote candidates for Claude to choose from. */

@@ -1,6 +1,13 @@
-import { AppError } from '../errors.js';
-import { localMatchesRemote, remoteChanged } from './content-compare.js';
-import { foldKey, validateRelPath } from './paths.js';
+import { lstat, readdir, rmdir } from 'node:fs/promises';
+import path from 'node:path';
+import type { AuditSink } from '../audit/audit-log.js';
+import type { OperationRunner } from '../core/operation.js';
+import { AppError, hasErrorCode } from '../errors.js';
+import type { Logger } from '../logger.js';
+import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from './content-compare.js';
+import { isAbortError, messageOf, PersistenceError, TargetChangedError } from './errors.js';
+import { md5File } from './local-scanner.js';
+import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
 import {
   buildContext,
@@ -11,7 +18,14 @@ import {
   type PlanContext,
   type PlanInput,
 } from './resolve.js';
-import type { RemoteEntry, SyncRecord } from './types.js';
+import type { LocalTrash } from './trash.js';
+import {
+  SYNC_FILE_FIELDS,
+  type Pair,
+  type PairFile,
+  type RemoteEntry,
+  type SyncRecord,
+} from './types.js';
 
 export type ReleaseStatus =
   | 'released'
@@ -121,5 +135,156 @@ export function selectReleasable(
     if (record) take(record, true);
     else out.skipped.push({ path: key, reason: 'not a synced file of this pair' });
   }
+  return out;
+}
+
+export interface ReleaseDeps {
+  ops: OperationRunner;
+  audit: AuditSink;
+  logger: Logger;
+  trash: LocalTrash;
+  save: (file: PairFile) => Promise<void>;
+}
+
+/** rmdir outcomes that just mean "keep this folder" (not empty, already gone, not a folder). */
+const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
+
+/** R must still be present-same: not trashed, content unchanged, same name and parent. */
+async function verifyRemote(deps: ReleaseDeps, pair: Pair, planned: RemoteEntry): Promise<void> {
+  const current = await deps.ops.exec(pair.account, 'idempotent', planned.id, (ctx) =>
+    ctx.drive.getFile(planned.id, SYNC_FILE_FIELDS),
+  );
+  if (
+    current.trashed ||
+    !remoteUnchangedSince(planned, current) ||
+    (current.name ?? '') !== planned.name ||
+    (current.parents?.[0] ?? '') !== planned.parentId
+  ) {
+    throw new TargetChangedError(
+      `${planned.key} changed, moved or was trashed in Drive since the scan`,
+    );
+  }
+}
+
+/** Present: L re-hashed must equal the record (binary: and R's md5) — never trash an edit. */
+async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
+  const key = c.record.path;
+  const md5 = await md5File(abs).catch((err: unknown) => {
+    if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
+    throw err;
+  });
+  if (md5 !== c.record.localMd5 || !localMatchesRemote(md5, c.record, c.remote)) {
+    throw new TargetChangedError(`${key} changed locally since the scan`);
+  }
+}
+
+/** R0: L must still be absent — the key, and on a case-insensitive volume any fold match. */
+async function assertStillAbsent(pair: Pair, key: string): Promise<void> {
+  const abs = absInside(pair.localDir, key);
+  const exists = await lstat(abs).then(
+    () => true,
+    (err: unknown) => {
+      if (hasErrorCode(err, 'ENOENT')) return false;
+      throw new TargetChangedError(`${key} cannot be checked locally`, { cause: err });
+    },
+  );
+  if (exists) throw new TargetChangedError(`${key} exists locally again`);
+  if (!pair.caseInsensitive) return;
+  const names = await readdir(path.dirname(abs)).catch((err: unknown) => {
+    if (hasErrorCode(err, 'ENOENT')) return [] as string[];
+    throw new TargetChangedError(`${key} cannot be checked locally`, { cause: err });
+  });
+  const parent = parentKey(key);
+  const fold = foldKey(key);
+  if (names.some((n) => foldKey(parent === '' ? toKey(n) : `${parent}/${toKey(n)}`) === fold)) {
+    throw new TargetChangedError(`${key} exists locally again under another spelling`);
+  }
+}
+
+/** Removes folders left empty by released files, deepest first; rmdir only (never recursive). */
+async function removeEmptyDirs(
+  deps: ReleaseDeps,
+  root: string,
+  dirs: Set<string>,
+): Promise<string[]> {
+  const removed: string[] = [];
+  const queue = [...dirs].sort((a, b) => b.split('/').length - a.split('/').length);
+  const tried = new Set<string>();
+  for (let dir = queue.shift(); dir !== undefined; dir = queue.shift()) {
+    if (dir === '' || tried.has(dir)) continue;
+    tried.add(dir);
+    try {
+      await rmdir(absInside(root, dir));
+    } catch (err) {
+      if (!KEEP_DIR.some((c) => hasErrorCode(err, c))) {
+        deps.logger.warn('Could not remove an emptied folder', { dir, error: err });
+      }
+      continue;
+    }
+    removed.push(dir);
+    queue.push(parentKey(dir));
+  }
+  return removed.sort();
+}
+
+/**
+ * Spec §10 + addendum §3: per path re-read R, then re-check L immediately before acting —
+ * present: re-hash, then the injected LocalTrash (never an unlink); deleted (R0): re-lstat,
+ * then only the flag. Persist after each release, audit, then drop emptied folders.
+ */
+export async function applyRelease(
+  deps: ReleaseDeps,
+  file: PairFile,
+  eligible: readonly ReleaseCandidate[],
+): Promise<Pick<ReleaseResult, 'released' | 'failed' | 'removedDirs'>> {
+  const { pair } = file;
+  const out: Pick<ReleaseResult, 'released' | 'failed' | 'removedDirs'> = {
+    released: [],
+    failed: [],
+    removedDirs: [],
+  };
+  const emptied = new Set<string>();
+  for (const c of eligible) {
+    const key = c.record.path;
+    try {
+      await verifyRemote(deps, pair, c.remote);
+      if (c.kind === 'present') {
+        const name = c.localName ?? key;
+        const abs = absInside(pair.localDir, name);
+        await verifyLocal(abs, c);
+        await deps.trash.trash(abs);
+        emptied.add(parentKey(name));
+      } else {
+        await assertStillAbsent(pair, key);
+      }
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      out.failed.push({ path: key, reason: messageOf(err) });
+      continue;
+    }
+    const target = file.records.find((r) => r.remoteId === c.record.remoteId);
+    if (target) {
+      target.remoteOnly = true;
+      target.restorePending = false;
+    }
+    try {
+      await deps.save(file);
+    } catch (err) {
+      throw new PersistenceError(`Could not save the pair file: ${messageOf(err)}`, { cause: err });
+    }
+    try {
+      await deps.audit.record({
+        account: pair.account,
+        op: 'sync_release',
+        fileId: c.record.remoteId,
+        name: baseName(key),
+        details: { pair: pair.name, path: key, remoteId: c.record.remoteId },
+      });
+    } catch (err) {
+      deps.logger.warn('Audit log write failed', { op: 'sync_release', error: err });
+    }
+    out.released.push({ path: key, status: releaseStatus(c.kind, false) });
+  }
+  out.removedDirs = await removeEmptyDirs(deps, pair.localDir, emptied);
   return out;
 }

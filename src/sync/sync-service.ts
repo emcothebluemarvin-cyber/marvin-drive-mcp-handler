@@ -1,8 +1,8 @@
 import { rm } from 'node:fs/promises';
 import { OperationRunner, type OperationDeps } from '../core/operation.js';
+import { ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { Executor } from './executor.js';
-import { hashLocal, probeOnDisk } from './local-scanner.js';
 import {
   checkRoots,
   createPair,
@@ -14,13 +14,18 @@ import {
   type SyncEnv,
 } from './pair-admin.js';
 import type { PairStore } from './pair-store.js';
-import { absInside, toKey } from './paths.js';
+import { absInside } from './paths.js';
 import { plan as makePlan } from './planner.js';
-import { probeRecords } from './remote-probe.js';
 import { buildReport } from './report.js';
-import { hashTargets, onDiskProbeKeys } from './resolve.js';
 import {
-  scanBoth,
+  applyRelease,
+  releaseStatus,
+  selectReleasable,
+  type ReleaseInput,
+  type ReleaseResult,
+} from './release.js';
+import {
+  gatherInput,
   scanPair,
   selectPaths,
   type ScanInput,
@@ -37,6 +42,7 @@ export {
   type CreatePairInput,
   type PairSummary,
 } from './pair-admin.js';
+export type { ReleaseInput, ReleaseResult } from './release.js';
 export type { ScanEntry, ScanInput, ScanResult, SelectInput, SelectResult } from './scan-select.js';
 
 const STALE_PART_MS = 60 * 60 * 1000;
@@ -107,27 +113,8 @@ export class SyncService {
   private async buildPlan(
     file: PairFile,
   ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan }> {
-    const { pair, records } = file;
-    const { local, remote } = await scanBoth(this.env, pair);
-    // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
-    // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
-    const onDisk = await probeOnDisk(
-      pair.localDir,
-      onDiskProbeKeys({ pair, records, local, remote }),
-    );
-    const base = { pair, records, local, remote, probes: new Map(), onDisk };
-    const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
-    for (const name of failed) local.unknownSubtrees.push(toKey(name));
-    const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
-    const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
-    const probes = await probeRecords(
-      missing,
-      remote,
-      (id, fields) =>
-        this.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
-      pair.googleExport,
-    );
-    return { plan: makePlan({ ...base, probes, md5s }), remote, local };
+    const { input, local, remote } = await gatherInput(this.env, file);
+    return { plan: makePlan(input), remote, local };
   }
 
   private async removeStaleParts(pair: Pair, local: LocalScan): Promise<void> {
@@ -205,6 +192,46 @@ export class SyncService {
       }
       await this.store.save(file);
       return buildReport(name, plan, { dryRun: false, outcomes });
+    });
+  }
+
+  /** sync_release (spec §10, addendum §3): dry run by default. */
+  async release(input: ReleaseInput): Promise<ReleaseResult> {
+    const all = input.all === true;
+    if (all === (input.paths ?? []).length > 0) {
+      throw new ValidationError('Give paths or all: true (exactly one of them)');
+    }
+    return this.store.withLock(input.name, async () => {
+      const file = await this.store.load(input.name);
+      await checkRoots(this.env, file.pair);
+      const { input: planInput } = await gatherInput(this.env, file);
+      const selection = selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] });
+      const pair = file.pair.name;
+      if (!(input.apply ?? false)) {
+        return {
+          pair,
+          dryRun: true,
+          released: selection.eligible.map((c) => ({
+            path: c.record.path,
+            status: releaseStatus(c.kind, true),
+          })),
+          skipped: selection.skipped,
+          failed: [],
+          removedDirs: [],
+        };
+      }
+      const done = await applyRelease(
+        {
+          ops: this.ops,
+          audit: this.deps.audit,
+          logger: this.log,
+          trash: this.deps.trash,
+          save: (f): Promise<void> => this.store.save(f),
+        },
+        file,
+        selection.eligible,
+      );
+      return { pair, dryRun: false, skipped: selection.skipped, ...done };
     });
   }
 }
