@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- Sync Phase B: Google Docs/Sheets/Slides/Drawings sync as read-only exports (rules N1–N9), with per-pair `googleExport` formats (validated at `sync_create_pair`), the 10 MB `exportLinks` fallback and `native-too-large` reporting.
+- `sync_release` / `marvin-drive sync release`: keep files in Drive only; local copies go to the OS trash after re-verification; `sync_select add` restores them (rules O0–O8). Locally deleted files can be released by name (R0). Applied runs list `releasable` files.
+- `sync_run` `confirmRemoteTrash` / `--confirm-remote-trash` and the report field `pendingConfirmation`.
+- CLI: `sync list` shows the remote-only count; applied run reports print a releasable hint.
 - Two-step login without a waiting terminal: `auth add|login --print-url` prints the Google URL and exits; `--redirect-url '<url>'` finishes it within 10 minutes (works from Claude Code's `!` prompt).
 - MIT license; the repository is public.
 - File token store for hosts without an OS credential store (headless Linux servers): `MARVIN_DRIVE_TOKEN_STORE=file` keeps refresh tokens in `~/.config/google-handler/tokens.json` (`0600`, directory `0700`).
@@ -10,6 +14,9 @@
 - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
+- Sync: deleting a tracked file locally no longer trashes its Drive copy automatically; it waits in `pendingConfirmation` until confirmed (`confirm-needs-mass-delete` warns when the confirmed run would also need `allowMassDelete`).
+- Sync: Google files are no longer reported `native-skipped`; unsupported Google types are reported `native-unsupported`. Pair files gain `nativeBaselineDone` (old files load as `false`): the first applied run after the upgrade baselines existing Google files as candidates instead of exporting them.
+- `sync_scan` reads the local folder once instead of twice.
 - Sync skips and reports Drive names Windows cannot store (reserved device names, `< > : " \ | ? *`, trailing dot or space) when running on Windows; `sync_select` paths are validated the same way.
 - Saves that replace an existing file (accounts, tokens, sync pairs, markers, sync downloads) retry briefly on Windows when the target is locked (`EPERM`/`EACCES`/`EBUSY`).
 - Directory fsync is skipped on Windows.
