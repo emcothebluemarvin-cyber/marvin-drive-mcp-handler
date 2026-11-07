@@ -121,6 +121,8 @@ export class InboxWriter {
   private seq = 0;
   private readonly recent: string[] = [];
   private readonly recentSet = new Set<string>();
+  /** A failed append may have left a torn line: end it before the next append. */
+  private dirty = false;
 
   constructor(private readonly inbox: Inbox) {}
 
@@ -146,7 +148,16 @@ export class InboxWriter {
   async append(draft: EventDraft): Promise<ChangeEvent | null> {
     if (this.recentSet.has(draft.id)) return null;
     const event: ChangeEvent = { ...draft, seq: this.seq + 1 };
-    await this.inbox.append(event);
+    if (this.dirty) {
+      await this.inbox.repairTail();
+      this.dirty = false;
+    }
+    try {
+      await this.inbox.append(event);
+    } catch (err) {
+      this.dirty = true;
+      throw err;
+    }
     this.seq = event.seq;
     this.remember(event.id);
     return event;

@@ -1,7 +1,16 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectMode } from '../../__tests__/fs-mode.js';
 import { Inbox, InboxWriter, KEEP_NEWEST, ROTATE_AT_LINES, parseEvents } from '../inbox.js';
 import type { ChangeEvent } from '../types.js';
@@ -146,5 +155,21 @@ describe('Inbox review fixes', () => {
     await new InboxWriter(new Inbox(file)).init();
     await expect(stat(oldTmp)).rejects.toThrow();
     await expect(stat(newTmp)).resolves.toBeDefined();
+  });
+
+  it('InboxWriter repairs a torn tail left by a failed append before the next one', async () => {
+    const inbox = new Inbox(file);
+    const writer = new InboxWriter(inbox);
+    await writer.init();
+    const real = inbox.append.bind(inbox);
+    vi.spyOn(inbox, 'append').mockImplementationOnce(async () => {
+      await mkdir(path.dirname(file), { recursive: true });
+      await appendFile(file, '{"seq":1,"id":"torn'); // partial write, then the failure
+      throw new Error('ENOSPC');
+    });
+    await expect(writer.append(makeDraft({ id: 'a' }))).rejects.toThrow('ENOSPC');
+    vi.mocked(inbox.append).mockImplementation(real);
+    await writer.append(makeDraft({ id: 'b' }));
+    expect((await inbox.readAll()).map((e) => e.id)).toEqual(['b']);
   });
 });

@@ -36,6 +36,8 @@ export async function serve(deps: ServeDeps): Promise<void> {
     });
   };
   let stopping = false;
+  // Shutdown does not wait for in-flight tool calls (as before this was extracted from
+  // program.ts): only the watch gets its bounded clean stop.
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;

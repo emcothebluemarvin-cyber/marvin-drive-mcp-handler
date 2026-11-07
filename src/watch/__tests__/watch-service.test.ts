@@ -75,6 +75,7 @@ describe('pollIntervalMs', () => {
     expect(pollIntervalMs({ MARVIN_WATCH_POLL_SECONDS: '60' })).toBe(60_000);
     expect(pollIntervalMs({ MARVIN_WATCH_POLL_SECONDS: '5' })).toBe(15_000);
     expect(pollIntervalMs({ MARVIN_WATCH_POLL_SECONDS: 'x' })).toBe(30_000);
+    expect(pollIntervalMs({ MARVIN_WATCH_POLL_SECONDS: '99999' })).toBe(3_600_000);
   });
 });
 
@@ -237,5 +238,14 @@ describe('WatchService', () => {
     clock.advance(QUIET_MS);
     await a.tick();
     expect((await a.inbox.readAll()).map((e) => e.kind)).toEqual(['edited']);
+  });
+
+  it('start is idempotent (a duplicate initialized notification)', async () => {
+    const a = session(1);
+    const timers = vi.spyOn(globalThis, 'setInterval');
+    await a.start(null);
+    await a.start(null);
+    expect(timers.mock.calls.filter(([, ms]) => ms === INTERVAL)).toHaveLength(1);
+    timers.mockRestore();
   });
 });

@@ -22,13 +22,14 @@ import type { WatchStore } from './watch-store.js';
 
 export const DEFAULT_INTERVAL_S = 30;
 export const MIN_INTERVAL_S = 15;
+export const MAX_INTERVAL_S = 3600;
 
-/** `MARVIN_WATCH_POLL_SECONDS` (default 30, minimum 15) in ms. */
+/** `MARVIN_WATCH_POLL_SECONDS` (default 30, clamped to 15…3600) in ms. */
 export function pollIntervalMs(env: NodeJS.ProcessEnv): number {
   const raw = env.MARVIN_WATCH_POLL_SECONDS;
   const seconds = raw ? Number(raw) : NaN;
   if (!Number.isFinite(seconds)) return DEFAULT_INTERVAL_S * 1000;
-  return Math.max(MIN_INTERVAL_S, seconds) * 1000;
+  return Math.min(MAX_INTERVAL_S, Math.max(MIN_INTERVAL_S, seconds)) * 1000;
 }
 
 export interface WatchInput {
@@ -67,6 +68,7 @@ export class WatchService implements WatchApi {
   private timer: NodeJS.Timeout | null = null;
   private watcher: FSWatcher | null = null;
   private ticking: Promise<void> | null = null;
+  private started = false;
 
   constructor(private readonly deps: WatchServiceDeps) {
     this.now = deps.now ?? ((): Date => new Date());
@@ -116,6 +118,9 @@ export class WatchService implements WatchApi {
 
   /** Starts delivery (push null: none), the local tick and the inbox trigger; runs one tick. */
   async start(push: PushFn | null, opts: { timers?: boolean } = {}): Promise<void> {
+    // A duplicate `initialized` must not create a second timer, watcher or delivery.
+    if (this.started) return;
+    this.started = true;
     await this.deps.store.ensureDir();
     if (push) {
       this.delivery = new Delivery({
