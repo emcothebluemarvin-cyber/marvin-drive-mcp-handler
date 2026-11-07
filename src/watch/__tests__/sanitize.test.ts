@@ -39,6 +39,10 @@ describe('sanitizeLine', () => {
   it('makes one trimmed line', () => {
     expect(sanitizeLine('  Plan\n<b>Q4</b>\t ')).toBe('Plan ‹b›Q4‹/b›');
   });
+
+  it('replaces straight double quotes so a name cannot fake the headline', () => {
+    expect(sanitizeLine('Plan" by Boss at now')).toBe('Plan” by Boss at now');
+  });
 });
 
 describe('sanitizeModifier', () => {

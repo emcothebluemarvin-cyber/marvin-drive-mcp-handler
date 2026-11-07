@@ -100,4 +100,20 @@ describe('PollerLease', () => {
     expect(a.held).toBe(false);
     expect(await lease({ pid: 222 }).tryAcquire()).toBe(true);
   });
+
+  it('treats non-object lock JSON like unreadable content (decided by file age)', async () => {
+    const { utimes, writeFile } = await import('node:fs/promises');
+    const file = path.join(dir, LEASE_FILE);
+    for (const raw of ['null', '42', '"x"']) {
+      await writeFile(file, raw);
+      const fresh = new Date(nowMs);
+      await utimes(file, fresh, fresh);
+      expect(await lease().tryAcquire()).toBe(false);
+      const old = new Date(nowMs - 3 * INTERVAL - 1_000);
+      await utimes(file, old, old);
+      const taker = lease();
+      expect(await taker.tryAcquire()).toBe(true);
+      await taker.release();
+    }
+  });
 });

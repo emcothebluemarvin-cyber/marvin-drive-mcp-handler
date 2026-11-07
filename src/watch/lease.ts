@@ -143,10 +143,14 @@ export class PollerLease {
   }
 
   private async isStale(raw: string): Promise<boolean> {
-    let holder: Holder;
+    let holder: Holder | null = null;
     try {
-      holder = JSON.parse(raw) as Holder;
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null) holder = parsed as Holder;
     } catch {
+      // unreadable content: decided by file age below
+    }
+    if (holder === null) {
       const info = await stat(this.lockFile).catch(() => null);
       return info === null || this.tooOld(info.mtimeMs);
     }

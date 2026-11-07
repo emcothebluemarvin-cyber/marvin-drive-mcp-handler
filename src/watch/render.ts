@@ -5,6 +5,8 @@ import type { ChangeEvent, CommentNote, Modifier } from './types.js';
 export const PUSH_LIMIT = 2_000;
 export const SUMMARY_LIMIT = 2_000;
 export const HOOK_LIMIT = 9_000;
+/** A headline never crowds out the body or the `Full details` footer. */
+export const HEADLINE_LIMIT = 600;
 const HOOK_EVENT_BODY = 1_500;
 const MORE_RESERVE = 80;
 
@@ -36,11 +38,15 @@ export function authors(e: ChangeEvent): string {
   return e.alsoByYou ? `${base} (also edited by you)` : base;
 }
 
-export function headline(e: ChangeEvent): string {
+function rawHeadline(e: ChangeEvent): string {
   if (e.kind === 'gap') return `gap: ${e.note ?? ''} (${e.account})`;
   if (e.kind === 'watch-paused') return `watch paused: ${e.note ?? ''}`;
   const was = e.previousName && e.previousName !== e.name ? ` (was "${e.previousName}")` : '';
   return `${e.kind} "${e.name ?? ''}"${was} by ${authors(e)} at ${e.time}`;
+}
+
+export function headline(e: ChangeEvent): string {
+  return clamp(rawHeadline(e), HEADLINE_LIMIT);
 }
 
 function commentLine(c: CommentNote, full: boolean): string {

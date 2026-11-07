@@ -46,9 +46,11 @@ export function sanitizeText(text: string): string {
   return out.join('\n');
 }
 
-/** One trimmed line (names, authors). */
+/** One trimmed line (names, authors); `"` → `”` so a name cannot close the quoted headline. */
 export function sanitizeLine(text: string): string {
-  return sanitizeText(text.replace(/[\r\n\t\u2028\u2029]+/g, ' ')).trim();
+  return sanitizeText(text.replace(/[\r\n\t\u2028\u2029]+/g, ' '))
+    .replace(/"/g, '”')
+    .trim();
 }
 
 export function sanitizeModifier(m: Modifier): Modifier {

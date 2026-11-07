@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  HEADLINE_LIMIT,
   HOOK_LIMIT,
   PREAMBLE,
   PREAMBLE_MANY,
   PUSH_LIMIT,
   SUMMARY_LIMIT,
   authors,
+  detailsLine,
   headline,
   renderEvent,
   renderEvents,
@@ -83,11 +85,15 @@ describe('renderEvent (channel push)', () => {
     expect(text).not.toContain('not shown');
   });
 
-  it('never splits a surrogate pair when it has to clamp', () => {
+  it('clamps a long headline without splitting a surrogate pair and keeps the footer', () => {
     for (const name of ['😀'.repeat(1200), `x${'😀'.repeat(1200)}`]) {
-      const text = renderEvent(makeEvent({ name }));
+      const e = makeEvent({ name });
+      expect(headline(e).length).toBeLessThanOrEqual(HEADLINE_LIMIT);
+      expect(headline(e).endsWith('…')).toBe(true);
+      const text = renderEvent(e);
       expect(text.length).toBeLessThanOrEqual(PUSH_LIMIT);
-      expect(text.endsWith('…')).toBe(true);
+      expect(text).toContain('\n- a\n+ b\n');
+      expect(text.endsWith(detailsLine(e))).toBe(true);
       expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     }
   });
