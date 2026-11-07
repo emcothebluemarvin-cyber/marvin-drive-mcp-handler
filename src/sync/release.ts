@@ -228,9 +228,9 @@ async function removeEmptyDirs(
 }
 
 /**
- * Spec §10 + addendum §3: per path re-read R, then re-check L immediately before acting —
- * present: re-hash, then the injected LocalTrash (never an unlink); deleted (R0): re-lstat,
- * then only the flag. Persist after each release, audit, then drop emptied folders.
+ * Spec §10 + addendum §3: per path re-read R, then re-check L (present: re-hash; R0:
+ * re-lstat), persist remoteOnly (write-ahead), then — present only — the injected
+ * LocalTrash (never an unlink). Audit after success, then drop emptied folders.
  */
 export async function applyRelease(
   deps: ReleaseDeps,
@@ -246,14 +246,25 @@ export async function applyRelease(
   const emptied = new Set<string>();
   for (const c of eligible) {
     const key = c.record.path;
+    const target = file.records.find((r) => r.remoteId === c.record.remoteId) ?? c.record;
+    const before = { remoteOnly: target.remoteOnly, restorePending: target.restorePending };
+    const persist = async (what: string): Promise<void> => {
+      try {
+        await deps.save(file);
+      } catch (err) {
+        throw new PersistenceError(`Could not save the pair file (${what}): ${messageOf(err)}`, {
+          cause: err,
+        });
+      }
+    };
+    let name: string | null = null;
+    let abs = '';
     try {
       await verifyRemote(deps, pair, c.remote);
       if (c.kind === 'present') {
-        const name = c.localName ?? key;
-        const abs = absInside(pair.localDir, name);
+        name = c.localName ?? key;
+        abs = absInside(pair.localDir, name);
         await verifyLocal(abs, c);
-        await deps.trash.trash(abs);
-        emptied.add(parentKey(name));
       } else {
         await assertStillAbsent(pair, key);
       }
@@ -262,15 +273,38 @@ export async function applyRelease(
       out.failed.push({ path: key, reason: messageOf(err) });
       continue;
     }
-    const target = file.records.find((r) => r.remoteId === c.record.remoteId);
-    if (target) {
-      target.remoteOnly = true;
-      target.restorePending = false;
-    }
+    // Write-ahead: remoteOnly is durable before the local copy goes to the trash, so a crash
+    // or a failed save can never leave a trashed file whose record still says "synced" (that
+    // would plan B5 and trash the Drive copy). A crash after this save but before the trash
+    // leaves remoteOnly with L present and equal to R: O8 adopt, a harmless un-release.
+    target.remoteOnly = true;
+    target.restorePending = false;
     try {
-      await deps.save(file);
+      await persist('marking the file as Drive-only');
     } catch (err) {
-      throw new PersistenceError(`Could not save the pair file: ${messageOf(err)}`, { cause: err });
+      Object.assign(target, before);
+      throw err;
+    }
+    if (name !== null) {
+      try {
+        await deps.trash.trash(abs);
+      } catch (err) {
+        Object.assign(target, before);
+        try {
+          await persist('restoring the record after the trash failed');
+        } catch (saveErr) {
+          // Both failed: the file is still in place and the stored record says remoteOnly,
+          // which the next run adopts (O8). Nothing was deleted.
+          throw new PersistenceError(
+            `${messageOf(err)}; restoring the record also failed: ${messageOf(saveErr)}`,
+            { cause: saveErr },
+          );
+        }
+        if (isAbortError(err)) throw err;
+        out.failed.push({ path: key, reason: messageOf(err) });
+        continue;
+      }
+      emptied.add(parentKey(name));
     }
     try {
       await deps.audit.record({

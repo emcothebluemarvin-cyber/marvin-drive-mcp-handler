@@ -1,11 +1,12 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
-import { LocalTrashError } from '../errors.js';
+import { LocalTrashError, PersistenceError } from '../errors.js';
 import { PairStore } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
+import type { LocalTrash } from '../trash.js';
 import { dirTrash } from './fixtures.js';
 import { memoryDrive, type MemoryDrive } from './memory-drive.js';
 
@@ -111,6 +112,91 @@ describe('sync_release', () => {
     expect((await store.load('docs')).records.find((r) => r.path === 'a.pdf')?.remoteOnly).toBe(
       false,
     );
+  });
+  const withTrash = (trash: LocalTrash): SyncService =>
+    new SyncService({
+      runner: createRunner(mem.drive),
+      audit: createAudit(),
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      clock: () => now,
+      trash,
+    });
+  const remoteOnlyOf = async (p: string): Promise<boolean | undefined> =>
+    (await store.load('docs')).records.find((r) => r.path === p)?.remoteOnly;
+  it('write-ahead: remoteOnly is on disk before the trash is called', async () => {
+    const seen: Array<boolean | undefined> = [];
+    const inner = dirTrash(trashDir);
+    const res = await withTrash({
+      trash: async (abs) => {
+        seen.push(await remoteOnlyOf('a.pdf'));
+        await inner.trash(abs);
+      },
+    }).release({ name: 'docs', paths: ['a.pdf'], apply: true });
+    expect(seen).toEqual([true]);
+    expect(res.released).toEqual([{ path: 'a.pdf', status: 'released' }]);
+  });
+  it('a failing save before the trash aborts and never calls the trash', async () => {
+    const trash = vi.fn(async () => {});
+    vi.spyOn(store, 'save').mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      withTrash({ trash }).release({ name: 'docs', paths: ['a.pdf'], apply: true }),
+    ).rejects.toThrow(PersistenceError);
+    expect(trash).not.toHaveBeenCalled();
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+    expect(await remoteOnlyOf('a.pdf')).toBe(false);
+  });
+  it('a failing trash reverts remoteOnly and persists the revert', async () => {
+    const seen: Array<boolean | undefined> = [];
+    const save = vi.spyOn(store, 'save');
+    const res = await withTrash({
+      trash: async () => {
+        seen.push(await remoteOnlyOf('a.pdf'));
+        throw new LocalTrashError('no trash on this volume; nothing was deleted');
+      },
+    }).release({ name: 'docs', paths: ['a.pdf'], apply: true });
+    expect(seen).toEqual([true]);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(res.failed).toEqual([
+      { path: 'a.pdf', reason: 'no trash on this volume; nothing was deleted' },
+    ]);
+    expect(await remoteOnlyOf('a.pdf')).toBe(false);
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+  });
+  it('a failing trash and a failing revert report both errors and delete nothing', async () => {
+    const realSave = store.save.bind(store);
+    vi.spyOn(store, 'save')
+      .mockImplementationOnce(realSave)
+      .mockRejectedValueOnce(new Error('disk full'));
+    const err = await withTrash({
+      trash: async () => {
+        throw new LocalTrashError('no trash on this volume');
+      },
+    })
+      .release({ name: 'docs', paths: ['a.pdf'], apply: true })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(PersistenceError);
+    expect((err as Error).message).toMatch(
+      /no trash on this volume.*restoring the record also failed.*disk full/,
+    );
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+    expect(await readdir(trashDir)).toEqual([]);
+  });
+  it('a crash after the write-ahead save (remoteOnly, L present = R) is adopted by O8, never trashed', async () => {
+    const file = await store.load('docs');
+    for (const r of file.records) if (r.path === 'a.pdf') r.remoteOnly = true;
+    await store.save(file);
+    const id = await idOf('a.pdf');
+    const res = await apply();
+    expect(res.actions).toEqual({ adopt: ['a.pdf'] });
+    expect(await readdir(trashDir)).toEqual([]);
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+    expect(mem.files.get(id)?.trashed).toBe(false);
+    expect(await remoteOnlyOf('a.pdf')).toBe(false);
   });
   it('R0 releases a locally deleted file without touching anything', async () => {
     await rm(at('a.pdf'));
