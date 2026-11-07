@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { FileAuditLog } from '../../src/audit/audit-log.js';
+import { DocsService } from '../../src/content/docs-service.js';
 import { DriveClientFactory } from '../../src/drive/client-factory.js';
 import { FileService } from '../../src/files/file-service.js';
 import { PairStore } from '../../src/sync/pair-store.js';
@@ -13,31 +14,54 @@ import type { LocalTrash } from '../../src/sync/trash.js';
 
 const account = process.env.MARVIN_E2E_ACCOUNT;
 
+/** Temp local + trash dirs, a temp audit log and services on the live account; never the real trash. */
+async function e2eSetup() {
+  const app = buildApp();
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-sync-e2e-'));
+  const local = path.join(tmp, 'local');
+  const trashDir = path.join(tmp, 'trash');
+  await mkdir(local);
+  await mkdir(trashDir);
+  // Local trash is redirected into the temp dir: the user's real trash is never touched.
+  const trash: LocalTrash = {
+    trash: async (abs) => {
+      await rename(abs, path.join(trashDir, path.basename(abs)));
+    },
+  };
+  // Every audit entry of the test (sync, file and content operations) goes to a temp file.
+  const runner = new DriveClientFactory(app.auth);
+  const audit = new FileAuditLog(path.join(tmp, 'audit.jsonl'));
+  const files = new FileService({ runner, audit, downloadsDir: path.join(tmp, 'downloads') });
+  const sync = new SyncService({
+    runner,
+    audit,
+    store: new PairStore({ dir: path.join(tmp, 'sync') }),
+    trash,
+  });
+  const at = (name: string): string => path.join(local, name);
+  /** Purges every child of the test folder (incl. ones trashed by the test), the folder, then tmp. */
+  const cleanup = async (rootId: string): Promise<void> => {
+    try {
+      const children = await files.list({
+        account,
+        folderId: rootId,
+        includeTrashed: true,
+        pageSize: 200,
+      });
+      for (const child of children.files) {
+        await files.delete({ account, fileId: child.id, permanent: true }).catch(() => undefined);
+      }
+      await files.delete({ account, fileId: rootId, permanent: true });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  };
+  return { app, tmp, local, trashDir, trash, runner, audit, files, sync, at, cleanup };
+}
+
 describe.runIf(account)('Sync E2E (live)', () => {
   it('scan → select → dry run → apply → edits, conflict, deletions, rename, adoption', async () => {
-    const app = buildApp();
-    const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-sync-e2e-'));
-    const local = path.join(tmp, 'local');
-    const trashDir = path.join(tmp, 'trash');
-    await mkdir(local);
-    await mkdir(trashDir);
-    // Local trash is redirected into the temp dir: the user's real trash is never touched.
-    const trash: LocalTrash = {
-      trash: async (abs) => {
-        await rename(abs, path.join(trashDir, path.basename(abs)));
-      },
-    };
-    // Every audit entry of this test (sync and plain file operations) goes to a temp file.
-    const runner = new DriveClientFactory(app.auth);
-    const audit = new FileAuditLog(path.join(tmp, 'audit.jsonl'));
-    const files = new FileService({ runner, audit, downloadsDir: path.join(tmp, 'downloads') });
-    const sync = new SyncService({
-      runner,
-      audit,
-      store: new PairStore({ dir: path.join(tmp, 'sync') }),
-      trash,
-    });
-    const at = (name: string): string => path.join(local, name);
+    const { tmp, local, trashDir, runner, files, sync, at, cleanup } = await e2eSetup();
     const setRemote = (fileId: string, text: string): Promise<unknown> =>
       runner.run(account, (ctx) =>
         ctx.drive.updateFile({
@@ -115,18 +139,75 @@ describe.runIf(account)('Sync E2E (live)', () => {
       expect(final.candidates.remote.map((c) => c.path)).toEqual(['pre.txt']);
       await sync.removePair({ name: 'e2e' });
     } finally {
-      // Purge every child (including the ones this test trashed in Drive), then the folder.
-      const children = await files.list({
+      await cleanup(root.id);
+    }
+  });
+
+  it('Phase B: Google Doc export → release → no re-export → restore; confirmation; R0', async () => {
+    const { tmp, local, trashDir, runner, audit, files, sync, at, cleanup } = await e2eSetup();
+    const docs = new DocsService({ runner, audit }); // audit entries go to the temp log
+    const root = await files.createFolder({ account, name: `marvin-sync-e2e-b-${Date.now()}` });
+    try {
+      await sync.createPair({ name: 'e2eb', localDir: local, remoteFolderId: root.id, account });
+      await sync.run({ name: 'e2eb', apply: true }); // first applied run: later files are adopted
+      const src = path.join(tmp, 'Plan.txt');
+      await writeFile(src, 'plan v1');
+      const doc = await files.upload({
         account,
-        folderId: root.id,
-        includeTrashed: true,
-        pageSize: 200,
+        localPath: src,
+        parentId: root.id,
+        name: 'Plan',
+        convertToGoogle: true,
       });
-      for (const child of children.files) {
-        await files.delete({ account, fileId: child.id, permanent: true }).catch(() => undefined);
-      }
-      await files.delete({ account, fileId: root.id, permanent: true });
-      await rm(tmp, { recursive: true, force: true });
+      const exported = await sync.run({ name: 'e2eb', apply: true });
+      expect(exported.actions).toEqual({ 'export-new': ['Plan.docx'] });
+      expect((await readFile(at('Plan.docx'))).subarray(0, 2).toString()).toBe('PK');
+
+      // release → a later Drive edit is not exported
+      const released = await sync.release({ name: 'e2eb', paths: ['Plan.docx'], apply: true });
+      expect(released.released).toEqual([{ path: 'Plan.docx', status: 'released' }]);
+      expect(await readdir(trashDir)).toEqual(['Plan.docx']);
+      await docs.insertText({ account, fileId: doc.id, text: ' more', position: { at: 'end' } });
+      expect((await sync.run({ name: 'e2eb', apply: true })).actions).toEqual({});
+      await expect(readFile(at('Plan.docx'))).rejects.toThrow();
+
+      // select add restores it
+      await sync.select({ name: 'e2eb', add: ['Plan.docx'] });
+      expect((await sync.run({ name: 'e2eb', apply: true })).actions).toEqual({
+        'export-new': ['Plan.docx'],
+      });
+
+      // local deletion: unconfirmed → pending; confirmed → Drive trash
+      await writeFile(at('note.txt'), 'note');
+      await sync.select({ name: 'e2eb', add: ['note.txt'] });
+      await sync.run({ name: 'e2eb', apply: true });
+      await rm(at('note.txt'));
+      const pending = await sync.run({ name: 'e2eb', apply: true });
+      expect(pending.pendingConfirmation.map((p) => p.path)).toEqual(['note.txt']);
+      const dry = await sync.run({ name: 'e2eb' });
+      const confirmed = await sync.run({
+        name: 'e2eb',
+        apply: true,
+        planId: dry.planId,
+        confirmRemoteTrash: true,
+      });
+      expect(confirmed.actions['trash-remote']).toEqual(['note.txt']);
+
+      // R0: a file deleted locally is kept in Drive only
+      await writeFile(at('keep.txt'), 'keep');
+      await sync.select({ name: 'e2eb', add: ['keep.txt'] });
+      await sync.run({ name: 'e2eb', apply: true });
+      await rm(at('keep.txt'));
+      const r0 = await sync.release({ name: 'e2eb', paths: ['keep.txt'], apply: true });
+      expect(r0.released).toEqual([
+        { path: 'keep.txt', status: 'released (already deleted locally)' },
+      ]);
+      const final = await sync.run({ name: 'e2eb' });
+      expect(final.actions).toEqual({});
+      expect(final.pendingConfirmation).toEqual([]);
+      await sync.removePair({ name: 'e2eb' });
+    } finally {
+      await cleanup(root.id);
     }
   });
 });
