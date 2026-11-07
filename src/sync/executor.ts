@@ -4,12 +4,29 @@ import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import type { OperationRunner } from '../core/operation.js';
 import type { DriveFile } from '../drive/drive-adapter.js';
 import { AppError, ValidationError, hasErrorCode } from '../errors.js';
-import { GOOGLE_MIME } from '../files/export-formats.js';
 import { escapeQueryValue } from '../files/query.js';
 import type { Logger } from '../logger.js';
-import { CollisionError, PersistenceError, TargetChangedError, isAbortError } from './errors.js';
+import {
+  CollisionError,
+  PersistenceError,
+  TargetChangedError,
+  isAbortError,
+  messageOf,
+} from './errors.js';
+import {
+  applySelection,
+  conflictName,
+  dropRecord,
+  fromDrive,
+  fromEntry,
+  makeRecord,
+  putRecord,
+  statOf,
+  type LocalFields,
+} from './exec-records.js';
 import { md5File } from './local-scanner.js';
-import { absInside, baseName, foldKey, parentKey, prepareParent } from './paths.js';
+import { absInside, baseName, parentKey, prepareParent } from './paths.js';
+import { RemoteFolders } from './remote-folders.js';
 import { SYNC_LIST_FIELDS } from './remote-scanner.js';
 import {
   downloadReplace,
@@ -17,7 +34,6 @@ import {
   placeExclusive,
   updateContent,
   uploadNew,
-  type StatExpect,
 } from './transfer.js';
 import type { LocalTrash } from './trash.js';
 import {
@@ -28,8 +44,6 @@ import {
   type LocalEntry,
   type PairFile,
   type RemoteEntry,
-  type SelectionChange,
-  type SyncRecord,
 } from './types.js';
 
 /** Spec §7 order; state-only actions first. */
@@ -46,6 +60,8 @@ export const STAGES: ActionKind[][] = [
 const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 const MAX_CONFLICT_NAMES = 100;
 
+export { conflictName } from './exec-records.js';
+
 export interface ExecutorDeps {
   ops: OperationRunner;
   audit: AuditSink;
@@ -56,127 +72,16 @@ export interface ExecutorDeps {
   trash: LocalTrash;
 }
 
-interface RemoteFields {
-  id: string;
-  name: string;
-  parentId: string;
-  md5: string | null;
-  size: number | null;
-  modifiedTime: string;
-}
-
-interface LocalFields {
-  name: string;
-  md5: string;
-  size: number;
-  mtimeMs: number;
-  ctimeMs: number;
-}
-
-function fromEntry(e: RemoteEntry): RemoteFields {
-  return {
-    id: e.id,
-    name: e.name,
-    parentId: e.parentId,
-    md5: e.md5,
-    size: e.size,
-    modifiedTime: e.modifiedTime,
-  };
-}
-
-function fromDrive(f: DriveFile, fallbackParent: string): RemoteFields {
-  return {
-    id: f.id ?? '',
-    name: f.name ?? '',
-    parentId: f.parents?.[0] ?? fallbackParent,
-    md5: f.md5Checksum ?? null,
-    size: f.size ? Number(f.size) : null,
-    modifiedTime: f.modifiedTime ?? '',
-  };
-}
-
-function statOf(e: LocalEntry): StatExpect {
-  return { size: e.size, mtimeMs: e.mtimeMs, ctimeMs: e.ctimeMs };
-}
-
-function makeRecord(key: string, local: LocalFields, remote: RemoteFields): SyncRecord {
-  return {
-    remoteId: remote.id,
-    path: key,
-    localName: local.name,
-    remoteName: remote.name,
-    remoteParentId: remote.parentId,
-    localMd5: local.md5,
-    localSize: local.size,
-    localMtimeMs: local.mtimeMs,
-    localCtimeMs: local.ctimeMs,
-    remoteMd5: remote.md5,
-    remoteSize: remote.size,
-    remoteModifiedTime: remote.modifiedTime,
-    native: null,
-    remoteOnly: false,
-    restorePending: false,
-    remoteTrashed: false,
-  };
-}
-
-function pad(n: number): string {
-  return String(n).padStart(2, '0');
-}
-
-/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
-export function conflictName(base: string, at: Date, attempt: number): string {
-  const dot = base.lastIndexOf('.');
-  const stem = dot > 0 ? base.slice(0, dot) : base;
-  const ext = dot > 0 ? base.slice(dot) : '';
-  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}.${pad(at.getMinutes())}`;
-  return `${stem} (Drive conflict ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
-}
-
-function applySelection(file: PairFile, change: SelectionChange): void {
-  const pair = file.pair;
-  const without = (list: string[], keys: string[]): string[] => {
-    const folds = new Set(keys.map(foldKey));
-    return list.filter((k) => !folds.has(foldKey(k)));
-  };
-  if (change.remove) pair.selection = without(pair.selection, change.remove);
-  if (change.exclude) {
-    pair.selection = without(pair.selection, change.exclude);
-    pair.excluded = [...without(pair.excluded, change.exclude), ...change.exclude];
-  }
-  if (change.add) {
-    pair.excluded = without(pair.excluded, change.add);
-    pair.selection = [...without(pair.selection, change.add), ...change.add];
-  }
-}
-
-function putRecord(file: PairFile, record: SyncRecord, replaces?: string): void {
-  file.records = file.records.filter(
-    (r) => r.remoteId !== record.remoteId && r.remoteId !== replaces,
-  );
-  file.records.push(record);
-}
-
-function dropRecord(file: PairFile, remoteId: string): void {
-  file.records = file.records.filter((r) => r.remoteId !== remoteId);
-}
-
-function messageOf(err: unknown): string {
-  if (err instanceof AppError) return err.message;
-  return err instanceof Error ? err.message : String(err);
-}
-
 /** Executes a plan in spec §7 order, persisting the pair file after every success. */
 export class Executor {
-  private readonly folderIds = new Map<string, string>();
-  private readonly folderErrors = new Map<string, string>();
+  private readonly folders: RemoteFolders;
 
   constructor(
     private readonly deps: ExecutorDeps,
     private readonly file: PairFile,
     folders: ReadonlyMap<string, string>,
   ) {
-    for (const [id, key] of folders) this.folderIds.set(key, id);
+    this.folders = new RemoteFolders(deps, file.pair, folders);
   }
 
   private get pair(): PairFile['pair'] {
@@ -187,7 +92,7 @@ export class Executor {
     const outcomes: ActionOutcome[] = [];
     let aborted = false;
     try {
-      await this.ensureFolders(actions.filter((a) => a.kind === 'upload-new'));
+      await this.folders.ensureAll(actions.filter((a) => a.kind === 'upload-new'));
     } catch (err) {
       if (!isAbortError(err)) throw err;
       aborted = true;
@@ -322,86 +227,6 @@ export class Executor {
     return current;
   }
 
-  // ---- remote folders -------------------------------------------------------------
-
-  private async ensureFolders(uploads: readonly Action[]): Promise<void> {
-    const dirs = [...new Set(uploads.map((a) => parentKey(a.key)))].sort(
-      (a, b) => a.split('/').length - b.split('/').length || (a < b ? -1 : 1),
-    );
-    for (const dir of dirs) {
-      try {
-        await this.folderFor(dir);
-      } catch (err) {
-        if (isAbortError(err)) throw err;
-        this.folderErrors.set(dir, messageOf(err));
-      }
-    }
-  }
-
-  private async folderFor(dir: string): Promise<string> {
-    const known =
-      this.folderIds.get(dir) ??
-      (this.pair.caseInsensitive
-        ? [...this.folderIds].find(([key]) => foldKey(key) === foldKey(dir))?.[1]
-        : undefined);
-    if (known) return known;
-    const failed = this.folderErrors.get(dir);
-    if (failed) throw new ValidationError(failed);
-    const parentId = await this.folderFor(parentKey(dir));
-    const id = await this.ensureRemoteFolder(parentId, baseName(dir));
-    this.folderIds.set(dir, id);
-    return id;
-  }
-
-  /** Reuses exactly one non-trashed same-name folder; several → refuse (spec §4). */
-  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
-    const q = `'${escapeQueryValue(parentId)}' in parents and trashed = false and mimeType = '${GOOGLE_MIME.folder}'`;
-    const folders: DriveFile[] = [];
-    let pageToken: string | undefined;
-    do {
-      const page = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
-        ctx.drive.listFiles({
-          q,
-          pageSize: 1000,
-          ...(pageToken ? { pageToken } : {}),
-          fields: 'nextPageToken, files(id, name)',
-        }),
-      );
-      folders.push(...(page.files ?? []));
-      pageToken = page.nextPageToken ?? undefined;
-    } while (pageToken);
-    const same = folders.filter((f) =>
-      this.pair.caseInsensitive
-        ? foldKey(f.name ?? '') === foldKey(name)
-        : (f.name ?? '').normalize('NFC') === name.normalize('NFC'),
-    );
-    if (same.length > 1)
-      throw new ValidationError(
-        `Several Drive folders named "${name}"; resolve the duplicate first`,
-      );
-    const existing = same[0]?.id;
-    if (existing) return existing;
-    const created = await this.deps.ops.exec(this.pair.account, 'create', parentId, (ctx) =>
-      ctx.drive.createFile({
-        requestBody: { name, mimeType: GOOGLE_MIME.folder, parents: [parentId] },
-        fields: 'id, name',
-      }),
-    );
-    const id = this.need(created.id, 'folder id');
-    try {
-      await this.deps.audit.record({
-        account: this.pair.account,
-        op: 'create_folder',
-        fileId: id,
-        name,
-        details: { pair: this.pair.name, parentId },
-      });
-    } catch (err) {
-      this.deps.logger.warn('Audit log write failed', { op: 'create_folder', error: err });
-    }
-    return id;
-  }
-
   // ---- state-only -------------------------------------------------------------------
 
   private async adopt(action: Action): Promise<Partial<ActionOutcome>> {
@@ -439,7 +264,7 @@ export class Executor {
   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
     const local = this.need(action.local, 'local');
     const planned = this.need(action.localMd5, 'local md5');
-    const parentId = await this.folderFor(parentKey(action.key));
+    const parentId = await this.folders.folderFor(parentKey(action.key));
     const abs = absInside(this.pair.localDir, local.name);
     const name = baseName(action.key);
     let uploaded: DriveFile;

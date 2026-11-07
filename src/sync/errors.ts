@@ -52,3 +52,9 @@ export function isAbortError(err: unknown): boolean {
     err instanceof PersistenceError
   );
 }
+
+/** Safe message of any thrown value (AppError messages are user-facing). */
+export function messageOf(err: unknown): string {
+  if (err instanceof AppError) return err.message;
+  return err instanceof Error ? err.message : String(err);
+}
