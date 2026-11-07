@@ -1,7 +1,15 @@
 import open from 'open';
 import { AuthService } from './auth/auth-service.js';
 import { selectTokenStore } from './auth/select-token-store.js';
-import { runLoginFlow, type LoginFlowOptions, type LoginResult } from './auth/login-flow.js';
+import {
+  finishTwoStepLogin,
+  runLoginFlow,
+  startTwoStepLogin,
+  type LoginFlowOptions,
+  type LoginResult,
+  type TwoStepStart,
+} from './auth/login-flow.js';
+import { PendingLoginStore } from './auth/pending-login.js';
 import { FileAuditLog } from './audit/audit-log.js';
 import { AccountRegistry } from './config/account-registry.js';
 import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
@@ -51,6 +59,13 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
           process.stderr.write(`${message}\n`);
         },
       }),
+    twoStep: {
+      pending: new PendingLoginStore(paths.pendingLogins),
+      start: (credentials, loginHint): Promise<TwoStepStart> =>
+        startTwoStepLogin({ ...credentials, ...(loginHint ? { loginHint } : {}) }),
+      finish: (credentials, pending, redirectUrl): Promise<LoginResult> =>
+        finishTwoStepLogin(credentials, pending, redirectUrl),
+    },
   });
   const runner = new DriveClientFactory(auth);
   const audit = new FileAuditLog(paths.audit);

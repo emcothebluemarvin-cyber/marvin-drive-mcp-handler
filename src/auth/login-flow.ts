@@ -1,8 +1,8 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Auth } from 'googleapis';
-import { AppError, AuthFlowError } from '../errors.js';
+import { AppError, AuthFlowError, ValidationError } from '../errors.js';
 import { logger } from '../logger.js';
 import { CALLBACK_PAGE_HEADERS, renderCallbackPage, type CallbackPage } from './callback-page.js';
 
@@ -240,6 +240,24 @@ async function listen(server: Server): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
+/** The Google consent URL: offline access (refresh token), PKCE S256, our scopes. */
+function buildAuthUrl(
+  client: OAuthFlowClient,
+  state: string,
+  codeChallenge: string | undefined,
+  loginHint: string | undefined,
+): string {
+  return client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: [...OAUTH_SCOPES],
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: Auth.CodeChallengeMethod.S256,
+    ...(loginHint ? { login_hint: loginHint } : {}),
+  });
+}
+
 export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult> {
   const state = randomBytes(16).toString('hex');
   const server = createServer();
@@ -261,15 +279,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
     const callbackPromise = waitForCallback(server, state, timeoutMs);
     callbackPromise.catch(() => undefined); // awaited below; prevents an unhandled rejection if we throw first
 
-    const authUrl = client.generateAuthUrl({
-      access_type: 'offline',
-      prompt: 'consent',
-      scope: [...OAUTH_SCOPES],
-      state,
-      code_challenge: codeChallenge,
-      code_challenge_method: Auth.CodeChallengeMethod.S256,
-      ...(opts.loginHint ? { login_hint: opts.loginHint } : {}),
-    });
+    const authUrl = buildAuthUrl(client, state, codeChallenge, opts.loginHint);
     let incoming: Promise<Callback> = callbackPromise;
     if (opts.manual) {
       opts.print(
@@ -309,4 +319,89 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+}
+
+/** Options shared by the two-step (--print-url / --redirect-url) login. */
+export interface TwoStepOptions {
+  clientId: string;
+  clientSecret: string;
+  createClient?: (redirectUri: string) => OAuthFlowClient;
+  finishTimeoutMs?: number;
+}
+
+/** What step 1 hands to step 2 (stored by PendingLoginStore). */
+export interface TwoStepStart {
+  authUrl: string;
+  state: string;
+  codeVerifier: string;
+  redirectUri: string;
+}
+
+function clientFor(opts: TwoStepOptions, redirectUri: string): OAuthFlowClient {
+  return (
+    opts.createClient?.(redirectUri) ??
+    new Auth.OAuth2Client({
+      clientId: opts.clientId,
+      clientSecret: opts.clientSecret,
+      redirectUri,
+    })
+  );
+}
+
+/**
+ * Step 1: builds the consent URL without listening anywhere. The loopback redirect URI gets a
+ * random high port; nothing answers there, so the browser shows an error page whose address
+ * bar holds the code. Google accepts any loopback port for Desktop clients.
+ */
+export async function startTwoStepLogin(
+  opts: TwoStepOptions & { loginHint?: string },
+): Promise<TwoStepStart> {
+  const state = randomBytes(16).toString('hex');
+  const port = 49152 + randomInt(65535 - 49152);
+  const redirectUri = `http://127.0.0.1:${port}`;
+  const client = clientFor(opts, redirectUri);
+  const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
+  return {
+    authUrl: buildAuthUrl(client, state, codeChallenge, opts.loginHint),
+    state,
+    codeVerifier,
+    redirectUri,
+  };
+}
+
+/** The state and code of a redirect URL (or its query string); throws on anything else. */
+export function parseRedirectUrl(input: string): { state: string; code: string } {
+  const params = parsePasted(input);
+  if (!params || !params.has('state') || (!params.has('code') && !params.has('error'))) {
+    throw new ValidationError(
+      'That does not look like the redirect URL; it contains "state=" and "code=". Quote it in the shell.',
+    );
+  }
+  const error = params.get('error');
+  if (error) {
+    throw new AuthFlowError(
+      error === 'access_denied'
+        ? 'Access was denied in the browser'
+        : `Google returned an error: ${error}`,
+    );
+  }
+  return { state: params.get('state') ?? '', code: params.get('code') ?? '' };
+}
+
+/** Step 2: exchanges the code from the redirect URL with the stored PKCE verifier. */
+export async function finishTwoStepLogin(
+  opts: TwoStepOptions,
+  pending: { state: string; codeVerifier: string; redirectUri: string },
+  redirectUrl: string,
+): Promise<LoginResult> {
+  const { state, code } = parseRedirectUrl(redirectUrl);
+  if (state !== pending.state) {
+    throw new AuthFlowError('That redirect URL belongs to a different login attempt.');
+  }
+  if (!code) throw new ValidationError('That redirect URL has no authorization code.');
+  const client = clientFor(opts, pending.redirectUri);
+  return withDeadline(
+    exchangeAndVerify(client, code, pending.codeVerifier, opts.clientId),
+    opts.finishTimeoutMs ?? DEFAULT_FINISH_TIMEOUT_MS,
+  );
 }

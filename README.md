@@ -16,7 +16,7 @@ npm run build
 mkdir -p ~/.config/google-handler && chmod 700 ~/.config/google-handler
 # Save the Desktop client JSON as ~/.config/google-handler/client_secret.json (chmod 600)
 npm link            # puts `marvin-drive` on PATH (optional; otherwise use `node dist/cli/main.js`)
-marvin-drive auth add --alias emco
+marvin-drive auth add --alias <name>   # e.g. work; default: the part of the email before @
 ```
 
 Error messages refer to `marvin-drive …`; without `npm link`, run the same command as `node dist/cli/main.js …`.
@@ -35,11 +35,20 @@ Headless Linux hosts usually have no Secret Service (D-Bus keyring), so keep tok
 
 ```bash
 export MARVIN_DRIVE_TOKEN_STORE=file      # tokens in ~/.config/google-handler/tokens.json (0600)
-marvin-drive auth add --alias emco --no-browser
+marvin-drive auth add --alias <name> --no-browser
 claude mcp add marvin-drive --scope user -e MARVIN_DRIVE_TOKEN_STORE=file -- node "$PWD/dist/cli/main.js" serve
 ```
 
 Sign in without a browser on the server: `marvin-drive auth add --no-browser` (or `auth login <alias> --no-browser`) prints the Google URL. Open it on any device, sign in, and paste the URL Google redirects to (`http://127.0.0.1:<PORT>/?state=…&code=…`) back into the terminal. That page failing to load is expected. The loopback listener stays up as well, so an SSH tunnel (`ssh -N -L <PORT>:127.0.0.1:<PORT> user@server`) also works; whichever arrives first wins. A no-browser login waits up to 10 minutes.
+
+**Two-step login** (no waiting terminal, e.g. from Claude Code's `!` prompt or a script):
+
+```bash
+marvin-drive auth add --alias <name> --print-url                 # prints the Google URL and exits
+marvin-drive auth add --alias <name> --redirect-url '<the URL>'  # within 10 minutes
+```
+
+`auth login <alias> --print-url` / `--redirect-url` work the same way. Step 1 keeps the PKCE verifier in `~/.config/google-handler/pending-logins.json` (`0600`) until step 2 uses it once or it expires; step 2 must name the same command and alias. Quote the URL (it contains `&`). It lands in your shell history, but its code works only once and only together with that stored verifier.
 
 The file store protects tokens only with file permissions: use it only on hosts where your user account is trusted.
 
@@ -61,17 +70,17 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 
 ## CLI
 
-| Command                                                                         | Purpose                                                         |
-| ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `marvin-drive auth add [--alias a] [--no-browser]`                              | Browser login, register account (first = default)               |
-| `marvin-drive auth login <alias> [--no-browser]`                                | Re-login an expired account                                     |
-| `marvin-drive auth list [--verify]`                                             | Accounts and token status                                       |
-| `marvin-drive auth remove <alias>`                                              | Remove account, delete + revoke token                           |
-| `marvin-drive auth default <alias>`                                             | Set the default account                                         |
-| `marvin-drive serve`                                                            | MCP server on stdio                                             |
-| `marvin-drive sync list`                                                        | Sync pairs with counts and last applied run                     |
-| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete]` | Dry run (default) or apply a sync; exit code 1 on failure/abort |
-| `marvin-drive sync repair-marker <name>`                                        | Rewrite the folder marker after confirming the local folder     |
+| Command                                                                           | Purpose                                                         |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `marvin-drive auth add [--alias a] [--no-browser\|--print-url\|--redirect-url u]` | Browser login, register account (first = default)               |
+| `marvin-drive auth login <alias> [--no-browser\|--print-url\|--redirect-url u]`   | Re-login an expired account                                     |
+| `marvin-drive auth list [--verify]`                                               | Accounts and token status                                       |
+| `marvin-drive auth remove <alias>`                                                | Remove account, delete + revoke token                           |
+| `marvin-drive auth default <alias>`                                               | Set the default account                                         |
+| `marvin-drive serve`                                                              | MCP server on stdio                                             |
+| `marvin-drive sync list`                                                          | Sync pairs with counts and last applied run                     |
+| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete]`   | Dry run (default) or apply a sync; exit code 1 on failure/abort |
+| `marvin-drive sync repair-marker <name>`                                          | Rewrite the folder marker after confirming the local folder     |
 
 ## MCP tools
 
@@ -163,7 +172,7 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 ```bash
 npm run check                                   # typecheck, lint, format, unit + integration tests
 MARVIN_KEYCHAIN_TEST=1 npx vitest run src/auth  # real Keychain round-trip
-MARVIN_E2E_ACCOUNT=emco npm run test:e2e        # live Drive tests (temp Drive folder + temp local dir; sync uses a temp trash)
+MARVIN_E2E_ACCOUNT=<alias> npm run test:e2e     # live Drive tests (temp Drive folder + temp local dir; sync uses a temp trash)
 ```
 
 ## License
