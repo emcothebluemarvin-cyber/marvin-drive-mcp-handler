@@ -106,6 +106,10 @@ export async function removeWatch(
     const removed = state.entries.find((e) => e.id === input.fileId);
     if (!removed) throw new ValidationError(`${input.fileId} is not watched for ${email}`);
     const remaining = new Set(state.entries.filter((e) => e.id !== removed.id).map((e) => e.id));
+    // Known limitation: `via` lists the entries that covered a file when it was last seen, so a
+    // member of two watched folders whose `via` holds only the removed one is dropped here (and
+    // loses its baseline) although the other folder still covers it. It is tracked again as
+    // first seen on its next change.
     const orphan = (via: readonly string[]): boolean => via.every((v) => !remaining.has(v));
     const drop = new Set<string>();
     for (const [id, k] of Object.entries(state.known)) if (orphan(k.via)) drop.add(id);
