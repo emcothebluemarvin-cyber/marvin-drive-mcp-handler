@@ -213,7 +213,7 @@ export class SyncService {
           ...new Set([...file.pair.remoteBaseline, ...plan.nativeBaseline]),
         ].sort();
         file.pair.baselineFolders = [
-          ...new Set([...file.pair.baselineFolders, ...plan.baseline.folders]),
+          ...new Set([...file.pair.baselineFolders, ...remote.unknownFolderIds]),
         ].sort();
         file.pair.nativeBaselineDone = true;
       }

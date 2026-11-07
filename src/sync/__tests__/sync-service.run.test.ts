@@ -414,6 +414,16 @@ describe('upgrade from Phase A (nativeBaselineDone)', () => {
     expect(after.pair.remoteBaseline).toContain('g1');
   });
 
+  it('baselines only the unknown remote folders of that run, not ignored ones', async () => {
+    await phaseAPair();
+    mem.addFolder('dup1', 'Dup', 'ROOT');
+    mem.addFolder('dup2', 'Dup', 'ROOT');
+    mem.addFolder('hid', '.hidden', 'ROOT');
+    await apply();
+    const after = await store.load('docs');
+    expect(after.pair.baselineFolders).toEqual(['dup1', 'dup2']);
+  });
+
   it('a mass-delete abort leaves it false', async () => {
     for (const n of ['a', 'b', 'c']) await writeFile(at(`${n}.pdf`), n);
     await sync.select({ name: 'docs', add: ['a.pdf', 'b.pdf', 'c.pdf'] });
