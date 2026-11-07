@@ -1,24 +1,18 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { Readable } from 'node:stream';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { OperationRunner } from '../core/operation.js';
 import type { DriveContext, DriveRunner } from '../drive/client-factory.js';
 import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
-import { ExportTooLargeError, NotFoundError, ValidationError } from '../errors.js';
+import { NotFoundError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import { reasonOf, statusOf } from './drive-errors.js';
+import { statusOf } from './drive-errors.js';
 import { expandHome, resolveDestination, writeUnique } from './destination.js';
-import {
-  GOOGLE_MIME,
-  isGoogleNative,
-  resolveExport,
-  type ExportFormat,
-  type ExportPlan,
-} from './export-formats.js';
+import { GOOGLE_MIME, isGoogleNative, resolveExport, type ExportFormat } from './export-formats.js';
+import { openExport } from './export-stream.js';
 import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
-import { retryKind, type RetryClass, type RetryOptions } from './retry.js';
+import { type RetryClass, type RetryOptions } from './retry.js';
 import { googleTargetMime, uploadMimeType } from './upload-mime.js';
 
 export const SUMMARY_FIELDS = 'id, name, mimeType, size, modifiedTime, parents';
@@ -397,7 +391,9 @@ export class FileService {
         ...(plan ? { extension: plan.extension } : {}),
       });
       const written = await writeUnique(destination, () =>
-        plan ? this.openExport(ctx, fileId, plan, file) : ctx.drive.downloadMedia(fileId),
+        plan
+          ? openExport(ctx.drive, { ...file, id: fileId }, plan, this.log)
+          : ctx.drive.downloadMedia(fileId),
       );
       return {
         path: written.path,
@@ -406,29 +402,6 @@ export class FileService {
         exportFormat: plan?.format ?? null,
       };
     });
-  }
-
-  private async openExport(
-    ctx: DriveContext,
-    fileId: string,
-    plan: ExportPlan,
-    file: DriveFile,
-  ): Promise<Readable> {
-    try {
-      return await ctx.drive.exportMedia(fileId, plan.mimeType);
-    } catch (err) {
-      if (reasonOf(err) !== 'exportSizeLimitExceeded') throw err;
-      const link = file.exportLinks?.[plan.mimeType];
-      if (link) {
-        try {
-          return await ctx.drive.fetchExportLink(link);
-        } catch (fallbackErr) {
-          if (retryKind(fallbackErr) !== null) throw fallbackErr;
-          this.log.warn('exportLinks fallback failed', { fileId, error: fallbackErr });
-        }
-      }
-      throw new ExportTooLargeError(file.webViewLink ?? null, { cause: err, format: plan.format });
-    }
   }
 
   /** Runs `operation` for an account with retry + error mapping (invalid_grant passes through). */
