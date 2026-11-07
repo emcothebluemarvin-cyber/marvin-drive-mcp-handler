@@ -148,8 +148,8 @@ version, md5 } }` for every relevant file seen. For a relevant change:
 | `removed`, file in `known`                                           | pending `removed`           |
 | no longer under any watch, file in `known`                           | pending `moved-out`, forget |
 | not in `known`, `createdTime ≥` covering entry's `addedAt`           | pending `added` (new file)  |
-| not in `known`, `modifiedTime <` covering entry's `addedAt` (old member seen for the first time, e.g. opened or starred) | recorded in `known`, no event |
-| not in `known`, older file but `modifiedTime ≥` covering `addedAt` (moved in, or first edit after a lazy folder add) | pending `edited` with note "first seen in a watched folder" |
+| not in `known`, `modifiedTime <` covering entry's `addedAt` (old member seen for the first time, e.g. opened, starred or moved in: a move does not change `modifiedTime`, so moved-in files are silent until edited) | recorded in `known`, no event |
+| not in `known`, older file but `modifiedTime ≥` covering `addedAt` (first edit after a lazy folder add) | pending `edited` with note "first seen in a watched folder" |
 | `modifiedTime`, `md5`, `name`, `parents`, `trashed` all equal to `known` (`version` is not compared: Drive bumps it for invisible changes) | ignored (views, stars, sharing) |
 | otherwise                                                            | pending `edited` / `renamed` / `trashed` flags |
 
@@ -294,7 +294,7 @@ sessions in `channel` mode each session receives the push (intended).
   `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"…"}}`
   with unread foreign events (template of §8.2, ≤ 9 000 chars, oldest first; the rest is
   mentioned as a count), marks the printed ones read (`watch.lock` with a 100 ms timeout; on timeout it prints
-  without marking read); prints nothing otherwise; always exits 0.
+  without marking read, so those events may show once more on the next prompt); prints nothing otherwise; always exits 0.
 
 ### 8.4 Sanitizing third-party text
 
