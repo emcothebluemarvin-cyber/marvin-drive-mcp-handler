@@ -19,13 +19,14 @@ import {
   type FakeDrive,
 } from '../../files/__tests__/fakes.js';
 import { TOOL_NAMES, createMcpServer, type McpDeps } from '../server.js';
+import { stubWatchApi } from '../../watch/__tests__/fakes.js';
 
 let drive: FakeDrive;
 let client: Client;
 let statuses: AccountStatusEntry[];
 let verifyArgs: boolean[];
 
-function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides' | 'sync'> {
+function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides' | 'sync' | 'watch'> {
   const deps = {
     runner: createRunner(drive),
     audit: createAudit(),
@@ -41,6 +42,7 @@ function contentServices(): Pick<McpDeps, 'docs' | 'sheets' | 'slides' | 'sync'>
       store: new PairStore({ dir: '/tmp/unused-sync' }),
       trash: refuseTrash,
     }),
+    watch: stubWatchApi(),
   };
 }
 
@@ -84,10 +86,10 @@ beforeEach(async () => {
 });
 
 describe('MCP server', () => {
-  it('exposes the 32 tools from all specs', async () => {
+  it('exposes the 34 tools from all specs', async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_NAMES).toHaveLength(32);
+    expect(TOOL_NAMES).toHaveLength(34);
     const list = tools.find((t) => t.name === 'drive_list');
     expect(list?.inputSchema.properties).toHaveProperty('account');
     expect(list?.inputSchema.properties).toHaveProperty('folderId');

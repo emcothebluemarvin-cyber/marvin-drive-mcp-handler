@@ -14,6 +14,7 @@ import { SyncService } from '../../sync/sync-service.js';
 import { refuseTrash } from '../../sync/__tests__/fixtures.js';
 import { memoryDrive, type MemoryDrive } from '../../sync/__tests__/memory-drive.js';
 import { createMcpServer } from '../server.js';
+import { stubWatchApi } from '../../watch/__tests__/fakes.js';
 
 let tmp: string;
 let local: string;
@@ -60,6 +61,7 @@ beforeEach(async () => {
       store: new PairStore({ dir: path.join(tmp, 'sync'), logger: silentLogger() }),
       trash: refuseTrash,
     }),
+    watch: stubWatchApi(),
     auth: { status: async () => [] },
     version: '0.0.0-test',
     logger: silentLogger(),

@@ -1,4 +1,5 @@
 import { AccountNotFoundError, NotFoundError } from '../../errors.js';
+import type { WatchApi } from '../watch-service.js';
 import type { ChangeFeed, ContentSnapshotter, WatchAccount, WatchProvider } from '../feed.js';
 import type {
   ChangeEvent,
@@ -222,6 +223,22 @@ export function testClock(start = '2026-11-07T11:00:00.000Z'): {
     now: () => new Date(t),
     advance: (ms) => {
       t += ms;
+    },
+  };
+}
+
+/** A WatchApi that records its inputs (MCP tests). */
+export function stubWatchApi(): WatchApi & { calls: unknown[] } {
+  const calls: unknown[] = [];
+  return {
+    calls,
+    watch: async (input) => {
+      calls.push(input);
+      return { action: 'list', watches: [] };
+    },
+    changes: async (input) => {
+      calls.push(input);
+      return { events: [], more: 0, unread: 0 };
     },
   };
 }
