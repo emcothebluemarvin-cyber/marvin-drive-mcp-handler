@@ -40,20 +40,21 @@ describe('plan composition', () => {
     ]);
   });
 
-  it('reports native-skipped and unrepresentable Drive files', () => {
+  it('reports native-unsupported and unrepresentable Drive files', () => {
     const p = plan(
       planInput({
         ignored: [
-          { id: 'g1', path: 'Plan', reason: 'native-skipped', isFolder: false },
+          { id: 'g1', path: 'Survey', reason: 'native-unsupported', isFolder: false },
           { id: 'u1', path: 'a/b', reason: 'unrepresentable', isFolder: false },
           { id: 's1', path: 'link', reason: 'shortcut', isFolder: false },
         ],
       }),
     );
     expect(p.notes.map((n) => [n.code, n.path])).toEqual([
-      ['native-skipped', 'Plan'],
+      ['native-unsupported', 'Survey'],
       ['unrepresentable', 'a/b'],
     ]);
+    expect(p.notes[0]?.message).toMatch(/cannot be exported/);
     expect(p.notes[1]?.message).toMatch(/rename it in Drive/);
     expect(p.notes[1]?.message).toMatch(/Windows/);
   });
@@ -71,7 +72,7 @@ describe('plan composition', () => {
           remoteEntry('d2', 'X.pdf'),
         ],
         ignored: [
-          { id: 'g1', path: 'Plan', reason: 'native-skipped', isFolder: false },
+          { id: 'g1', path: 'Plan', reason: 'native-unsupported', isFolder: false },
           { id: 'f9', path: '.git', reason: 'ignored-name', isFolder: true },
         ],
         unknownFolderIds: ['dupF'],

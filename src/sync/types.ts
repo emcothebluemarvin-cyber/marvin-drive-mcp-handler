@@ -119,7 +119,8 @@ export interface RemoteEntry {
   native: NativeInfo | null;
 }
 
-export type RemoteIgnoreReason = 'native-skipped' | 'shortcut' | 'unrepresentable' | 'ignored-name';
+export type RemoteIgnoreReason =
+  'native-unsupported' | 'shortcut' | 'unrepresentable' | 'ignored-name';
 
 export interface RemoteIgnored {
   id: string;
@@ -198,7 +199,7 @@ export type NoteCode =
   | 'remote-readonly'
   | 'cannot-trash'
   | 'missing'
-  | 'native-skipped'
+  | 'native-unsupported'
   | 'unrepresentable'
   | 'weak-compare'
   | 'ignored';

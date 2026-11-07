@@ -8,7 +8,7 @@ const WARNING_CODES: ReadonlySet<NoteCode> = new Set([
   'remote-readonly',
   'cannot-trash',
   'missing',
-  'native-skipped',
+  'native-unsupported',
   'unrepresentable',
   'weak-compare',
 ]);

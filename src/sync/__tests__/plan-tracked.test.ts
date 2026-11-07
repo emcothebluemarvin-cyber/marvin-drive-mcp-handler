@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { planTracked } from '../plan-tracked.js';
 import { buildContext } from '../resolve.js';
 import type { SyncRecord } from '../types.js';
-import { localEntry, record, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const K = record('r1', 'a.pdf');
@@ -25,6 +25,23 @@ function only(o: InputOptions, k: SyncRecord = K) {
 }
 
 describe('dispatch (spec §6.3)', () => {
+  it('type-changed: the Drive file switched between binary and Google-native', () => {
+    const fromScan = run({ local: [L], remote: [nativeEntry('r1', 'a.pdf')] });
+    expect(fromScan.actions).toEqual([]);
+    expect(fromScan.notes[0]).toMatchObject({ code: 'unknown-state', rule: 'type-changed' });
+    expect(fromScan.notes[0]?.message).toMatch(/^type-changed:/);
+    const fromProbe = run({
+      local: [L],
+      probes: [['r1', { state: 'present', entry: nativeEntry('r1', 'a.pdf') }]],
+    });
+    expect(fromProbe.notes[0]).toMatchObject({ rule: 'type-changed' });
+    const nativeToBinary = run(
+      { local: [localEntry('Plan.docx')], remote: [remoteEntry('g1', 'Plan.docx')] },
+      nativeRecord('g1', 'Plan.docx'),
+    );
+    expect(nativeToBinary.notes[0]).toMatchObject({ rule: 'type-changed' });
+  });
+
   it('(a) unknown subtree beats everything', () => {
     const result = run({ local: [L], remote: [R], unknownLocal: [''] });
     expect(result.actions).toEqual([]);

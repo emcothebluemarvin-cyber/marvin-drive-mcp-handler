@@ -1,10 +1,17 @@
 import type { DriveFile } from '../drive/drive-adapter.js';
 import { AppError, NotFoundError, PermissionDeniedError } from '../errors.js';
-import { GOOGLE_MIME, isGoogleNative } from '../files/export-formats.js';
+import { GOOGLE_MIME } from '../files/export-formats.js';
 import { isAbortError } from './errors.js';
-import { isIgnoredName, isRepresentable } from './paths.js';
+import { baseName, isIgnoredName, isRepresentable } from './paths.js';
+import { classifyRemote } from './remote-kinds.js';
 import { toRemoteEntry } from './remote-scanner.js';
-import { SYNC_FILE_FIELDS, type Probe, type RemoteScan } from './types.js';
+import {
+  DEFAULT_GOOGLE_EXPORT,
+  SYNC_FILE_FIELDS,
+  type GoogleExportPrefs,
+  type Probe,
+  type RemoteScan,
+} from './types.js';
 
 export type FileGetter = (fileId: string, fields: string) => Promise<DriveFile>;
 
@@ -27,6 +34,7 @@ export async function probeRecord(
   remoteId: string,
   scan: RemoteScan,
   get: FileGetter,
+  prefs: GoogleExportPrefs = DEFAULT_GOOGLE_EXPORT,
 ): Promise<Probe> {
   let file: DriveFile;
   try {
@@ -45,10 +53,17 @@ export async function probeRecord(
     if (!isRepresentable(name) || isIgnoredName(name)) {
       return unknown('renamed in Drive to a name that cannot be synced');
     }
-    if (mime === GOOGLE_MIME.shortcut || isGoogleNative(mime)) {
+    if (mime === GOOGLE_MIME.shortcut || mime === GOOGLE_MIME.folder) {
       return unknown('is no longer a regular file');
     }
-    return { state: 'present', entry: toRemoteEntry(file, parentKey, parent, [parent]) };
+    const kind = classifyRemote(file, prefs);
+    if (kind.kind === 'unsupported')
+      return unknown('is a Google file type that cannot be exported');
+    const entry = toRemoteEntry(file, parentKey, parent, [parent], kind);
+    if (!isRepresentable(baseName(entry.key))) {
+      return unknown('renamed in Drive to a name that cannot be synced');
+    }
+    return { state: 'present', entry };
   }
   let current = parent;
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
@@ -73,8 +88,9 @@ export async function probeRecords(
   remoteIds: readonly string[],
   scan: RemoteScan,
   get: FileGetter,
+  prefs: GoogleExportPrefs = DEFAULT_GOOGLE_EXPORT,
 ): Promise<Map<string, Probe>> {
   const probes = new Map<string, Probe>();
-  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, get));
+  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, get, prefs));
   return probes;
 }

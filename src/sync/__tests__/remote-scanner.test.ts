@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { NotFoundError, ReauthRequiredError } from '../../errors.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import { childrenQuery, scanRemote } from '../remote-scanner.js';
+import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder, treeLister } from './drive-tree.js';
 
 const ROOT = 'root';
@@ -58,7 +59,7 @@ describe('scanRemote', () => {
     expect(list.calls).toEqual([ROOT]);
   });
 
-  it('ignores shortcuts, native files, unrepresentable and dot names', async () => {
+  it('ignores shortcuts, unrepresentable and dot names', async () => {
     const scan = await scanRemote(
       ROOT,
       treeLister([
@@ -69,14 +70,51 @@ describe('scanRemote', () => {
         folder('hf', '.git', ROOT),
       ]),
     );
-    expect(scan.entries).toEqual([]);
+    expect(scan.entries.map((e) => e.key)).toEqual(['Plan.docx']);
     expect(scan.ignored.map((i) => [i.id, i.path, i.reason, i.isFolder])).toEqual([
       ['s', 'link', 'shortcut', false],
-      ['g', 'Plan', 'native-skipped', false],
       ['u', 'a/b.pdf', 'unrepresentable', false],
       ['h', '.hidden', 'ignored-name', false],
       ['hf', '.git', 'ignored-name', true],
     ]);
+  });
+
+  it('keys Google-native files by their export name; unsupported types are ignored', async () => {
+    const scan = await scanRemote(
+      ROOT,
+      treeLister([
+        { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+        { id: 's', name: 'Budget', mimeType: GOOGLE_MIME.spreadsheet, parents: [ROOT] },
+        { id: 'f', name: 'Survey', mimeType: 'application/vnd.google-apps.form', parents: [ROOT] },
+        { id: 'l', name: 'x'.repeat(252), mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+      ]),
+      { ...DEFAULT_GOOGLE_EXPORT, spreadsheet: 'csv' },
+    );
+    expect(
+      scan.entries.map((e) => [e.id, e.key, e.name, e.md5, e.size, e.native?.exportFormat]),
+    ).toEqual([
+      ['s', 'Budget.csv', 'Budget', null, null, 'csv'],
+      ['g', 'Plan.docx', 'Plan', null, null, 'docx'],
+    ]);
+    expect(scan.ignored.map((i) => [i.id, i.reason])).toEqual([
+      ['f', 'native-unsupported'],
+      ['l', 'unrepresentable'],
+    ]);
+  });
+
+  it('a Drive native and a binary sharing the export key are both scanned under that key', async () => {
+    const scan = await scanRemote(
+      ROOT,
+      treeLister([
+        { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+        binary('b', 'Plan.docx', ROOT),
+      ]),
+    );
+    expect(scan.entries.map((e) => [e.id, e.key])).toEqual([
+      ['b', 'Plan.docx'],
+      ['g', 'Plan.docx'],
+    ]);
+    expect(new Set(scan.entries.map((e) => e.foldKey)).size).toBe(1);
   });
 
   it('turns a failed sub-folder listing into an unknown subtree', async () => {

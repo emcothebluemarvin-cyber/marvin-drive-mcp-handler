@@ -10,6 +10,9 @@ import {
 } from './resolve.js';
 import type { Action, LocalEntry, Note, NoteCode, RemoteEntry, SyncRecord } from './types.js';
 
+export const TYPE_CHANGED =
+  'type-changed: the Drive file switched between a Google Docs/Sheets/Slides file and a regular file; remove it with sync_select remove and select it again';
+
 export interface TrackedResult {
   actions: Action[];
   notes: Note[];
@@ -75,6 +78,9 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
     (newKey !== null && ctx.ambiguousFolds.has(foldKey(newKey)))
   ) {
     return note('ambiguous', 'ambiguous');
+  }
+  if (R.kind === 'present' && (record.native !== null) !== (R.entry.native !== null)) {
+    return note('unknown-state', 'type-changed', TYPE_CHANGED);
   }
   // (c), (d): Phase B records cannot exist in Phase A — never act on them.
   if (record.remoteOnly || record.native) {

@@ -138,6 +138,16 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
         continue;
       }
     }
+    // Interim (removed in Task 11): Google-native exports arrive with the native rules.
+    if (R?.native) {
+      out.candidates.remote.push({
+        path: R.key,
+        size: R.size,
+        modifiedTime: R.modifiedTime,
+        remoteId: R.id,
+      });
+      continue;
+    }
     const base = { record: null, selection: {} as SelectionChange };
 
     if (sel !== undefined) {

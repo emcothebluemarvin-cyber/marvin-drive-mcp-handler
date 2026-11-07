@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CANDIDATE_CAP, planUntracked, type Claims } from '../plan-untracked.js';
 import { buildContext } from '../resolve.js';
-import { localEntry, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, remoteEntry } from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const NO_CLAIMS: Claims = { folds: new Set(), localNames: new Set() };
@@ -122,6 +122,32 @@ describe('untracked keys (spec §6.5)', () => {
       rule: 'U6',
       selection: { add: ['a.pdf'] },
     });
+  });
+
+  it('interim: untracked Google-native files are candidates only', () => {
+    const result = run({ selection: ['Plan.docx'], remote: [nativeEntry('g1', 'Plan.docx')] });
+    expect(result.actions).toEqual([]);
+    expect(result.candidates.remote.map((c) => c.path)).toEqual(['Plan.docx']);
+    // Not selected and new after the first run (U6 for a binary): still no download.
+    const fresh = run({ remote: [nativeEntry('g2', 'Fresh.docx', { modifiedTime: NEW })] });
+    expect(fresh.actions).toEqual([]);
+    expect(fresh.candidates.remote.map((c) => c.path)).toEqual(['Fresh.docx']);
+    // Selected with a local file of the same name (U2 for a binary): no adopt or conflict.
+    const withLocal = run({
+      selection: ['Plan.docx'],
+      local: [localEntry('Plan.docx')],
+      remote: [nativeEntry('g1', 'Plan.docx')],
+      md5s: [['Plan.docx', 'md5-local']],
+    });
+    expect(withLocal.actions).toEqual([]);
+  });
+
+  it('a Drive native and a binary with the same export key are ambiguous (no action)', () => {
+    const result = run({
+      remote: [nativeEntry('g1', 'Plan.docx'), remoteEntry('b1', 'Plan.docx')],
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toMatchObject([{ code: 'ambiguous', path: 'Plan.docx' }]);
   });
 
   it('U7 new Drive file colliding with a local file → collision', () => {

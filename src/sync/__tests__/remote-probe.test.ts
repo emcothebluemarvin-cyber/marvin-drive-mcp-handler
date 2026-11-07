@@ -57,8 +57,21 @@ describe('probeRecord', () => {
     expect((await probeRecord('r', scan(), getter({ r: binary('r', 'a.pdf', 'd1') }))).state).toBe(
       'unknown',
     );
-    const native = { ...binary('r', 'a', 'f1'), mimeType: GOOGLE_MIME.document };
-    expect((await probeRecord('r', scan(), getter({ r: native }))).state).toBe('unknown');
+  });
+
+  it('classifies Google-native files like the scanner (export key; unsupported → unknown)', async () => {
+    const doc = { ...binary('r', 'Plan', 'f1'), mimeType: GOOGLE_MIME.document };
+    expect(await probeRecord('r', scan(), getter({ r: doc }))).toMatchObject({
+      state: 'present',
+      entry: { key: 'docs/Plan.docx', md5: null, native: { exportFormat: 'docx' } },
+    });
+    const form = { ...binary('r', 'Survey', 'f1'), mimeType: 'application/vnd.google-apps.form' };
+    expect(await probeRecord('r', scan(), getter({ r: form }))).toEqual({
+      state: 'unknown',
+      reason: 'is a Google file type that cannot be exported',
+    });
+    const dir = { ...binary('r', 'sub', 'f1'), mimeType: GOOGLE_MIME.folder };
+    expect((await probeRecord('r', scan(), getter({ r: dir }))).state).toBe('unknown');
   });
 
   it('is unknown when nested under an unscanned folder inside the pair', async () => {

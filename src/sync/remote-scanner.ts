@@ -1,9 +1,16 @@
 import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
-import { GOOGLE_MIME, isGoogleNative } from '../files/export-formats.js';
+import { GOOGLE_MIME } from '../files/export-formats.js';
 import { escapeQueryValue } from '../files/query.js';
 import { isAbortError } from './errors.js';
-import { foldKey, isIgnoredName, isRepresentable } from './paths.js';
-import { SYNC_FILE_FIELDS, type RemoteEntry, type RemoteScan } from './types.js';
+import { baseName, foldKey, isIgnoredName, isRepresentable } from './paths.js';
+import { classifyRemote, exportKey, type RemoteKind } from './remote-kinds.js';
+import {
+  DEFAULT_GOOGLE_EXPORT,
+  SYNC_FILE_FIELDS,
+  type GoogleExportPrefs,
+  type RemoteEntry,
+  type RemoteScan,
+} from './types.js';
 
 export const SYNC_LIST_FIELDS = `nextPageToken, files(${SYNC_FILE_FIELDS})`;
 export const SYNC_PAGE_SIZE = 1000;
@@ -28,23 +35,32 @@ export function toRemoteEntry(
   parentKeyValue: string,
   parentId: string,
   ancestorIds: string[],
+  kind: RemoteKind = { kind: 'binary' },
 ): RemoteEntry {
-  const key = joinKey(parentKeyValue, file.name ?? '');
+  const name = file.name ?? '';
+  const native =
+    kind.kind === 'native'
+      ? { mimeType: kind.mimeType, exportFormat: kind.exportFormat, exportMime: kind.exportMime }
+      : null;
+  const key =
+    kind.kind === 'native'
+      ? exportKey(parentKeyValue, name, kind.extension)
+      : joinKey(parentKeyValue, name);
   return {
     id: file.id ?? '',
     key,
     foldKey: foldKey(key),
-    name: file.name ?? '',
+    name,
     parentId,
     ancestorIds,
     mimeType: file.mimeType ?? 'application/octet-stream',
-    md5: file.md5Checksum ?? null,
-    size: file.size ? Number(file.size) : null,
+    md5: native ? null : (file.md5Checksum ?? null),
+    size: native || !file.size ? null : Number(file.size),
     modifiedTime: file.modifiedTime ?? '',
     createdTime: file.createdTime ?? '',
     canEdit: file.capabilities?.canEdit ?? false,
     canTrash: file.capabilities?.canTrash ?? false,
-    native: null,
+    native,
   };
 }
 
@@ -61,10 +77,15 @@ async function listAll(list: FolderLister, folderId: string): Promise<DriveFile[
 
 /**
  * Breadth-first walk of the pair's Drive folder (spec §4 remote-scanner). Duplicate
- * folder names and failed listings become unknown subtrees; shortcuts, Google-native
- * files (Phase A), unrepresentable and dot/part names are ignored and reported.
+ * folder names and failed listings become unknown subtrees. Google-native files are
+ * classified by remote-kinds and keyed by their export name; shortcuts, natives that
+ * cannot be exported, unrepresentable and dot/part names are ignored and reported.
  */
-export async function scanRemote(rootId: string, list: FolderLister): Promise<RemoteScan> {
+export async function scanRemote(
+  rootId: string,
+  list: FolderLister,
+  prefs: GoogleExportPrefs = DEFAULT_GOOGLE_EXPORT,
+): Promise<RemoteScan> {
   const scan: RemoteScan = {
     entries: [],
     ignored: [],
@@ -118,10 +139,18 @@ export async function scanRemote(rootId: string, list: FolderLister): Promise<Re
         }
       } else if (f.mimeType === GOOGLE_MIME.shortcut) {
         scan.ignored.push({ id, path: key, reason: 'shortcut', isFolder: false });
-      } else if (isGoogleNative(f.mimeType ?? '')) {
-        scan.ignored.push({ id, path: key, reason: 'native-skipped', isFolder: false });
       } else {
-        scan.entries.push(toRemoteEntry(f, folder.key, folder.id, folder.ancestors));
+        const kind = classifyRemote(f, prefs);
+        if (kind.kind === 'unsupported') {
+          scan.ignored.push({ id, path: key, reason: kind.reason, isFolder: false });
+          continue;
+        }
+        const entry = toRemoteEntry(f, folder.key, folder.id, folder.ancestors, kind);
+        if (!isRepresentable(baseName(entry.key))) {
+          scan.ignored.push({ id, path: key, reason: 'unrepresentable', isFolder: false });
+        } else {
+          scan.entries.push(entry);
+        }
       }
     }
   }

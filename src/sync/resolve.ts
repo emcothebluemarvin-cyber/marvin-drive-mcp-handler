@@ -169,8 +169,15 @@ export type RemoteResolution =
 export function resolveRemote(ctx: PlanContext, record: SyncRecord): RemoteResolution {
   const scanned = ctx.remoteById.get(record.remoteId);
   if (scanned) return { kind: 'present', entry: scanned, moved: scanned.key !== record.path };
-  if (ctx.ignoredById.has(record.remoteId)) {
-    return { kind: 'unknown', reason: 'renamed in Drive to a name that cannot be synced' };
+  const ignored = ctx.ignoredById.get(record.remoteId);
+  if (ignored) {
+    return {
+      kind: 'unknown',
+      reason:
+        ignored.reason === 'native-unsupported'
+          ? 'is a Google file type that cannot be exported'
+          : 'renamed in Drive to a name that cannot be synced',
+    };
   }
   const probe = ctx.input.probes.get(record.remoteId);
   if (!probe) return { kind: 'unknown', reason: 'Drive file was not probed' };

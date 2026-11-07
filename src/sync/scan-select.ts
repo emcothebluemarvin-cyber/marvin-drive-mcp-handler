@@ -73,15 +73,18 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
 
 /** Breadth-first scan of the pair's Drive folder (no local work). */
 export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
-  return scanRemote(pair.remoteFolderId, (folderId, pageToken) =>
-    env.ops.exec(pair.account, 'idempotent', folderId, (ctx) =>
-      ctx.drive.listFiles({
-        q: childrenQuery(folderId),
-        pageSize: SYNC_PAGE_SIZE,
-        ...(pageToken ? { pageToken } : {}),
-        fields: SYNC_LIST_FIELDS,
-      }),
-    ),
+  return scanRemote(
+    pair.remoteFolderId,
+    (folderId, pageToken) =>
+      env.ops.exec(pair.account, 'idempotent', folderId, (ctx) =>
+        ctx.drive.listFiles({
+          q: childrenQuery(folderId),
+          pageSize: SYNC_PAGE_SIZE,
+          ...(pageToken ? { pageToken } : {}),
+          fields: SYNC_LIST_FIELDS,
+        }),
+      ),
+    pair.googleExport,
   );
 }
 

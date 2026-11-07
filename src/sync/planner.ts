@@ -80,13 +80,14 @@ export function plan(input: PlanInput): Plan {
 
   for (const ignored of input.remote.ignored) {
     if (ctx.trackedIds.has(ignored.id)) continue;
-    if (ignored.reason === 'native-skipped') {
+    if (ignored.reason === 'native-unsupported') {
       notes.push({
-        code: 'native-skipped',
+        code: 'native-unsupported',
         path: ignored.path,
         rule: 'ignored',
         remoteId: ignored.id,
-        message: 'Google Docs/Sheets/Slides sync arrives in Phase B',
+        message:
+          'Google Forms, Sites, Apps Script and similar files cannot be exported; they are not synced',
       });
     } else if (ignored.reason === 'unrepresentable') {
       notes.push({
