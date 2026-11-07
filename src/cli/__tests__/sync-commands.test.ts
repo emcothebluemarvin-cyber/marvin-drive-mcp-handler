@@ -169,6 +169,16 @@ describe('formatReport', () => {
     );
   });
 
+  it('shows remote-only counts and the releasable hint', async () => {
+    const text = formatReport({ ...REPORT, releasable: ['a.pdf', 'b.pdf'] });
+    expect(text).toContain(
+      'Releasable: 2 file(s) are in sync — marvin-drive sync release docs --all (dry run first)',
+    );
+    const { lines, run } = setup();
+    await run('list');
+    expect(lines[0]).toContain('remote-only 0');
+  });
+
   it('releases named paths or --all, dry run unless --apply', async () => {
     const { service, run, lines, deps } = setup();
     await run('release', 'docs', 'a.pdf', 'b.pdf');

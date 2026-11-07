@@ -8,7 +8,7 @@ export function formatPairs(pairs: readonly PairSummary[]): string {
     .map((p) => {
       const c = p.counts;
       const last = p.lastAppliedRunAt ?? 'never';
-      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
+      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
     })
     .join('\n');
 }
@@ -68,6 +68,11 @@ export function formatReport(r: SyncReport): string {
         : '  Delete in Drive too: run a new dry run, then apply it with its --plan-id and --confirm-remote-trash',
       `  Keep in Drive only: marvin-drive sync release ${r.pair} <paths…> --apply`,
       '  (Confirming covers all of them; release the ones to keep first.)',
+    );
+  }
+  if (r.releasable && r.releasable.length > 0) {
+    lines.push(
+      `Releasable: ${r.releasable.length} file(s) are in sync — marvin-drive sync release ${r.pair} --all (dry run first)`,
     );
   }
   const { local, remote, truncated } = r.candidates;
