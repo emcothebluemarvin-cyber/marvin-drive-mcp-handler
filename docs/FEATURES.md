@@ -55,7 +55,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ Shared inbox with read state; delivery by `UserPromptSubmit` hook (`changes --hook`) or Claude Code channel push
 - ✅ Third-party text sanitized and marked untrusted; server instructions forbid acting on it
 - ✅ Provider seam (`ChangeFeed`, `ContentSnapshotter`) for a later OneDrive provider; no runtime `googleapis` outside `src/watch/google`
-- ⬜ Live E2E with two accounts (`MARVIN_E2E_EDITOR`)
+- ⬜ Live E2E with two accounts (`MARVIN_E2E_EDITOR`): written, not run live yet
 - ⬜ Comment-only changes polled separately if Drive does not report them (decided by the live E2E, plan Task 33)
 
 ## Later

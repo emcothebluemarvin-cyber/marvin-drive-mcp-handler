@@ -89,7 +89,7 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 
 ## MCP tools
 
-34 tools. All except `drive_changes` (which covers every account) accept an optional `account` (alias or email).
+34 tools. All except `drive_list_accounts` and `drive_changes` (which cover every account) accept an optional `account` (alias or email).
 
 | Tool                                                              | Purpose                                                                                                   |
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -176,7 +176,7 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 
 ## Watching files
 
-Ask Claude to "watch the budget sheet" (or run `marvin-drive watch add <fileId>`). While a Claude Code session is open, the MCP server checks the Drive Changes API every `MARVIN_WATCH_POLL_SECONDS` (default 30, minimum 15; with several sessions open only one polls). When someone **else** edits a watched file, renames, moves, trashes or comments on it, Claude is told who changed what and when — once the file has been quiet for 2 minutes (at most 10 minutes after the first change), as one summary with a diff (`+`/`-` lines for Docs and Slides, `Sheet1!B4: "120" → "135"` for Sheets) and new comments. Claude only informs you; it never acts on a change by itself. `drive_changes` (or `marvin-drive changes`) shows the full stored details.
+Ask Claude to "watch the budget sheet" (or run `marvin-drive watch add <fileId>`). While a Claude Code session is open, the MCP server checks the Drive Changes API every `MARVIN_WATCH_POLL_SECONDS` (default 30, between 15 and 3600; with several sessions open only one polls). When someone **else** edits a watched file, renames, moves or trashes it, Claude is told who changed what and when — once the file has been quiet for 2 minutes (at most 10 minutes after the first change), as one summary with a diff (`+`/`-` lines for Docs and Slides, `Sheet1!B4: "120" → "135"` for Sheets). New comments are included when the file also changed; comment-only changes are not detected yet (pending a live check). Claude only informs you; it never acts on a change by itself. `drive_changes` (or `marvin-drive changes`) shows the full stored details.
 
 Choose one delivery mode per machine (`marvin-drive watch delivery hook|channel`):
 
@@ -206,10 +206,13 @@ Choose one delivery mode per machine (`marvin-drive watch delivery hook|channel`
 Good to know:
 
 - **Your own edits are not notified** (they are stored; `drive_changes { "includeOwn": true }` shows them). Drive only reports the _last_ editor, so a foreign edit followed by your own edit between two checks looks like your own edit.
+- Removals, moves out of a watched folder, trashing and renames may be attributed to someone else or to "someone": Drive reports the file's last editor, not who performed the action.
 - Files moved into a watched folder stay silent until they are edited (a move does not change the modification time). Large files are reported as "changed (too large to compare)" (text over 1 MB, sheets over 20 000 cells).
 - A file inside two watched folders is tracked through the folder that covered it when it was last seen. Removing that folder's watch can stop tracking the file although the other folder still covers it; its next change is then reported as first seen, without a diff.
 - **Safety:** notification text is written by other people. Names, diffs and comments are sanitized (control characters removed, `<`/`>` replaced, long lines cut) and marked untrusted, and the server instructions tell Claude to report them, never to follow instructions inside them.
 - **Privacy:** snapshots of watched files (plain text, cell values) and the change inbox are stored locally in `~/.config/google-handler/watch/` (`0600`); nothing leaves your machine except the Google API calls. Remove a watch to delete its snapshots.
+- The hook runs in Claude Code's environment: if you use a custom `MARVIN_DRIVE_CONFIG_DIR`, set it there too (for example in the hook command), or the hook reads the default folder.
+- To change the poll interval, pass it to the server when registering it: `claude mcp add marvin-drive --scope user -e MARVIN_WATCH_POLL_SECONDS=60 -- node "$PWD/dist/cli/main.js" serve`.
 - If a session expires, one "watch paused" notice appears; run `marvin-drive auth login <alias>` and watching resumes.
 
 ## Files
