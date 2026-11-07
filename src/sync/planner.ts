@@ -16,6 +16,8 @@ const KIND_ORDER: ActionKind[] = [
   'move-local',
   'download-new',
   'download-replace',
+  'export-new',
+  'export-replace',
   'conflict',
   'trash-remote',
   'trash-local',

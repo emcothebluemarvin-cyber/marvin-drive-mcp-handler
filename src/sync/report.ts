@@ -67,11 +67,17 @@ export function buildReport(pairName: string, plan: Plan, opts: ReportOptions): 
           ...(o.conflictCopy ? { conflictCopy: o.conflictCopy } : {}),
         });
       }
-      if (o.warning) report.warnings.push({ path: o.path, code: o.warning });
+      if (o.warning) {
+        report.warnings.push({
+          path: o.path,
+          code: o.warning,
+          ...(o.message ? { message: o.message } : {}),
+        });
+      }
     } else if (o.status === 'skipped') {
       report.warnings.push({
         path: o.path,
-        code: 'skipped-changed',
+        code: o.warning ?? 'skipped-changed',
         ...(o.message ? { message: o.message } : {}),
       });
     } else if (o.status === 'collision') {
@@ -80,6 +86,14 @@ export function buildReport(pairName: string, plan: Plan, opts: ReportOptions): 
       report.failures.push({ path: o.path, kind: o.kind, message: o.message ?? 'failed' });
     } else {
       report.notRun.push(o.path);
+    }
+    // N5: an export that did not finish still moved the local edit aside; name the kept copy.
+    if (o.status !== 'done' && o.conflictCopy) {
+      report.warnings.push({
+        path: o.path,
+        code: 'native-local-edit-kept',
+        message: `your local edit is kept as ${o.conflictCopy}`,
+      });
     }
   }
   return report;

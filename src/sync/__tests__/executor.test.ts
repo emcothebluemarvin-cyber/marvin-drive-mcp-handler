@@ -17,9 +17,20 @@ import {
 } from '../../files/__tests__/fakes.js';
 import { Executor, conflictName } from '../executor.js';
 import { foldKey } from '../paths.js';
+import type { DriveFile } from '../../drive/drive-adapter.js';
+import { GOOGLE_MIME } from '../../files/export-formats.js';
+import { SYNC_EXPORT_FIELDS } from '../exec-export.js';
 import type { Action, LocalEntry, PairFile, RemoteEntry, SyncRecord } from '../types.js';
 import type { LocalTrash } from '../trash.js';
-import { ROOT_ID, dirTrash, makePairFile, record, remoteEntry } from './fixtures.js';
+import {
+  ROOT_ID,
+  dirTrash,
+  makePairFile,
+  nativeEntry,
+  nativeRecord,
+  record,
+  remoteEntry,
+} from './fixtures.js';
 
 const NOW = new Date('2026-11-03T10:15:00');
 const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
@@ -599,6 +610,188 @@ describe('Executor (review regressions)', () => {
     expect(drive.createFile.mock.calls[0]?.[0].requestBody).toEqual({
       name: 'a.pdf',
       parents: ['F-Docs'],
+    });
+  });
+});
+
+describe('Executor exports (Google-native)', () => {
+  const NEWER = '2026-11-04T00:00:00.000Z';
+  const DOC = nativeEntry('g1', 'Plan.docx');
+
+  function current(r: RemoteEntry, extra: DriveFile = {}): DriveFile {
+    return {
+      id: r.id,
+      name: r.name,
+      mimeType: r.mimeType,
+      modifiedTime: r.modifiedTime,
+      parents: [r.parentId],
+      trashed: false,
+      webViewLink: `https://docs/${r.id}`,
+      exportLinks: { [r.native?.exportMime ?? '']: `https://export/${r.id}` },
+      ...extra,
+    };
+  }
+  function exportServes(content: string): void {
+    drive.exportMedia.mockImplementation(async () => Readable.from([Buffer.from(content)]));
+  }
+  it('export-new re-reads the file, writes the export and records a native record', async () => {
+    drive.getFile.mockResolvedValueOnce(current(DOC));
+    exportServes('DOCX v1');
+    const out = await executor(pairFile([], ['Plan.docx'])).run([
+      action('export-new', 'Plan.docx', { remote: DOC }),
+    ]);
+    expect(out).toEqual([{ kind: 'export-new', path: 'Plan.docx', status: 'done' }]);
+    expect(drive.getFile).toHaveBeenCalledWith('g1', SYNC_EXPORT_FIELDS);
+    expect(drive.exportMedia).toHaveBeenCalledWith('g1', DOC.native?.exportMime);
+    expect(await readFile(path.join(dir, 'Plan.docx'), 'utf8')).toBe('DOCX v1');
+    expect(saves.at(-1)?.records).toMatchObject([
+      {
+        remoteId: 'g1',
+        path: 'Plan.docx',
+        remoteName: 'Plan',
+        localMd5: md5('DOCX v1'),
+        remoteMd5: null,
+        native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx' },
+      },
+    ]);
+    expect(audit.entries.map((e) => e.op)).toEqual(['sync_download']);
+  });
+  it('skips an export when the re-read shows a change or the trash', async () => {
+    const other = nativeEntry('g2', 'Other.docx');
+    drive.getFile.mockResolvedValueOnce(current(DOC, { modifiedTime: NEWER }));
+    drive.getFile.mockResolvedValueOnce(current(other, { trashed: true }));
+    const out = await executor(pairFile([], ['Plan.docx', 'Other.docx'])).run([
+      action('export-new', 'Plan.docx', { remote: DOC }),
+      action('export-new', 'Other.docx', { remote: other }),
+    ]);
+    expect(out.map((o) => o.status)).toEqual(['skipped', 'skipped']);
+    expect(drive.exportMedia).not.toHaveBeenCalled();
+    expect(await readdir(dir)).toEqual([]);
+  });
+  it('export-replace overwrites the tracked export while it is unchanged', async () => {
+    const l = await put('Plan.docx', 'DOCX v1');
+    const k = nativeRecord('g1', 'Plan.docx', { localMd5: md5('DOCX v1') });
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    exportServes('DOCX v2');
+    const out = await executor(pairFile([k])).run([
+      action('export-replace', 'Plan.docx', {
+        record: k,
+        local: l,
+        localMd5: k.localMd5,
+        remote: r,
+      }),
+    ]);
+    expect(out[0]?.status).toBe('done');
+    expect(await readFile(path.join(dir, 'Plan.docx'), 'utf8')).toBe('DOCX v2');
+    expect(saves.at(-1)?.records[0]).toMatchObject({
+      localMd5: md5('DOCX v2'),
+      remoteModifiedTime: NEWER,
+    });
+  });
+  it('N5 moves the local edit aside after the re-read, then exports', async () => {
+    const l = await put('Plan.docx', 'my edit');
+    const k = nativeRecord('g1', 'Plan.docx');
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    exportServes('DOCX v2');
+    const out = await executor(pairFile([k])).run([
+      action('export-new', 'Plan.docx', {
+        record: k,
+        local: l,
+        localMd5: md5('my edit'),
+        remote: r,
+        localEdit: true,
+      }),
+    ]);
+    const kept = 'Plan (local edit 2026-11-03 10.15).docx';
+    expect(out[0]).toMatchObject({
+      status: 'done',
+      conflictCopy: kept,
+      warning: 'native-local-edit-kept',
+    });
+    expect(await readFile(path.join(dir, kept), 'utf8')).toBe('my edit');
+    expect(await readFile(path.join(dir, 'Plan.docx'), 'utf8')).toBe('DOCX v2');
+  });
+  it('N5 leaves the local edit where it is when the re-read shows a change', async () => {
+    const l = await put('Plan.docx', 'my edit');
+    const k = nativeRecord('g1', 'Plan.docx');
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r, { modifiedTime: '2026-11-05T00:00:00.000Z' }));
+    const out = await executor(pairFile([k])).run([
+      action('export-new', 'Plan.docx', { record: k, local: l, remote: r, localEdit: true }),
+    ]);
+    expect(out[0]?.status).toBe('skipped');
+    expect(await readdir(dir)).toEqual(['Plan.docx']);
+    expect(await readFile(path.join(dir, 'Plan.docx'), 'utf8')).toBe('my edit');
+  });
+  it('N5 does not move the local edit when the export cannot be opened (too large)', async () => {
+    const l = await put('Plan.docx', 'my edit');
+    const k = nativeRecord('g1', 'Plan.docx');
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    drive.exportMedia.mockRejectedValueOnce(httpError(403, 'exportSizeLimitExceeded'));
+    drive.fetchExportLink.mockRejectedValueOnce(httpError(403));
+    const out = await executor(pairFile([k])).run([
+      action('export-new', 'Plan.docx', { record: k, local: l, remote: r, localEdit: true }),
+    ]);
+    expect(out[0]).toMatchObject({ status: 'skipped', warning: 'native-too-large' });
+    expect(out[0]?.conflictCopy).toBeUndefined();
+    expect(await readdir(dir)).toEqual(['Plan.docx']);
+    expect(await readFile(path.join(dir, 'Plan.docx'), 'utf8')).toBe('my edit');
+  });
+  it('N5 reports the kept name when the export breaks after the edit was moved', async () => {
+    const l = await put('Plan.docx', 'my edit');
+    const k = nativeRecord('g1', 'Plan.docx');
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    const broken = new Readable({
+      read() {
+        this.destroy(new Error('connection reset'));
+      },
+    });
+    drive.exportMedia.mockResolvedValueOnce(broken);
+    const out = await executor(pairFile([k])).run([
+      action('export-new', 'Plan.docx', { record: k, local: l, remote: r, localEdit: true }),
+    ]);
+    const kept = 'Plan (local edit 2026-11-03 10.15).docx';
+    expect(out[0]).toMatchObject({ status: 'failed', conflictCopy: kept });
+    expect(await readFile(path.join(dir, kept), 'utf8')).toBe('my edit');
+    expect(saves).toEqual([]);
+  });
+  it('reports native-too-large and keeps the record when both export paths fail', async () => {
+    drive.getFile.mockResolvedValueOnce(current(DOC));
+    drive.exportMedia.mockRejectedValueOnce(httpError(403, 'exportSizeLimitExceeded'));
+    drive.fetchExportLink.mockRejectedValueOnce(httpError(403));
+    const out = await executor(pairFile([], ['Plan.docx'])).run([
+      action('export-new', 'Plan.docx', { remote: DOC }),
+    ]);
+    expect(out[0]).toMatchObject({ status: 'skipped', warning: 'native-too-large' });
+    expect(out[0]?.message).toContain('https://docs/g1');
+    expect(saves).toEqual([]);
+  });
+  it('move-local of a native record exports the newer content after the move (N6)', async () => {
+    const l = await put('Plan.docx', 'DOCX v1');
+    const k = nativeRecord('g1', 'Plan.docx', { localMd5: md5('DOCX v1') });
+    const r = nativeEntry('g1', 'sub/Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    exportServes('DOCX v2');
+    const out = await executor(pairFile([k])).run([
+      action('move-local', 'sub/Plan.docx', {
+        record: k,
+        local: l,
+        localMd5: k.localMd5,
+        remote: r,
+        thenDownload: true,
+        selection: { remove: ['Plan.docx'], add: ['sub/Plan.docx'] },
+      }),
+    ]);
+    expect(out[0]?.status).toBe('done');
+    expect(await readFile(path.join(dir, 'sub', 'Plan.docx'), 'utf8')).toBe('DOCX v2');
+    expect(drive.downloadMedia).not.toHaveBeenCalled();
+    expect(saves.at(-1)?.records[0]).toMatchObject({
+      path: 'sub/Plan.docx',
+      native: { exportFormat: 'docx' },
     });
   });
 });

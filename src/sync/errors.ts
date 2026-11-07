@@ -58,3 +58,15 @@ export function messageOf(err: unknown): string {
   if (err instanceof AppError) return err.message;
   return err instanceof Error ? err.message : String(err);
 }
+
+/** N5: an export failed after the local edit was moved aside; carries the kept name. */
+export class LocalEditKeptError extends AppError {
+  readonly code = 'SYNC_LOCAL_EDIT_KEPT';
+
+  constructor(
+    readonly kept: string,
+    readonly original: unknown,
+  ) {
+    super(`${messageOf(original)}; your local edit is kept as ${kept}`, { cause: original });
+  }
+}

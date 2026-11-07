@@ -1,4 +1,5 @@
 import type { DriveFile } from '../drive/drive-adapter.js';
+import { ValidationError } from '../errors.js';
 import { foldKey } from './paths.js';
 import type { StatExpect } from './transfer.js';
 import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
@@ -10,6 +11,7 @@ export interface RemoteFields {
   md5: string | null;
   size: number | null;
   modifiedTime: string;
+  native: SyncRecord['native'];
 }
 
 export interface LocalFields {
@@ -28,6 +30,7 @@ export function fromEntry(e: RemoteEntry): RemoteFields {
     md5: e.md5,
     size: e.size,
     modifiedTime: e.modifiedTime,
+    native: e.native ? { mimeType: e.native.mimeType, exportFormat: e.native.exportFormat } : null,
   };
 }
 
@@ -39,6 +42,8 @@ export function fromDrive(f: DriveFile, fallbackParent: string): RemoteFields {
     md5: f.md5Checksum ?? null,
     size: f.size ? Number(f.size) : null,
     modifiedTime: f.modifiedTime ?? '',
+    // Uploads are binary files.
+    native: null,
   };
 }
 
@@ -60,7 +65,7 @@ export function makeRecord(key: string, local: LocalFields, remote: RemoteFields
     remoteMd5: remote.md5,
     remoteSize: remote.size,
     remoteModifiedTime: remote.modifiedTime,
-    native: null,
+    native: remote.native,
     remoteOnly: false,
     restorePending: false,
     remoteTrashed: false,
@@ -71,13 +76,30 @@ function pad(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
-export function conflictName(base: string, at: Date, attempt: number): string {
+function stamped(base: string, label: string, at: Date, attempt: number): string {
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
   const ext = dot > 0 ? base.slice(dot) : '';
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}.${pad(at.getMinutes())}`;
-  return `${stem} (Drive conflict ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
+  return `${stem} (${label} ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
+}
+
+/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
+export function conflictName(base: string, at: Date, attempt: number): string {
+  return stamped(base, 'Drive conflict', at, attempt);
+}
+
+/** `<stem> (local edit YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.6 N5). */
+export function localEditName(base: string, at: Date, attempt: number): string {
+  return stamped(base, 'local edit', at, attempt);
+}
+
+/** Internal guard: an action lacks a field its kind needs (shared by every executor module). */
+export function need<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) {
+    throw new ValidationError(`Internal: ${what} missing for sync action`);
+  }
+  return value;
 }
 
 export function applySelection(file: PairFile, change: SelectionChange): void {

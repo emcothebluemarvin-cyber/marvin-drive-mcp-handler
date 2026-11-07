@@ -97,4 +97,57 @@ describe('buildReport', () => {
     const aborted = { reason: 'mass-delete' as const, message: 'too many' };
     expect(buildReport('docs', PLAN, { dryRun: true, aborted }).aborted).toEqual(aborted);
   });
+  it('uses the outcome warning as the skip code and keeps done-outcome messages', () => {
+    const kept = 'Plan (local edit 2026-11-03 10.15).docx';
+    const report = buildReport('docs', PLAN, {
+      dryRun: false,
+      outcomes: [
+        {
+          kind: 'export-new',
+          path: 'Big.docx',
+          status: 'skipped',
+          message: 'too large',
+          warning: 'native-too-large',
+        },
+        {
+          kind: 'export-new',
+          path: 'Plan.docx',
+          status: 'done',
+          conflictCopy: kept,
+          warning: 'native-local-edit-kept',
+          message: `your local edit is kept as ${kept}`,
+        },
+      ],
+    });
+    expect(report.actions).toEqual({ 'export-new': ['Plan.docx'] });
+    expect(report.warnings.slice(1)).toEqual([
+      { path: 'Big.docx', code: 'native-too-large', message: 'too large' },
+      {
+        path: 'Plan.docx',
+        code: 'native-local-edit-kept',
+        message: `your local edit is kept as ${kept}`,
+      },
+    ]);
+  });
+  it('names the kept local edit on a failed export', () => {
+    const kept = 'Plan (local edit 2026-11-03 10.15).docx';
+    const report = buildReport('docs', PLAN, {
+      dryRun: false,
+      outcomes: [
+        {
+          kind: 'export-new',
+          path: 'Plan.docx',
+          status: 'failed',
+          message: 'boom',
+          conflictCopy: kept,
+        },
+      ],
+    });
+    expect(report.failures).toEqual([{ path: 'Plan.docx', kind: 'export-new', message: 'boom' }]);
+    expect(report.warnings.at(-1)).toEqual({
+      path: 'Plan.docx',
+      code: 'native-local-edit-kept',
+      message: `your local edit is kept as ${kept}`,
+    });
+  });
 });

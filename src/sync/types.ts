@@ -153,6 +153,8 @@ export type ActionKind =
   | 'update-remote'
   | 'download-new'
   | 'download-replace'
+  | 'export-new'
+  | 'export-replace'
   | 'move-local'
   | 'conflict'
   | 'trash-remote'
@@ -188,6 +190,8 @@ export interface Action {
   updateRemote?: boolean;
   /** upload-new: replaces this trashed record (B11). */
   rebaseFrom?: string;
+  /** export-new (N5): move the locally edited L aside as `<stem> (local edit …)<ext>` first. */
+  localEdit?: boolean;
 }
 
 export type NoteCode =
