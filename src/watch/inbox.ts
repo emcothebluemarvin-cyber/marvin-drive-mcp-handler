@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { hasErrorCode } from '../errors.js';
 import { renameReplacing } from '../files/rename-replacing.js';
+import { sweepStaleTemps } from './temp-sweep.js';
 import type { ChangeEvent, EventDraft } from './types.js';
 
 export const INBOX_FILE = 'inbox.jsonl';
@@ -11,6 +12,8 @@ export const ROTATE_AT_LINES = 1_000;
 export const KEEP_NEWEST = 500;
 export const DEDUPE_WINDOW = 500;
 export const UNREAD_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+/** Rotation rewrites the file only when it drops at least this many events (or repairs lines). */
+export const MIN_ROTATE_DROP = 100;
 
 function isEvent(value: unknown): value is ChangeEvent {
   if (typeof value !== 'object' || value === null) return false;
@@ -82,11 +85,16 @@ export class Inbox {
     const lines = text.split('\n').filter((l) => l.trim() !== '').length;
     if (lines <= ROTATE_AT_LINES) return false;
     const events = parseEvents(text);
+    const raw = text.split('\n');
+    if (raw[raw.length - 1] === '') raw.pop();
+    const needsRepair = raw.length !== events.length;
     const newest = new Set(events.slice(-KEEP_NEWEST).map((e) => e.seq));
     const keep = events.filter(
       (e) =>
         newest.has(e.seq) || (isUnread(e) && now.getTime() - Date.parse(e.time) < UNREAD_KEEP_MS),
     );
+    // Many retained (unread) events: do not rewrite the whole file on every tick.
+    if (!needsRepair && events.length - keep.length < MIN_ROTATE_DROP) return false;
     const tmp = path.join(
       path.dirname(this.file),
       `.${path.basename(this.file)}.${randomUUID()}.tmp`,
@@ -120,11 +128,15 @@ export class InboxWriter {
     return this.seq;
   }
 
-  /** Called once when the lease is acquired. */
-  async init(): Promise<void> {
+  /**
+   * Called once when the lease is acquired. `floorSeq` (max of read.json `readSeq` and
+   * `pushedSeq`) keeps a deleted or truncated inbox from reusing seqs already seen.
+   */
+  async init(floorSeq = 0): Promise<void> {
+    await sweepStaleTemps(path.dirname(this.inbox.file));
     await this.inbox.repairTail();
     const events = await this.inbox.readAll();
-    this.seq = events.reduce((max, e) => Math.max(max, e.seq), 0);
+    this.seq = events.reduce((max, e) => Math.max(max, e.seq), Math.max(0, floorSeq));
     this.recent.length = 0;
     this.recentSet.clear();
     for (const e of events.slice(-DEDUPE_WINDOW)) this.remember(e.id);
@@ -150,6 +162,11 @@ export class InboxWriter {
   }
 }
 
+/** File access of the tailer (injectable for race tests). */
+export interface TailerFs {
+  open: (file: string, flags: string) => Promise<FileHandle>;
+}
+
 /** Follows the inbox by byte offset (spec §7.3); used by every process. */
 export class InboxTailer {
   private offset = 0;
@@ -157,7 +174,14 @@ export class InboxTailer {
   private partial: Buffer = Buffer.alloc(0);
   private lastSeq = 0;
 
-  constructor(private readonly file: string) {}
+  private readonly openFile: TailerFs['open'];
+
+  constructor(
+    private readonly file: string,
+    fs: Partial<TailerFs> = {},
+  ) {
+    this.openFile = fs.open ?? ((f: string, flags: string): Promise<FileHandle> => open(f, flags));
+  }
 
   /** Highest seq returned so far. */
   get seenSeq(): number {
@@ -165,9 +189,11 @@ export class InboxTailer {
   }
 
   async poll(): Promise<ChangeEvent[]> {
-    let info: { ino: number; size: number };
+    // Open first and stat the handle: inode, size and bytes all come from the same file
+    // even when the leader rotates (renames over) the inbox in between.
+    let handle: FileHandle;
     try {
-      info = await stat(this.file);
+      handle = await this.openFile(this.file, 'r');
     } catch (err) {
       if (hasErrorCode(err, 'ENOENT')) {
         this.reset();
@@ -175,14 +201,15 @@ export class InboxTailer {
       }
       throw err;
     }
-    if (this.ino !== null && (info.ino !== this.ino || info.size < this.offset)) this.reset();
-    this.ino = info.ino;
-    if (info.size <= this.offset) return [];
-    const length = info.size - this.offset;
-    const buf = Buffer.alloc(length);
-    const handle = await open(this.file, 'r');
     let bytesRead: number;
+    let buf: Buffer;
     try {
+      const info = await handle.stat();
+      if (this.ino !== null && (info.ino !== this.ino || info.size < this.offset)) this.reset();
+      this.ino = info.ino;
+      if (info.size <= this.offset) return [];
+      const length = info.size - this.offset;
+      buf = Buffer.alloc(length);
       ({ bytesRead } = await handle.read(buf, 0, length, this.offset));
     } finally {
       await handle.close();

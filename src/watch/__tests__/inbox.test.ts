@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -89,5 +89,62 @@ describe('InboxWriter', () => {
       makeEvent({ seq: 1 }).id,
       'next',
     ]);
+  });
+});
+
+describe('Inbox review fixes', () => {
+  const now = new Date('2026-11-07T12:00:00.000Z');
+  const young = '2026-11-06T00:00:00.000Z';
+  const many = (n: number): ChangeEvent[] =>
+    Array.from({ length: n }, (_, i) => makeEvent({ seq: i + 1, time: young }));
+
+  it('does not rewrite the file when rotation would drop fewer than 100 events', async () => {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      many(ROTATE_AT_LINES + 1)
+        .map(line)
+        .join(''),
+    );
+    const inode = (await stat(file)).ino;
+    const inbox = new Inbox(file);
+    expect(await inbox.rotateIfNeeded(() => true, now)).toBe(false);
+    expect(await inbox.rotateIfNeeded(() => true, now)).toBe(false);
+    expect((await stat(file)).ino).toBe(inode);
+  });
+
+  it('rotates to repair torn or blank lines even when few events are dropped', async () => {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      `${many(ROTATE_AT_LINES + 1)
+        .map(line)
+        .join('')}\nnot json\n`,
+    );
+    const inbox = new Inbox(file);
+    expect(await inbox.rotateIfNeeded(() => true, now)).toBe(true);
+    const text = await readFile(file, 'utf8');
+    expect(text.trim().split('\n')).toHaveLength(ROTATE_AT_LINES + 1);
+    expect(text).not.toContain('not json');
+  });
+
+  it('InboxWriter never reuses a seq at or below the given floor', async () => {
+    const writer = new InboxWriter(new Inbox(file));
+    await writer.init(41);
+    expect((await writer.append(makeDraft({ id: 'n' })))?.seq).toBe(42);
+  });
+
+  it('InboxWriter.init sweeps temp files older than an hour', async () => {
+    const watchDir = path.dirname(file);
+    await mkdir(watchDir, { recursive: true });
+    const oldTmp = path.join(watchDir, '.inbox.jsonl.abc.tmp');
+    const newTmp = path.join(watchDir, '.inbox.jsonl.def.tmp');
+    await writeFile(oldTmp, 'x');
+    await writeFile(newTmp, 'x');
+    const hourAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await utimes(oldTmp, hourAgo, hourAgo);
+    await new InboxWriter(new Inbox(file)).init();
+    await expect(stat(oldTmp)).rejects.toThrow();
+    await expect(stat(newTmp)).resolves.toBeDefined();
   });
 });

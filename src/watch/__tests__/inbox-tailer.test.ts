@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -58,5 +58,26 @@ describe('InboxTailer', () => {
     await t.poll();
     await writeFile(file, line(makeEvent({ seq: 4 })));
     expect(seqs(await t.poll())).toEqual([4]);
+  });
+});
+
+describe('InboxTailer review fixes', () => {
+  it('takes inode and size from the opened file (rotation between stat and open)', async () => {
+    await writeFile(file, [1, 2, 3, 4].map((s) => line(makeEvent({ seq: s }))).join(''));
+    let rotateOnOpen = false;
+    const t = new InboxTailer(file, {
+      open: async (p, flags) => {
+        if (rotateOnOpen) {
+          rotateOnOpen = false;
+          const tmp = path.join(dir, 'tmp');
+          await writeFile(tmp, [3, 4, 5, 6].map((s) => line(makeEvent({ seq: s }))).join(''));
+          await rename(tmp, file);
+        }
+        return open(p, flags);
+      },
+    });
+    expect(seqs(await t.poll())).toEqual([1, 2, 3, 4]);
+    rotateOnOpen = true;
+    expect(seqs(await t.poll())).toEqual([5, 6]);
   });
 });

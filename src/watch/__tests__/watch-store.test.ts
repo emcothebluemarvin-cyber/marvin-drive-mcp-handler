@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -6,7 +6,7 @@ import { expectMode } from '../../__tests__/fs-mode.js';
 import { FileLockBusyError } from '../../core/file-lock.js';
 import { ValidationError } from '../../errors.js';
 import { silentLogger } from '../../files/__tests__/fakes.js';
-import { emptyState, type AccountState } from '../types.js';
+import { UNKNOWN_READ_SEQ, emptyState, type AccountState } from '../types.js';
 import { WatchStore } from '../watch-store.js';
 import { fileEntry } from './fakes.js';
 
@@ -85,9 +85,13 @@ describe('WatchStore snapshots, read state and config', () => {
     const s = store();
     expect(await s.loadRead()).toEqual({ readSeq: 0, readIds: [], pushedSeq: 0 });
     expect(await s.loadDelivery()).toBe('hook');
-    await s.saveRead({ readSeq: 3, readIds: ['x'], pushedSeq: 2 });
+    await s.saveRead({ readSeq: 3, readIds: [{ id: 'x', seq: 4 }], pushedSeq: 2 });
     await s.saveDelivery('channel');
-    expect(await s.loadRead()).toEqual({ readSeq: 3, readIds: ['x'], pushedSeq: 2 });
+    expect(await s.loadRead()).toEqual({
+      readSeq: 3,
+      readIds: [{ id: 'x', seq: 4 }],
+      pushedSeq: 2,
+    });
     expect(await s.loadDelivery()).toBe('channel');
   });
 });
@@ -132,5 +136,60 @@ describe('WatchStore.hasEntries', () => {
     await new Promise((r) => setTimeout(r, 5));
     await store().save(EMAIL, withEntry()); // another process (CLI) adds a watch
     expect(await reader.hasEntries()).toBe(true);
+  });
+});
+
+describe('WatchStore review fixes', () => {
+  it('reads legacy string read ids with an unknown seq', async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      path.join(dir, 'read.json'),
+      JSON.stringify({ readSeq: 2, readIds: ['old'], pushedSeq: 1 }),
+    );
+    expect(await store().loadRead()).toEqual({
+      readSeq: 2,
+      readIds: [{ id: 'old', seq: UNKNOWN_READ_SEQ }],
+      pushedSeq: 1,
+    });
+  });
+
+  it('judges an unreadable lock by the real clock, not the injected one', async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'watch.lock'), '');
+    const future = new WatchStore({
+      dir,
+      logger: silentLogger(),
+      now: () => new Date(Date.now() + 2 * 60 * 60 * 1000),
+    });
+    await expect(future.withLock(async () => 1, 50)).rejects.toBeInstanceOf(FileLockBusyError);
+  });
+
+  it('rejects email characters that are unsafe in file names', async () => {
+    for (const bad of [
+      'a:b@c.d',
+      'a*@c.d',
+      'a?@c.d',
+      'a"@c.d',
+      'a|b@c.d',
+      'a@c\u0001.d',
+      'a@c<.d',
+    ]) {
+      await expect(store().load(bad)).rejects.toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('sweeps temp files older than an hour from the watch and snapshot dirs', async () => {
+    const snapDir = path.join(dir, 'snapshots', EMAIL);
+    await mkdir(snapDir, { recursive: true });
+    const old = [path.join(dir, '.me.json.a.tmp'), path.join(snapDir, '.D.json.b.tmp')];
+    const young = path.join(dir, '.me.json.c.tmp');
+    const keep = path.join(dir, 'old.json');
+    const hoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    for (const f of [...old, young, keep]) await writeFile(f, 'x');
+    for (const f of [...old, keep]) await utimes(f, hoursAgo, hoursAgo);
+    await store().save(EMAIL, emptyState());
+    for (const f of old) await expect(stat(f)).rejects.toThrow();
+    await expect(stat(young)).resolves.toBeDefined();
+    await expect(stat(keep)).resolves.toBeDefined();
   });
 });

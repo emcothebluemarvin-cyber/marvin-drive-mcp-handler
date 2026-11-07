@@ -186,9 +186,18 @@ export type EventDraft = Omit<ChangeEvent, 'seq'>;
 
 export type DeliveryMode = 'hook' | 'channel';
 
+/** An event marked read by id; the seq lets entries ≤ readSeq be pruned after rotation. */
+export interface ReadId {
+  id: string;
+  seq: number;
+}
+
+/** Seq of a legacy (string-only) read id until the inbox tells the real one. */
+export const UNKNOWN_READ_SEQ = Number.MAX_SAFE_INTEGER;
+
 export interface ReadState {
   readSeq: number;
-  readIds: string[];
+  readIds: ReadId[];
   pushedSeq: number;
 }
 

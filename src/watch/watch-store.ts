@@ -11,7 +11,9 @@ import {
 import { ValidationError, hasErrorCode } from '../errors.js';
 import { renameReplacing } from '../files/rename-replacing.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
+import { sweepStaleTemps } from './temp-sweep.js';
 import {
+  UNKNOWN_READ_SEQ,
   emptyState,
   type AccountState,
   type DeliveryMode,
@@ -86,14 +88,28 @@ const snapshotSchema = z.object({
     }),
   ]),
 });
+const readIdSchema = z.union([
+  z.object({ id: z.string(), seq: z.number().int().min(0) }),
+  // Legacy entries: id only; the seq is filled in from the inbox (read-state.ts).
+  z.string().transform((id) => ({ id, seq: UNKNOWN_READ_SEQ })),
+]);
 const readSchema = z.object({
   readSeq: z.number().int().min(0),
-  readIds: z.array(z.string()),
+  readIds: z.array(readIdSchema),
   pushedSeq: z.number().int().min(0),
 });
 const configSchema = z.object({ delivery: z.enum(['hook', 'channel']) });
 
-const EMAIL = /^[^@\s/\\]+@[^@\s/\\]+$/;
+/** No whitespace, path separators or characters unsafe in file names (Windows included). */
+const EMAIL = /^[^@\s/\\:*?"<>|]+@[^@\s/\\:*?"<>|]+$/;
+
+function safeEmail(email: string): boolean {
+  for (const ch of email) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)) return false;
+  }
+  return EMAIL.test(email) && !email.startsWith('.');
+}
 const FILE_ID = /^[A-Za-z0-9_-]+$/;
 /** Default wait for `watch.lock` (critical sections hold it for a few ms). */
 export const LOCK_TIMEOUT_MS = 5_000;
@@ -119,6 +135,7 @@ export class WatchStore {
   private readonly now: () => Date;
   private readonly log: Logger;
   private entriesCache: { mtimeMs: number; checkedAt: number; value: boolean } | null = null;
+  private swept = false;
 
   constructor(private readonly opts: WatchStoreOptions) {
     this.isAlive = opts.isAlive ?? processAlive;
@@ -133,10 +150,14 @@ export class WatchStore {
   async ensureDir(): Promise<void> {
     await mkdir(this.opts.dir, { recursive: true, mode: 0o700 });
     await chmod(this.opts.dir, 0o700);
+    if (!this.swept) {
+      this.swept = true;
+      await this.sweepTemps();
+    }
   }
 
   private checkEmail(email: string): void {
-    if (!EMAIL.test(email) || email.startsWith('.')) {
+    if (!safeEmail(email)) {
       throw new ValidationError(`Invalid account email "${email}"`);
     }
   }
@@ -188,6 +209,19 @@ export class WatchStore {
     }
   }
 
+  /** Best effort, once per instance: crash leftovers of atomic writes (never throws). */
+  private async sweepTemps(): Promise<void> {
+    await sweepStaleTemps(this.opts.dir);
+    const snapshots = path.join(this.opts.dir, 'snapshots');
+    let accounts: string[];
+    try {
+      accounts = await readdir(snapshots);
+    } catch {
+      return;
+    }
+    for (const account of accounts) await sweepStaleTemps(path.join(snapshots, account));
+  }
+
   /** Emails that have a state file. */
   async accounts(): Promise<string[]> {
     let names: string[];
@@ -200,7 +234,7 @@ export class WatchStore {
     return names
       .filter((n) => n.endsWith('.json'))
       .map((n) => n.slice(0, -'.json'.length))
-      .filter((n) => EMAIL.test(n) && !n.startsWith('.'))
+      .filter((n) => safeEmail(n))
       .sort();
   }
 
@@ -337,7 +371,8 @@ export class WatchStore {
               startedAt: this.now().toISOString(),
               token: randomUUID(),
             }),
-          isStale: (raw) => pidLockIsStale(lockFile, raw, this.isAlive, this.now),
+          // Real clock on purpose: the age is compared with the lock file's mtime.
+          isStale: (raw) => pidLockIsStale(lockFile, raw, this.isAlive, () => new Date()),
           busyMessage: 'Drive watch state is busy; try again',
           onBreak: () => this.log.warn('Breaking a stale watch lock'),
           onLostRelease: () => this.log.warn('Watch lock was taken over; not removing it'),
