@@ -1,8 +1,11 @@
 import { ReauthRequiredError } from '../errors.js';
 import type { Logger } from '../logger.js';
+import { readyToRelease } from './coalesce.js';
+import { enrich } from './enrich.js';
 import { InvalidCursorError, type ChangeFeed, type WatchProvider } from './feed.js';
 import type { Inbox, InboxWriter } from './inbox.js';
 import { Membership } from './membership.js';
+import { isUnread } from './read-state.js';
 import { applyChange, type Tracking } from './relevance.js';
 import type { AccountState, EventDraft, RawChange, WatchEntry } from './types.js';
 import type { WatchStore } from './watch-store.js';
@@ -66,7 +69,7 @@ export class Poller {
 
   constructor(private readonly deps: PollerDeps) {}
 
-  /** One leader pass over every account with entries. */
+  /** One leader pass: poll and release every account with entries, then rotate the inbox. */
   async runOnce(): Promise<void> {
     for (const email of await this.deps.store.accounts()) {
       let state: AccountState;
@@ -77,7 +80,62 @@ export class Poller {
         continue;
       }
       if (state.entries.length === 0 || state.cursor === null) continue;
-      if (!this.backingOff(state)) await this.pollAccount(email, state.cursor, state.entries);
+      // While backing off (outage, expired session) quiet items wait instead of being
+      // released without content. A failing account never stops the others (spec §9).
+      if (this.backingOff(state)) continue;
+      try {
+        await this.pollAccount(email, state.cursor, state.entries);
+      } catch (err) {
+        this.deps.log.error('Drive watch poll failed', { account: email, error: err });
+        continue;
+      }
+      try {
+        await this.releaseAccount(email);
+      } catch (err) {
+        this.deps.log.error('Releasing Drive changes failed', { account: email, error: err });
+      }
+    }
+    const rs = await this.deps.store.loadRead();
+    await this.deps.inbox.rotateIfNeeded((e) => isUnread(e, rs), this.deps.now());
+  }
+
+  /** Quiet items: enrich (network) → append → remove under the lock if unchanged (spec §6, §7.3). */
+  private async releaseAccount(email: string): Promise<void> {
+    const state = await this.deps.store.load(email);
+    const ready = readyToRelease(
+      state.pending,
+      this.deps.now(),
+      this.deps.quietMs,
+      this.deps.maxWaitMs,
+    );
+    if (ready.length === 0) return;
+    const snapshotter = this.deps.provider.snapshotter(email);
+    for (const item of ready) {
+      const previous = await this.deps.store.loadSnapshot(email, item.fileId);
+      const result = await enrich({
+        item,
+        account: email,
+        snapshotter,
+        previous,
+        since: state.lastCommentCheck[item.fileId] ?? item.firstSeen,
+        now: this.deps.now(),
+        log: this.deps.log,
+      });
+      if (result.event) await this.deps.writer.append(result.event);
+      await this.deps.store.withLock(async () => {
+        const s = await this.deps.store.load(email);
+        const current = s.pending[item.fileId];
+        if (current && current.lastSeen === item.lastSeen) delete s.pending[item.fileId];
+        const tracked = s.known[item.fileId] !== undefined;
+        if (!tracked || result.snapshot === 'drop') {
+          await this.deps.store.removeSnapshot(email, item.fileId);
+        } else if (result.snapshot !== 'keep') {
+          await this.deps.store.saveSnapshot(email, item.fileId, result.snapshot);
+        }
+        if (!tracked) delete s.lastCommentCheck[item.fileId];
+        else if (result.commentCheck) s.lastCommentCheck[item.fileId] = result.commentCheck;
+        await this.deps.store.save(email, s);
+      });
     }
   }
 
