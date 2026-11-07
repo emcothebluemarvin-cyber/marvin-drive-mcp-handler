@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Auth } from 'googleapis';
 import { AuthFlowError, ValidationError } from '../../errors.js';
-import { OAUTH_SCOPES, runLoginFlow, type OAuthFlowClient } from '../login-flow.js';
+import {
+  OAUTH_SCOPES,
+  finishTwoStepLogin,
+  parseRedirectUrl,
+  runLoginFlow,
+  startTwoStepLogin,
+  type OAuthFlowClient,
+} from '../login-flow.js';
 
 const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive openid email';
 
@@ -533,5 +540,62 @@ describe('runLoginFlow', () => {
       await (await fetch(`${h.redirect()}/?code=late&state=${stateOf(authUrl)}`)).text();
       await expect(flow).resolves.toMatchObject({ refreshToken: 'rt-1' });
     });
+  });
+});
+
+describe('two-step login (--print-url / --redirect-url)', () => {
+  it('builds a PKCE consent URL for a random high loopback port without listening', async () => {
+    const h = harness();
+    const start = await startTwoStepLogin({ ...base, createClient: h.create, loginHint: 'a@b.c' });
+    expect(start.redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:(\d+)$/);
+    const port = Number(start.redirectUri.split(':')[2]);
+    expect(port).toBeGreaterThanOrEqual(49152);
+    expect(port).toBeLessThanOrEqual(65535);
+    expect(h.redirect()).toBe(start.redirectUri);
+    expect(start.codeVerifier).toBe('verifier');
+    expect(start.state).toMatch(/^[0-9a-f]{32}$/);
+    expect(h.urlOpts()).toMatchObject({
+      access_type: 'offline',
+      state: start.state,
+      code_challenge: 'challenge',
+      login_hint: 'a@b.c',
+    });
+  });
+
+  it('exchanges the pasted code with the stored verifier and redirect URI', async () => {
+    const h = harness();
+    const pending = {
+      state: 's1',
+      codeVerifier: 'stored-v',
+      redirectUri: 'http://127.0.0.1:50001',
+    };
+    const result = await finishTwoStepLogin(
+      { ...base, createClient: h.create },
+      pending,
+      'http://127.0.0.1:50001/?state=s1&code=c-1&scope=x',
+    );
+    expect(result).toEqual({ email: 'user@example.com', refreshToken: 'rt-1' });
+    expect(h.client.getToken).toHaveBeenCalledWith({ code: 'c-1', codeVerifier: 'stored-v' });
+    expect(h.redirect()).toBe('http://127.0.0.1:50001');
+  });
+
+  it('refuses a URL from another attempt, a denied consent and non-URLs', async () => {
+    const h = harness();
+    const pending = { state: 's1', codeVerifier: 'v', redirectUri: 'http://127.0.0.1:50001' };
+    const finish = (url: string): Promise<unknown> =>
+      finishTwoStepLogin({ ...base, createClient: h.create }, pending, url);
+    await expect(finish('http://127.0.0.1:50001/?state=other&code=c')).rejects.toThrow(
+      /different login attempt/,
+    );
+    await expect(finish('http://127.0.0.1:50001/?state=s1&error=access_denied')).rejects.toThrow(
+      /Access was denied/,
+    );
+    await expect(finish('hello')).rejects.toThrow(ValidationError);
+    expect(h.client.getToken).not.toHaveBeenCalled();
+  });
+
+  it('parses a bare query string too', () => {
+    expect(parseRedirectUrl('?state=s&code=c')).toEqual({ state: 's', code: 'c' });
+    expect(parseRedirectUrl('  state=s&code=c  ')).toEqual({ state: 's', code: 'c' });
   });
 });

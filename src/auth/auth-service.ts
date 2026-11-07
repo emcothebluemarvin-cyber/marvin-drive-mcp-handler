@@ -8,7 +8,8 @@ import {
 import type { ClientCredentials } from '../config/client-secret.js';
 import { AuthFlowError, ReauthRequiredError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import type { LoginResult } from './login-flow.js';
+import { parseRedirectUrl, type LoginResult, type TwoStepStart } from './login-flow.js';
+import type { PendingLogin, PendingLoginStore } from './pending-login.js';
 import { isInvalidGrant } from './oauth-errors.js';
 import type { TokenStore } from './token-store.js';
 
@@ -40,6 +41,16 @@ export interface AuthServiceDeps {
     loginHint?: string;
     onVerified: (result: LoginResult) => Promise<void>;
   }) => Promise<LoginResult>;
+  /** Two-step no-browser login (--print-url, then --redirect-url); see startTwoStepLogin. */
+  twoStep?: {
+    pending: PendingLoginStore;
+    start: (credentials: ClientCredentials, loginHint?: string) => Promise<TwoStepStart>;
+    finish: (
+      credentials: ClientCredentials,
+      pending: PendingLogin,
+      redirectUrl: string,
+    ) => Promise<LoginResult>;
+  };
   newClient?: (credentials: ClientCredentials) => Auth.OAuth2Client;
   logger?: Logger;
 }
@@ -58,40 +69,135 @@ export class AuthService {
   }
 
   async addAccount(alias?: string): Promise<AccountRecord> {
-    if (alias !== undefined) {
-      const normalized = alias.trim().toLowerCase();
-      if (!ALIAS_PATTERN.test(normalized)) {
-        throw new ValidationError(`Alias must match ${ALIAS_PATTERN.source} (got "${alias}")`);
-      }
-      const taken = await this.deps.registry.find(normalized);
-      if (taken) {
-        throw new ValidationError(
-          `Alias "${normalized}" is already used by ${taken.email}; pass --alias <name>`,
-        );
-      }
-    }
+    await this.checkNewAlias(alias);
     const credentials = await this.deps.loadCredentials();
     const outcome: { saved?: AccountRecord } = {};
     await this.deps.login({
       credentials,
       onVerified: async (result) => {
-        const record = await this.deps.registry.add({
-          alias: alias ?? defaultAlias(result.email),
-          email: result.email,
-        });
-        try {
-          await this.deps.tokens.set(record.email, result.refreshToken);
-        } catch (err) {
-          await this.deps.registry.remove(record.alias);
-          throw err;
-        }
-        outcome.saved = record;
+        outcome.saved = await this.saveNewAccount(alias, result);
       },
     });
     const { saved } = outcome;
     if (!saved) throw new AuthFlowError('Login finished without saving the account');
     this.reauthNeeded.delete(saved.email);
     return saved;
+  }
+
+  /** `auth add --print-url`: returns the consent URL; finish with finishAddAccount. */
+  async startAddAccount(alias?: string): Promise<string> {
+    const normalized = await this.checkNewAlias(alias);
+    return this.startTwoStep({ command: 'add', account: normalized });
+  }
+
+  /** `auth add --redirect-url`: completes a login started by startAddAccount. */
+  async finishAddAccount(alias: string | undefined, redirectUrl: string): Promise<AccountRecord> {
+    const normalized = alias === undefined ? null : alias.trim().toLowerCase();
+    const result = await this.finishTwoStep({ command: 'add', account: normalized }, redirectUrl);
+    const saved = await this.saveNewAccount(alias, result);
+    this.reauthNeeded.delete(saved.email);
+    return saved;
+  }
+
+  /** `auth login <account> --print-url`. */
+  async startRelogin(ref: string): Promise<string> {
+    const record = await this.deps.registry.resolve(ref);
+    return this.startTwoStep({ command: 'login', account: record.email }, record.email);
+  }
+
+  /** `auth login <account> --redirect-url`. */
+  async finishRelogin(ref: string, redirectUrl: string): Promise<AccountRecord> {
+    const record = await this.deps.registry.resolve(ref);
+    const result = await this.finishTwoStep(
+      { command: 'login', account: record.email },
+      redirectUrl,
+    );
+    if (result.email !== record.email) {
+      throw new AuthFlowError(
+        `Signed in as ${result.email}, but "${record.alias}" is ${record.email}. Nothing was saved.`,
+      );
+    }
+    await this.deps.tokens.set(record.email, result.refreshToken);
+    this.reauthNeeded.delete(record.email);
+    return record;
+  }
+
+  private twoStep(): NonNullable<AuthServiceDeps['twoStep']> {
+    if (!this.deps.twoStep) throw new AuthFlowError('Two-step login is not available here');
+    return this.deps.twoStep;
+  }
+
+  private async startTwoStep(
+    target: Pick<PendingLogin, 'command' | 'account'>,
+    loginHint?: string,
+  ): Promise<string> {
+    const twoStep = this.twoStep();
+    const credentials = await this.deps.loadCredentials();
+    const started = await twoStep.start(credentials, loginHint);
+    await twoStep.pending.save({
+      ...target,
+      state: started.state,
+      codeVerifier: started.codeVerifier,
+      redirectUri: started.redirectUri,
+    });
+    return started.authUrl;
+  }
+
+  /** Takes the pending login for the URL's state (single use) and checks it was for `target`. */
+  private async finishTwoStep(
+    target: Pick<PendingLogin, 'command' | 'account'>,
+    redirectUrl: string,
+  ): Promise<LoginResult> {
+    const twoStep = this.twoStep();
+    const { state } = parseRedirectUrl(redirectUrl);
+    const pending = await twoStep.pending.take(state);
+    if (!pending) {
+      throw new AuthFlowError(
+        'No login is waiting for this redirect URL. Run the same command with --print-url first; its URL is valid for 10 minutes and works once.',
+      );
+    }
+    if (pending.command !== target.command || pending.account !== target.account) {
+      const started = pending.command === 'add' ? 'auth add' : 'auth login';
+      throw new AuthFlowError(
+        `This redirect URL belongs to "${started}"${pending.account ? ` for ${pending.account}` : ''}; run --redirect-url with the same command and account as --print-url. Nothing was saved; start again with --print-url.`,
+      );
+    }
+    const credentials = await this.deps.loadCredentials();
+    return twoStep.finish(credentials, pending, redirectUrl);
+  }
+
+  /** Validates an alias for a new account; returns it normalized, or null when omitted. */
+  private async checkNewAlias(alias: string | undefined): Promise<string | null> {
+    if (alias === undefined) return null;
+    const normalized = alias.trim().toLowerCase();
+    if (!ALIAS_PATTERN.test(normalized)) {
+      throw new ValidationError(`Alias must match ${ALIAS_PATTERN.source} (got "${alias}")`);
+    }
+    const taken = await this.deps.registry.find(normalized);
+    if (taken) {
+      throw new ValidationError(
+        `Alias "${normalized}" is already used by ${taken.email}; pass --alias <name>`,
+      );
+    }
+    return normalized;
+  }
+
+  /** Registers the account and stores its token; rolls the registry back if the token fails. */
+  private async saveNewAccount(
+    alias: string | undefined,
+    result: LoginResult,
+  ): Promise<AccountRecord> {
+    const record = await this.deps.registry.add({
+      alias: alias ?? defaultAlias(result.email),
+      email: result.email,
+    });
+    try {
+      await this.deps.tokens.set(record.email, result.refreshToken);
+    } catch (err) {
+      await this.deps.registry.remove(record.alias);
+      throw err;
+    }
+    return record;
   }
 
   async relogin(ref: string): Promise<AccountRecord> {

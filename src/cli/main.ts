@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline/promises';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Command } from 'commander';
 import { buildApp } from '../app.js';
+import { ValidationError } from '../errors.js';
 import { createMcpServer } from '../mcp/server.js';
 import { VERSION } from '../version.js';
 import { formatAccounts } from './format.js';
@@ -85,6 +86,36 @@ async function withLoginApp<T>(
 }
 
 const NO_BROWSER_HELP = 'do not open a browser; paste the redirect URL instead (servers, SSH)';
+const PRINT_URL_HELP =
+  'step 1 of a login without waiting: print the Google URL and exit (finish with --redirect-url)';
+const REDIRECT_URL_HELP =
+  'step 2: finish a --print-url login with the URL the browser was redirected to (quote it)';
+
+interface LoginOpts {
+  browser?: boolean;
+  printUrl?: boolean;
+  redirectUrl?: string;
+}
+
+/** Which two-step login part the options ask for, or null for the interactive login. */
+function twoStepMode(opts: LoginOpts): 'print' | 'finish' | null {
+  if (opts.printUrl && opts.redirectUrl !== undefined) {
+    throw new ValidationError('Use --print-url and --redirect-url in two separate runs.');
+  }
+  if (opts.printUrl) return 'print';
+  if (opts.redirectUrl !== undefined) return 'finish';
+  return null;
+}
+
+function printTwoStepUrl(url: string, command: string): void {
+  out(url);
+  process.stderr.write(
+    '\nOpen the URL above in a browser on any device and sign in. Google then redirects to ' +
+      'http://127.0.0.1:<port>/?…, which fails to load — that is expected. Copy the full URL ' +
+      'from the address bar and, within 10 minutes, run:\n' +
+      `  marvin-drive ${command} --redirect-url '<that URL>'\n`,
+  );
+}
 
 const program = new Command()
   .name('marvin-drive')
@@ -98,9 +129,24 @@ auth
   .description('Sign in with a Google account and register it')
   .option('--alias <alias>', 'short name for the account (default: email local part)')
   .option('--no-browser', NO_BROWSER_HELP)
-  .action(async (opts: { alias?: string; browser?: boolean }) => {
+  .option('--print-url', PRINT_URL_HELP)
+  .option('--redirect-url <url>', REDIRECT_URL_HELP)
+  .action(async (opts: LoginOpts & { alias?: string }) => {
+    const step = twoStepMode(opts);
+    const app = (): ReturnType<typeof buildApp> => buildApp();
+    if (step === 'print') {
+      process.stderr.write(`${TESTING_MODE_HINT}\n`);
+      const url = await app().auth.startAddAccount(opts.alias);
+      printTwoStepUrl(url, `auth add${opts.alias ? ` --alias ${opts.alias}` : ''}`);
+      return;
+    }
+    if (step === 'finish') {
+      const record = await app().auth.finishAddAccount(opts.alias, opts.redirectUrl ?? '');
+      out(`Added ${record.alias} (${record.email})`);
+      return;
+    }
     process.stderr.write(`${TESTING_MODE_HINT}\n`);
-    const record = await withLoginApp(opts, (app) => app.auth.addAccount(opts.alias));
+    const record = await withLoginApp(opts, (a) => a.auth.addAccount(opts.alias));
     out(`Added ${record.alias} (${record.email})`);
   });
 
@@ -109,7 +155,20 @@ auth
   .description('Sign in again for an existing account (expired session)')
   .argument('<account>', 'alias or email')
   .option('--no-browser', NO_BROWSER_HELP)
-  .action(async (ref: string, opts: { browser?: boolean }) => {
+  .option('--print-url', PRINT_URL_HELP)
+  .option('--redirect-url <url>', REDIRECT_URL_HELP)
+  .action(async (ref: string, opts: LoginOpts) => {
+    const step = twoStepMode(opts);
+    if (step === 'print') {
+      process.stderr.write(`${TESTING_MODE_HINT}\n`);
+      printTwoStepUrl(await buildApp().auth.startRelogin(ref), `auth login ${ref}`);
+      return;
+    }
+    if (step === 'finish') {
+      const record = await buildApp().auth.finishRelogin(ref, opts.redirectUrl ?? '');
+      out(`Signed in again: ${record.alias} (${record.email})`);
+      return;
+    }
     process.stderr.write(`${TESTING_MODE_HINT}\n`);
     const record = await withLoginApp(opts, (app) => app.auth.relogin(ref));
     out(`Signed in again: ${record.alias} (${record.email})`);

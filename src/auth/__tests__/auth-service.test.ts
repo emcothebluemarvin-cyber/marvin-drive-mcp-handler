@@ -8,6 +8,7 @@ import { AuthFlowError, ReauthRequiredError, ValidationError } from '../../error
 import { createLogger } from '../../logger.js';
 import { AuthService, type AuthServiceDeps } from '../auth-service.js';
 import type { LoginResult } from '../login-flow.js';
+import { PendingLoginStore } from '../pending-login.js';
 import { InMemoryTokenStore } from '../token-store.js';
 
 const CREDS = { clientId: 'cid.apps.googleusercontent.com', clientSecret: 'secret' };
@@ -211,5 +212,93 @@ describe('AuthService.status', () => {
     spy.mockImplementationOnce(async () => ({ token: 'at', res: null }));
     expect((await service.status(true))[0]?.status).toBe('ok');
     spy.mockRestore();
+  });
+});
+
+describe('two-step login', () => {
+  let pending: PendingLoginStore;
+  let finish: ReturnType<typeof vi.fn<NonNullable<AuthServiceDeps['twoStep']>['finish']>>;
+  let starts: Array<string | undefined>;
+  let two: AuthService;
+  let nextState: number;
+
+  beforeEach(async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'marvin-two-step-'));
+    pending = new PendingLoginStore(path.join(dir, 'pending-logins.json'));
+    finish = vi.fn<NonNullable<AuthServiceDeps['twoStep']>['finish']>();
+    starts = [];
+    nextState = 0;
+    two = new AuthService({
+      registry,
+      tokens,
+      loadCredentials: async () => CREDS,
+      login,
+      twoStep: {
+        pending,
+        start: async (_creds, loginHint) => {
+          starts.push(loginHint);
+          nextState += 1;
+          return {
+            authUrl: `https://accounts.example/auth?n=${nextState}`,
+            state: `st${nextState}`,
+            codeVerifier: `v${nextState}`,
+            redirectUri: 'http://127.0.0.1:50001',
+          };
+        },
+        finish,
+      },
+      logger: createLogger(() => {}),
+    });
+  });
+
+  const redirect = (state: string): string => `http://127.0.0.1:50001/?state=${state}&code=c`;
+
+  it('adds an account in two runs and forgets the pending login', async () => {
+    await expect(two.startAddAccount('Work')).resolves.toBe('https://accounts.example/auth?n=1');
+    finish.mockResolvedValueOnce(signIn('w@example.com', 'rt-w'));
+    await expect(two.finishAddAccount('work', redirect('st1'))).resolves.toMatchObject({
+      alias: 'work',
+      email: 'w@example.com',
+    });
+    expect(finish.mock.calls[0]?.[1]).toMatchObject({ state: 'st1', codeVerifier: 'v1' });
+    expect(await tokens.get('w@example.com')).toBe('rt-w');
+    await expect(pending.take('st1')).resolves.toBeNull();
+  });
+
+  it('checks the alias before printing the URL', async () => {
+    await registry.add({ alias: 'work', email: 'w@example.com' });
+    await expect(two.startAddAccount('work')).rejects.toThrow(ValidationError);
+    expect(starts).toEqual([]);
+  });
+
+  it('refuses a redirect URL for another alias or command, and it cannot be retried', async () => {
+    await two.startAddAccount('work');
+    await expect(two.finishAddAccount('home', redirect('st1'))).rejects.toThrow(
+      /belongs to "auth add" for work/,
+    );
+    await expect(two.finishAddAccount('work', redirect('st1'))).rejects.toThrow(
+      /No login is waiting/,
+    );
+    expect(finish).not.toHaveBeenCalled();
+    expect((await registry.read()).accounts).toEqual([]);
+  });
+
+  it('refuses a URL nobody started', async () => {
+    await expect(two.finishAddAccount(undefined, redirect('ghost'))).rejects.toThrow(AuthFlowError);
+  });
+
+  it('re-logs in an account with its email as hint and rejects another Google account', async () => {
+    await registry.add({ alias: 'work', email: 'w@example.com' });
+    await tokens.set('w@example.com', 'rt-old');
+    await two.startRelogin('work');
+    expect(starts).toEqual(['w@example.com']);
+    finish.mockResolvedValueOnce(signIn('other@example.com', 'rt-x'));
+    await expect(two.finishRelogin('work', redirect('st1'))).rejects.toThrow(/Nothing was saved/);
+    expect(await tokens.get('w@example.com')).toBe('rt-old');
+
+    await two.startRelogin('work');
+    finish.mockResolvedValueOnce(signIn('w@example.com', 'rt-new'));
+    await two.finishRelogin('work', redirect('st2'));
+    expect(await tokens.get('w@example.com')).toBe('rt-new');
   });
 });
