@@ -6,7 +6,7 @@ import { ValidationError } from '../../errors.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
 import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
-import { refuseTrash } from './fixtures.js';
+import { record, refuseTrash } from './fixtures.js';
 import { memoryDrive, type MemoryDrive } from './memory-drive.js';
 
 let tmp: string;
@@ -262,6 +262,20 @@ describe('select', () => {
     expect(mem.files.get('n1')?.trashed).toBe(false);
     const again = await sync.select({ name: 'docs', add: ['remote.pdf'] });
     expect(again).toMatchObject({ added: ['remote.pdf'], excluded: 0 });
+  });
+
+  it('add on a released (remote-only) path sets restorePending', async () => {
+    mem.addFile('r1', 'a.pdf', 'ROOT', 'A');
+    await sync.select({ name: 'docs', add: ['a.pdf'] });
+    const file = await store.load('docs');
+    file.records.push(record('r1', 'a.pdf', { remoteOnly: true }));
+    await store.save(file);
+    const res = await sync.select({ name: 'docs', add: ['A.pdf'] });
+    expect(res.added).toEqual(['a.pdf']);
+    expect((await store.load('docs')).records[0]).toMatchObject({
+      remoteOnly: true,
+      restorePending: true,
+    });
   });
 
   it('refuses while another writer holds the lock', async () => {

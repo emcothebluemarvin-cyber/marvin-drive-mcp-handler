@@ -204,7 +204,16 @@ export async function selectPaths(env: SyncEnv, input: SelectInput): Promise<Sel
           reject('inside a folder that could not be read');
         else if (ancestorKeys(key).some((a) => blocking.includes(foldKey(a))))
           reject('inside a symlinked, special or ignored folder');
-        else if (pair.selection.some((k) => foldKey(k) === fold)) continue;
+        else if (file.records.some((r) => r.remoteOnly && foldKey(r.path) === fold)) {
+          // Spec §8: add on a released file restores it on the next run (O0/O1).
+          for (const r of file.records) {
+            if (!r.remoteOnly || foldKey(r.path) !== fold) continue;
+            r.restorePending = true;
+            pair.excluded = pair.excluded.filter((k) => foldKey(k) !== fold);
+            if (!pair.selection.some((k) => foldKey(k) === fold)) pair.selection.push(r.path);
+            result.added.push(r.path);
+          }
+        } else if (pair.selection.some((k) => foldKey(k) === fold)) continue;
         else {
           const canonical = localByFold.get(fold) ?? remoteByFold.get(fold);
           if (canonical === undefined) reject('not found locally or in the Drive folder');
