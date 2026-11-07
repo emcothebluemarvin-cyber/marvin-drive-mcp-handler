@@ -42,6 +42,31 @@ async function createDocs(): Promise<void> {
 }
 
 describe('createPair', () => {
+  it('stores validated googleExport preferences (defaults for omitted types)', async () => {
+    await sync.createPair({
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { document: 'pdf', spreadsheet: 'csv' },
+    });
+    expect((await store.load('docs')).pair.googleExport).toEqual({
+      document: 'pdf',
+      spreadsheet: 'csv',
+      presentation: 'pptx',
+      drawing: 'pdf',
+    });
+  });
+  it('rejects an export format the Google type cannot produce, before writing anything', async () => {
+    const res = sync.createPair({
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { spreadsheet: 'docx' },
+    });
+    await expect(res).rejects.toBeInstanceOf(ValidationError);
+    await expect(res).rejects.toThrow('Google Sheets cannot be exported as "docx"');
+    expect(await readdir(local)).toEqual([]);
+  });
   it('binds an existing Drive folder, writes the marker and probes case sensitivity', async () => {
     const summary = await sync.createPair({
       name: 'docs',

@@ -17,10 +17,11 @@ import {
   writeMarker,
   type PairStore,
 } from './pair-store.js';
+import { validateGoogleExport } from './remote-kinds.js';
 import {
-  DEFAULT_GOOGLE_EXPORT,
   PAIR_NAME,
   SYNC_FILE_FIELDS,
+  type GoogleExportPrefs,
   type Pair,
   type PairFile,
 } from './types.js';
@@ -40,6 +41,7 @@ export interface CreatePairInput {
   remoteFolderName?: string;
   remoteParentId?: string;
   account?: string;
+  googleExport?: Partial<GoogleExportPrefs>;
 }
 
 export interface PairSummary {
@@ -109,6 +111,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
   if (Boolean(input.remoteFolderId) === Boolean(input.remoteFolderName)) {
     throw new ValidationError('Give exactly one of remoteFolderId or remoteFolderName');
   }
+  const googleExport = validateGoogleExport(input.googleExport ?? {});
   const localDir = await resolveLocalDir(input.localDir);
   return env.store.withLock(input.name, async () => {
     const existing = (await env.store.list()).map((f) => f.pair);
@@ -134,7 +137,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       localDir,
       caseInsensitive: await probeCaseInsensitive(localDir, input.name),
       remoteFolderId: remote.folderId,
-      googleExport: { ...DEFAULT_GOOGLE_EXPORT },
+      googleExport,
       selection: [],
       excluded: [],
       remoteBaseline: [],

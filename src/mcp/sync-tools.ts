@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ValidationError } from '../errors.js';
+import { EXPORT_FORMATS } from '../files/export-formats.js';
 import type { Logger } from '../logger.js';
 import type { SyncService } from '../sync/sync-service.js';
 import { PAIR_NAME } from '../sync/types.js';
@@ -45,6 +46,17 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           .min(1)
           .optional()
           .describe('Parent for remoteFolderName (default: My Drive)'),
+        googleExport: z
+          .object({
+            document: z.enum(EXPORT_FORMATS).optional(),
+            spreadsheet: z.enum(EXPORT_FORMATS).optional(),
+            presentation: z.enum(EXPORT_FORMATS).optional(),
+            drawing: z.enum(EXPORT_FORMATS).optional(),
+          })
+          .optional()
+          .describe(
+            'Local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
+          ),
         account,
       },
     },

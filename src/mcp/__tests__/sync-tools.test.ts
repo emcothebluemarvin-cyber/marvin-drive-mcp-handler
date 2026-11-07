@@ -74,6 +74,16 @@ afterEach(async () => {
 });
 
 describe('sync MCP tools', () => {
+  it('validates googleExport on sync_create_pair', async () => {
+    const bad = await call('sync_create_pair', {
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { presentation: 'csv' },
+    });
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toContain('Google Slides cannot be exported as "csv"');
+  });
   it('describe the conversational flow and the dry-run default', async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t.description ?? '']));
