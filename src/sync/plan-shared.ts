@@ -48,7 +48,7 @@ export function makeScope(ctx: PlanContext, record: SyncRecord): TrackedScope {
     ctx,
     record,
     out,
-    note: (code, rule, message) => {
+    note: (code, rule, message): TrackedResult => {
       out.notes.push({
         code,
         path: record.path,
@@ -58,7 +58,7 @@ export function makeScope(ctx: PlanContext, record: SyncRecord): TrackedScope {
       });
       return out;
     },
-    act: (action) => {
+    act: (action): TrackedResult => {
       out.actions.push({ ...action, record });
       return out;
     },
