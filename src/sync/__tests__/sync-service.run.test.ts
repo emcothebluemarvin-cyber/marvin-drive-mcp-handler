@@ -44,7 +44,7 @@ afterEach(async () => {
 
 const at = (...parts: string[]): string => path.join(local, ...parts);
 
-async function apply(extra: { allowMassDelete?: boolean } = {}) {
+async function apply(extra: { allowMassDelete?: boolean; confirmRemoteTrash?: boolean } = {}) {
   const dry = await sync.run({ name: 'docs' });
   return sync.run({ name: 'docs', apply: true, planId: dry.planId, ...extra });
 }
@@ -130,10 +130,10 @@ describe('run', () => {
     await sync.select({ name: 'docs', add: ['a.pdf', 'b.pdf', 'c.pdf'] });
     await apply();
     for (const n of ['a', 'b', 'c']) await rm(at(`${n}.pdf`));
-    const braked = await apply();
+    const braked = await apply({ confirmRemoteTrash: true });
     expect(braked.aborted).toMatchObject({ reason: 'mass-delete' });
     expect(mem.childrenOf('ROOT')).toHaveLength(3);
-    const allowed = await apply({ allowMassDelete: true });
+    const allowed = await apply({ allowMassDelete: true, confirmRemoteTrash: true });
     expect(allowed.actions['trash-remote']).toEqual(['a.pdf', 'b.pdf', 'c.pdf']);
     expect(mem.childrenOf('ROOT')).toEqual([]);
   });
@@ -173,7 +173,7 @@ describe('run', () => {
     moved.name = 'renamed.txt';
 
     now = new Date('2026-11-03T15:30:00');
-    const report = await apply();
+    const report = await apply({ confirmRemoteTrash: true });
     expect(report.failures).toEqual([]);
     expect(report.actions).toEqual({
       'update-remote': ['edit-local.txt'],
@@ -220,6 +220,108 @@ describe('run', () => {
     const res = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
     expect(res.aborted?.reason).toBe('plan-changed');
     expect(await readdir(local)).toContain('.abc.marvin-part');
+  });
+});
+
+describe('confirmation before a local deletion trashes the Drive copy (addendum §2)', () => {
+  const idOf = async (p: string): Promise<string> =>
+    (await store.load('docs')).records.find((r) => r.path === p)?.remoteId ?? '';
+
+  beforeEach(async () => {
+    for (const n of ['a', 'b']) await writeFile(at(`${n}.pdf`), n);
+    await sync.select({ name: 'docs', add: ['a.pdf', 'b.pdf'] });
+    await apply();
+  });
+
+  it('a dry run lists B5 in actions and pendingConfirmation; with the flag in actions only', async () => {
+    await rm(at('a.pdf'));
+    const dry = await sync.run({ name: 'docs' });
+    expect(dry.actions['trash-remote']).toEqual(['a.pdf']);
+    expect(dry.pendingConfirmation).toEqual([{ path: 'a.pdf', remoteId: await idOf('a.pdf') }]);
+    const flagged = await sync.run({ name: 'docs', confirmRemoteTrash: true });
+    expect(flagged.actions['trash-remote']).toEqual(['a.pdf']);
+    expect(flagged.pendingConfirmation).toEqual([]);
+    expect(flagged.planId).toBe(dry.planId);
+  });
+
+  it('an unconfirmed apply leaves B5 pending and untouched while other actions run', async () => {
+    await rm(at('a.pdf'));
+    await writeFile(at('b.pdf'), 'b v2');
+    const id = await idOf('a.pdf');
+    const before = (await store.load('docs')).records.find((r) => r.path === 'a.pdf');
+    const report = await apply();
+    expect(report.actions).toEqual({ 'update-remote': ['b.pdf'] });
+    expect(report.pendingConfirmation).toEqual([{ path: 'a.pdf', remoteId: id }]);
+    expect(report.failures).toEqual([]);
+    expect(report.notRun).toEqual([]);
+    expect(mem.files.get(id)?.trashed).toBe(false);
+    expect(mem.files.get(id)?.content.toString()).toBe('a');
+    const after = await store.load('docs');
+    expect(after.records.map((r) => r.path).sort()).toEqual(['a.pdf', 'b.pdf']);
+    expect(after.records.find((r) => r.path === 'a.pdf')).toEqual(before);
+    expect(after.pair.selection).toContain('a.pdf');
+    expect((await sync.run({ name: 'docs' })).pendingConfirmation).toMatchObject([
+      { path: 'a.pdf' },
+    ]);
+  });
+
+  it('a confirmed apply bound to the dry-run planId trashes the Drive copy', async () => {
+    await rm(at('a.pdf'));
+    const id = await idOf('a.pdf');
+    const dry = await sync.run({ name: 'docs' });
+    const res = await sync.run({
+      name: 'docs',
+      apply: true,
+      planId: dry.planId,
+      confirmRemoteTrash: true,
+    });
+    expect(res.aborted).toBeNull();
+    expect(res.actions['trash-remote']).toEqual(['a.pdf']);
+    expect(res.pendingConfirmation).toEqual([]);
+    expect(mem.files.get(id)?.trashed).toBe(true);
+  });
+
+  it('a pending B5 becomes B6 when Drive changes, and B1 when the file comes back', async () => {
+    await rm(at('a.pdf'));
+    await apply();
+    const f = mem.files.get(await idOf('a.pdf'))!;
+    f.content = Buffer.from('a remote v2');
+    f.modifiedTime = '2026-11-03T14:00:00.000Z';
+    const recreated = await apply();
+    expect(recreated.actions).toEqual({ 'download-new': ['a.pdf'] });
+    expect(recreated.pendingConfirmation).toEqual([]);
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('a remote v2');
+    await rm(at('b.pdf'));
+    await apply();
+    await writeFile(at('b.pdf'), 'b');
+    const back = await sync.run({ name: 'docs' });
+    expect(back.actions).toEqual({});
+    expect(back.pendingConfirmation).toEqual([]);
+  });
+
+  it('warns confirm-needs-mass-delete when the confirmed apply would brake', async () => {
+    const warning = {
+      path: '',
+      code: 'confirm-needs-mass-delete',
+      message: 'confirming these deletions would also need allowMassDelete',
+    };
+    await writeFile(at('c.pdf'), 'c');
+    await sync.select({ name: 'docs', add: ['c.pdf'] });
+    await apply();
+    for (const n of ['a', 'b', 'c']) await rm(at(`${n}.pdf`));
+    const dry = await sync.run({ name: 'docs' });
+    expect(dry.warnings).toContainEqual(warning);
+    const flaggedDry = await sync.run({ name: 'docs', confirmRemoteTrash: true });
+    expect(flaggedDry.warnings).not.toContainEqual(warning);
+    const unconfirmed = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
+    expect(unconfirmed.aborted).toBeNull();
+    expect(unconfirmed.pendingConfirmation).toHaveLength(3);
+    expect(unconfirmed.warnings).toContainEqual(warning);
+    expect(mem.childrenOf('ROOT')).toHaveLength(3);
+    const confirmed = await sync.run({ name: 'docs', apply: true, confirmRemoteTrash: true });
+    expect(confirmed.aborted?.reason).toBe('mass-delete');
+    expect(confirmed.warnings).not.toContainEqual(warning);
+    expect(mem.childrenOf('ROOT')).toHaveLength(3);
   });
 });
 

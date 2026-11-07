@@ -85,7 +85,7 @@ describe.runIf(account)('Sync E2E (live)', () => {
       await files.delete({ account, fileId: id('del-remote.txt') });
       await files.rename({ account, fileId: id('moved.txt'), newName: 'renamed.txt' });
 
-      const third = await sync.run({ name: 'e2e', apply: true });
+      const third = await sync.run({ name: 'e2e', apply: true, confirmRemoteTrash: true });
       expect(third.failures).toEqual([]);
       expect(third.actions).toEqual({
         'update-remote': ['edit-local.txt'],

@@ -31,6 +31,7 @@ export interface ReportOptions {
   aborted?: SyncReport['aborted'];
   outcomes?: readonly ActionOutcome[];
   releasable?: readonly string[];
+  pendingConfirmation?: SyncReport['pendingConfirmation'];
 }
 
 /** Turns a plan (dry run / aborted) or executed outcomes into the sync_run report (spec §8). */
@@ -52,6 +53,7 @@ export function buildReport(pairName: string, plan: Plan, opts: ReportOptions): 
     failures: [],
     notRun: [],
     candidates: plan.candidates,
+    pendingConfirmation: [...(opts.pendingConfirmation ?? [])],
   };
   if (opts.releasable) report.releasable = [...opts.releasable];
   const add = (kind: keyof SyncReport['actions'], path: string): void => {

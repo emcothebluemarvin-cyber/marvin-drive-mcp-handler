@@ -21,6 +21,7 @@ const REPORT: SyncReport = {
   failures: [],
   notRun: [],
   candidates: { local: [], remote: [], truncated: false },
+  pendingConfirmation: [],
 };
 
 const RELEASE: ReleaseResult = {

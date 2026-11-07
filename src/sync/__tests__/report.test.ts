@@ -60,6 +60,7 @@ describe('buildReport', () => {
       failures: [],
       notRun: [],
       candidates: PLAN.candidates,
+      pendingConfirmation: [],
     });
   });
 

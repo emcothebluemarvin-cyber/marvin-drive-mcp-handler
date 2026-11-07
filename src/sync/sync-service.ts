@@ -16,7 +16,7 @@ import {
 import type { PairStore } from './pair-store.js';
 import { absInside } from './paths.js';
 import { plan as makePlan } from './planner.js';
-import { buildReport } from './report.js';
+import { buildReport, type ReportOptions } from './report.js';
 import {
   applyRelease,
   releaseStatus,
@@ -59,7 +59,15 @@ export interface RunInput {
   apply?: boolean;
   planId?: string;
   allowMassDelete?: boolean;
+  /** Addendum §2: also run B5 trash-remote actions. */
+  confirmRemoteTrash?: boolean;
 }
+
+const CONFIRM_NEEDS_MASS_DELETE = {
+  path: '',
+  code: 'confirm-needs-mass-delete',
+  message: 'confirming these deletions would also need allowMassDelete',
+};
 
 /** Sub-project 5 Phase A: pairs, AI-assisted selection, dry-run/apply two-way sync. */
 export class SyncService {
@@ -139,9 +147,23 @@ export class SyncService {
       await checkRoots(this.env, file.pair);
       const { plan, remote, local } = await this.buildPlan(file);
       const name = file.pair.name;
-      if (!apply) return buildReport(name, plan, { dryRun: true });
+      const confirm = input.confirmRemoteTrash ?? false;
+      const awaiting = confirm ? [] : plan.actions.filter((a) => a.reason === 'local-deleted');
+      const pendingConfirmation = awaiting.map((a) => ({
+        path: a.key,
+        remoteId: a.record?.remoteId ?? a.remote?.id ?? '',
+      }));
+      // Only when confirming is what would trip the brake (the unconfirmed plan passes).
+      const report = (opts: Omit<ReportOptions, 'pendingConfirmation'>): SyncReport => {
+        const r = buildReport(name, plan, { ...opts, pendingConfirmation });
+        if (awaiting.length > 0 && plan.brake.tripped && !plan.brakeUnconfirmed.tripped) {
+          r.warnings.push(CONFIRM_NEEDS_MASS_DELETE);
+        }
+        return r;
+      };
+      if (!apply) return report({ dryRun: true });
       if (input.planId !== undefined && input.planId !== plan.planId) {
-        return buildReport(name, plan, {
+        return report({
           dryRun: true,
           aborted: {
             reason: 'plan-changed',
@@ -150,9 +172,10 @@ export class SyncService {
           },
         });
       }
-      if (plan.brake.tripped && !input.allowMassDelete) {
-        const { trashRemote, trashLocal, tracked } = plan.brake;
-        return buildReport(name, plan, {
+      const brake = confirm ? plan.brake : plan.brakeUnconfirmed;
+      if (brake.tripped && !input.allowMassDelete) {
+        const { trashRemote, trashLocal, tracked } = brake;
+        return report({
           dryRun: true,
           aborted: {
             reason: 'mass-delete',
@@ -173,7 +196,11 @@ export class SyncService {
         file,
         remote.folders,
       );
-      const outcomes = await executor.run(plan.actions);
+      // Unconfirmed B5 deletions stay untouched (record and both sides); the next run plans them again.
+      const toRun = confirm
+        ? plan.actions
+        : plan.actions.filter((a) => a.reason !== 'local-deleted');
+      const outcomes = await executor.run(toRun);
       file.pair.lastAppliedRunAt = startedAt;
       if (file.pair.firstAppliedRunAt === null) {
         file.pair.firstAppliedRunAt = startedAt;
@@ -197,7 +224,7 @@ export class SyncService {
         .filter((r) => !r.remoteOnly && (inSync.has(r.path) || done.has(r.path)))
         .map((r) => r.path)
         .sort();
-      return buildReport(name, plan, { dryRun: false, outcomes, releasable });
+      return report({ dryRun: false, outcomes, releasable });
     });
   }
 

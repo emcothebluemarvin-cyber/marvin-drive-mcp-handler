@@ -281,6 +281,8 @@ export interface SyncReport {
   failures: Array<{ path: string; kind: ActionKind; message: string }>;
   notRun: string[];
   candidates: { local: Candidate[]; remote: Candidate[]; truncated: boolean };
+  /** B5 deletions waiting for confirmRemoteTrash (addendum §2.3). */
+  pendingConfirmation: Array<{ path: string; remoteId: string }>;
   /** Applied runs: files sync_release could release now (spec §10). */
   releasable?: string[];
 }
