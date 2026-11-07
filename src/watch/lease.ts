@@ -97,6 +97,14 @@ export class PollerLease {
     return true;
   }
 
+  /** Still the holder? Reads the lock only (no heartbeat write); forgets a lost lease. */
+  async verify(): Promise<boolean> {
+    if (this.content === null) return false;
+    if (await holdsLock(this.lockFile, this.content)) return true;
+    this.forget();
+    return false;
+  }
+
   async release(): Promise<void> {
     const release = this.releaseLock;
     this.forget();

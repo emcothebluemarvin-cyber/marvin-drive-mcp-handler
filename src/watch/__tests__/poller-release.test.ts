@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { silentLogger } from '../../files/__tests__/fakes.js';
 import { QUIET_MS } from '../coalesce.js';
 import { Inbox, InboxWriter, ROTATE_AT_LINES } from '../inbox.js';
-import { Poller } from '../poller.js';
+import { LeaseLostError, Poller } from '../poller.js';
 import { isUnread } from '../read-state.js';
 import { toKnown } from '../relevance.js';
 import { emptyState } from '../types.js';
@@ -30,7 +30,7 @@ let snap: MemorySnapshotter;
 let inbox: Inbox;
 let clock: ReturnType<typeof testClock>;
 
-async function newPoller(): Promise<Poller> {
+async function newPoller(stillLeader?: () => Promise<boolean>): Promise<Poller> {
   const writer = new InboxWriter(inbox);
   await writer.init();
   return new Poller({
@@ -40,6 +40,7 @@ async function newPoller(): Promise<Poller> {
     inbox,
     now: clock.now,
     log: silentLogger(),
+    ...(stillLeader ? { stillLeader } : {}),
   });
 }
 
@@ -156,5 +157,17 @@ describe('Poller release', () => {
     const poller = await newPoller();
     await poller.runOnce();
     expect((await readFile(inbox.file, 'utf8')).trim().split('\n')).toHaveLength(500);
+  });
+
+  it('appends nothing and stops the pass once leadership is lost', async () => {
+    let leader = true;
+    const poller = await newPoller(async () => leader);
+    edit();
+    await poller.runOnce();
+    clock.advance(QUIET_MS);
+    leader = false;
+    await expect(poller.runOnce()).rejects.toBeInstanceOf(LeaseLostError);
+    expect(await inbox.readAll()).toEqual([]);
+    expect((await store.load(EMAIL)).pending.D).toBeDefined();
   });
 });

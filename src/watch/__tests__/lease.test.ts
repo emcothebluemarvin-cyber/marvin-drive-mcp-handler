@@ -116,4 +116,17 @@ describe('PollerLease', () => {
       await taker.release();
     }
   });
+
+  it('verify() checks the lock without rewriting the heartbeat and forgets a lost lease', async () => {
+    const a = lease();
+    expect(await a.verify()).toBe(false); // not held
+    await a.tryAcquire();
+    nowMs += INTERVAL;
+    expect(await a.verify()).toBe(true);
+    expect(await heartbeatAt()).toBe('2026-11-07T11:00:00.000Z');
+    await rm(path.join(dir, LEASE_FILE));
+    expect(await lease({ pid: 222 }).tryAcquire()).toBe(true);
+    expect(await a.verify()).toBe(false);
+    expect(a.held).toBe(false);
+  });
 });

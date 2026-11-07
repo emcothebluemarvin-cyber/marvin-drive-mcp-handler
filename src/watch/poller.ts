@@ -23,6 +23,16 @@ export interface PollerDeps {
   log: Logger;
   quietMs?: number;
   maxWaitMs?: number;
+  /** Leadership check right before each inbox append (a lost lease must not append). */
+  stillLeader?: () => Promise<boolean>;
+}
+
+/** The poller lease was taken over: the pass stops without appending (spec §7.2). */
+export class LeaseLostError extends Error {
+  constructor() {
+    super('The Drive watch poller lease was lost');
+    this.name = 'LeaseLostError';
+  }
 }
 
 interface Fetched {
@@ -86,12 +96,14 @@ export class Poller {
       try {
         await this.pollAccount(email, state.cursor, state.entries);
       } catch (err) {
+        if (err instanceof LeaseLostError) throw err;
         this.deps.log.error('Drive watch poll failed', { account: email, error: err });
         continue;
       }
       try {
         await this.releaseAccount(email);
       } catch (err) {
+        if (err instanceof LeaseLostError) throw err;
         this.deps.log.error('Releasing Drive changes failed', { account: email, error: err });
       }
     }
@@ -121,7 +133,7 @@ export class Poller {
         now: this.deps.now(),
         log: this.deps.log,
       });
-      if (result.event) await this.deps.writer.append(result.event);
+      if (result.event) await this.append(result.event);
       await this.deps.store.withLock(async () => {
         const s = await this.deps.store.load(email);
         const current = s.pending[item.fileId];
@@ -137,6 +149,12 @@ export class Poller {
         await this.deps.store.save(email, s);
       });
     }
+  }
+
+  /** Appends only while still the lease holder; otherwise stops the pass. */
+  private async append(draft: EventDraft): Promise<void> {
+    if (this.deps.stillLeader && !(await this.deps.stillLeader())) throw new LeaseLostError();
+    await this.deps.writer.append(draft);
   }
 
   private backingOff(state: AccountState): boolean {
@@ -237,7 +255,7 @@ export class Poller {
         const state = await this.deps.store.load(email);
         if (state.cursor !== cursor) return;
         const from = state.lastPollAt ?? state.entries.map((e) => e.addedAt).sort()[0] ?? time;
-        await this.deps.writer.append(
+        await this.append(
           systemEvent(email, 'gap', time, `changes between ${from} and ${time} may be missing`),
         );
         state.cursor = fresh;
@@ -256,7 +274,7 @@ export class Poller {
       const failures = (state.backoff?.failures ?? 0) + 1;
       const wasPaused = state.backoff?.paused ?? false;
       if (reauth && !wasPaused) {
-        await this.deps.writer.append(
+        await this.append(
           systemEvent(
             email,
             'watch-paused',
