@@ -77,3 +77,12 @@ describe('Membership', () => {
     expect(found.map((e) => e.id).sort()).toEqual(['F', 'SUB']);
   });
 });
+
+describe('Membership review fixes', () => {
+  it('does not look up parents at the last depth level', async () => {
+    tree = {};
+    for (let i = 0; i < 30; i++) tree[`c${i}`] = [`c${i + 1}`];
+    await m.covering('x', ['c0'], [folderEntry({ id: 'far' })]);
+    expect(calls).toHaveLength(MAX_DEPTH - 1);
+  });
+});

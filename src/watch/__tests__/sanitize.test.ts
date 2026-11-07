@@ -55,3 +55,14 @@ describe('sanitizeModifier', () => {
     });
   });
 });
+
+describe('sanitize review fixes', () => {
+  it('strips the Arabic letter mark, zero-width characters and BOMs anywhere', () => {
+    expect(sanitizeText('a؜b​c‌d‍e﻿f﻿')).toBe('abcdef');
+  });
+
+  it('turns line and paragraph separators into newlines', () => {
+    expect(sanitizeText('a b c')).toBe('a\nb\nc');
+    expect(sanitizeLine('a b c')).toBe('a b c');
+  });
+});

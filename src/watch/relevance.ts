@@ -38,10 +38,12 @@ export function toKnown(file: RawFile, via: readonly string[]): KnownFile {
   };
 }
 
-function ms(iso: string): number {
+function ms(iso: string, fallback = 0): number {
   const t = Date.parse(iso);
-  return Number.isNaN(t) ? 0 : t;
+  return Number.isNaN(t) ? fallback : t;
 }
+
+const TERMINAL: ReadonlySet<PendingFlag> = new Set(['removed', 'moved-out']);
 
 function sameParents(a: readonly string[], b: readonly string[]): boolean {
   const x = [...a].sort();
@@ -83,6 +85,12 @@ function withPending(
   now: string,
 ): Tracking {
   const existing = t.pending[id];
+  if (existing?.before === null && flags.some((f) => TERMINAL.has(f))) {
+    // Added (or first seen) and gone again within one window: the user never heard of it.
+    const pending = { ...t.pending };
+    delete pending[id];
+    return { known: t.known, pending };
+  }
   let item: PendingItem;
   if (existing) {
     const modifiers = [...existing.modifiers];
@@ -110,13 +118,32 @@ function withPending(
   return { known: t.known, pending: { ...t.pending, [id]: item } };
 }
 
-/** A file that comes back (moved in again, access regained) cancels its removed/moved-out item. */
+/**
+ * A file that comes back (moved in again, access regained) cancels the removed/moved-out part
+ * of its pending item; earlier flags (an edit before it went away) and `before` are kept.
+ */
 function dropTerminal(t: Tracking, id: string): Tracking {
   const item = t.pending[id];
-  if (!item || !item.flags.some((f) => f === 'removed' || f === 'moved-out')) return t;
+  if (!item || !item.flags.some((f) => TERMINAL.has(f))) return t;
+  const flags = item.flags.filter((f) => !TERMINAL.has(f));
   const pending = { ...t.pending };
-  delete pending[id];
+  if (flags.length === 0) delete pending[id];
+  else pending[id] = { ...item, flags };
   return { known: t.known, pending };
+}
+
+/** Flags of `prior` → `next` that are visible for this file (resolved ambiguity 5). */
+function visibleFlags(
+  prior: KnownFile,
+  next: KnownFile,
+  id: string,
+  covering: readonly WatchEntry[],
+): PendingFlag[] {
+  const flags = changedFlags(prior, next);
+  const self = covering.find((e) => e.id === id);
+  if (self?.folder) return flags.filter((f) => FOLDER_ENTRY_FLAGS.has(f));
+  if (next.kind === 'folder') return flags.filter((f) => f !== 'edited');
+  return flags;
 }
 
 /** No-op change: an existing pending item still gets the latest state (lastSeen unchanged). */
@@ -148,7 +175,15 @@ export function applyChange(t: Tracking, input: RelevanceInput): Tracking {
   );
   if (prior === undefined) {
     t = dropTerminal(t, id);
-    const addedAt = Math.min(...covering.map((e) => ms(e.addedAt)));
+    const back = t.pending[id];
+    if (back?.before) {
+      // Came back within the window: compare with the state before the first pending change.
+      const flags = visibleFlags(back.before, next, id, covering);
+      return withPending(remember(t, id, next), id, back.before, next, flags, null, now);
+    }
+    // An unparseable addedAt counts as "now" (nothing before it is new).
+    const nowMs = ms(now, Date.now());
+    const addedAt = Math.min(...covering.map((e) => ms(e.addedAt, nowMs)));
     if (ms(file.createdTime) >= addedAt) {
       return withPending(remember(t, id, next), id, null, next, ['added'], file.modifier, now);
     }
@@ -163,10 +198,7 @@ export function applyChange(t: Tracking, input: RelevanceInput): Tracking {
       now,
     );
   }
-  let flags = changedFlags(prior, next);
-  const self = covering.find((e) => e.id === id);
-  if (self?.folder) flags = flags.filter((f) => FOLDER_ENTRY_FLAGS.has(f));
-  else if (file.kind === 'folder') flags = flags.filter((f) => f !== 'edited');
+  const flags = visibleFlags(prior, next, id, covering);
   if (flags.length === 0) return refreshAfter(remember(t, id, next), id, next);
   return withPending(remember(t, id, next), id, prior, next, flags, file.modifier, now);
 }

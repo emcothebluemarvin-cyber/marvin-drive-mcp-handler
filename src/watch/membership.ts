@@ -36,7 +36,8 @@ export class Membership {
         seen.add(id);
         const entry = byId.get(id);
         if (entry?.folder) found.set(id, entry);
-        next.push(...(await this.lookup(id)));
+        // The last level's parents would never be walked: no lookup for them.
+        if (depth < MAX_DEPTH - 1) next.push(...(await this.lookup(id)));
       }
       frontier = next;
     }

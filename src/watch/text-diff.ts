@@ -1,4 +1,5 @@
 import { diffLines } from 'diff';
+import { MAX_LINE, cutLine } from './sanitize.js';
 
 /** Stored diff limit and pushed diff limit (spec §6). */
 export const STORED_DIFF_CHARS = 8000;
@@ -23,7 +24,10 @@ export function isChangeLine(line: string): boolean {
   return line !== '…' && !line.startsWith('  ');
 }
 
-/** Cuts `text` at a line boundary so that it plus the tail line fits `maxChars`. */
+/**
+ * Cuts `text` at a line boundary so that it plus the tail line fits `maxChars`. Callers cap
+ * every line first (`cutLine`), so one overlong line cannot hide everything after it.
+ */
 export function truncateDiff(
   text: string,
   maxChars: number,
@@ -43,6 +47,11 @@ export function truncateDiff(
     used += cost;
   }
   const remaining = all.slice(i).filter(isChangeLine).length;
+  // Only context was cut: nothing worth stating is hidden.
+  if (remaining === 0) {
+    while (kept[kept.length - 1] === '…') kept.pop();
+    return { text: kept.join('\n'), truncated: false };
+  }
   kept.push(tail(remaining));
   return { text: kept.join('\n'), truncated: true };
 }
@@ -72,7 +81,9 @@ export function textDiff(
   const rows: Row[] = [];
   for (const part of parts) {
     const op: Row['op'] = part.added ? '+' : part.removed ? '-' : ' ';
-    for (const line of splitValue(part.value)) rows.push({ op, text: line });
+    for (const line of splitValue(part.value)) {
+      rows.push({ op, text: cutLine(line, MAX_LINE - 2) });
+    }
   }
   const keep = rows.map(() => false);
   rows.forEach((row, i) => {

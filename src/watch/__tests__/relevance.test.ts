@@ -245,3 +245,64 @@ describe('applyChange (spec §5.3)', () => {
     expect(JSON.stringify(start)).toBe(snapshot);
   });
 });
+
+describe('applyChange review fixes', () => {
+  const EDIT = '2026-11-07T11:30:00.000Z';
+
+  function editedThen(gone: 'removed' | 'moved-out'): Tracking {
+    const edited = applyChange(knowing('x'), {
+      change: change('x', rawFile({ modifiedTime: EDIT })),
+      covering: [F],
+      now: NOW,
+    });
+    return gone === 'removed'
+      ? applyChange(edited, { change: change('x', null), covering: [], now: NOW })
+      : applyChange(edited, {
+          change: change('x', rawFile({ modifiedTime: EDIT, parents: ['ELSEWHERE'] })),
+          covering: [],
+          now: NOW,
+        });
+  }
+
+  for (const gone of ['removed', 'moved-out'] as const) {
+    it(`a file that comes back after ${gone} keeps its earlier edit and before`, () => {
+      const gonePending = editedThen(gone);
+      expect(gonePending.pending.x?.flags).toEqual(['edited', gone]);
+      const back = applyChange(gonePending, {
+        change: change('x', rawFile({ modifiedTime: EDIT })),
+        covering: [F],
+        now: LATER,
+      });
+      expect(back.known.x).toBeDefined();
+      expect(back.pending.x).toMatchObject({
+        flags: ['edited'],
+        firstSeen: NOW,
+        lastSeen: LATER,
+        before: { modifiedTime: '2026-11-07T11:00:00.000Z' },
+        after: { modifiedTime: EDIT },
+      });
+    });
+  }
+
+  it('an added file that is removed or moved out in the same window is dropped', () => {
+    const created = rawFile({ createdTime: '2026-11-07T10:30:00.000Z' });
+    const added = applyChange(empty, { change: change('x', created), covering: [F], now: NOW });
+    expect(added.pending.x?.flags).toEqual(['added']);
+    const removed = applyChange(added, { change: change('x', null), covering: [], now: LATER });
+    expect(removed).toEqual({ known: {}, pending: {} });
+    const movedOut = applyChange(added, {
+      change: change('x', { ...created, parents: ['ELSEWHERE'] }),
+      covering: [],
+      now: LATER,
+    });
+    expect(movedOut).toEqual({ known: {}, pending: {} });
+  });
+
+  it('treats an unparseable addedAt as now, not as the epoch', () => {
+    const bad = folderEntry({ addedAt: 'not a date' });
+    const created = rawFile({ createdTime: '2026-11-07T10:30:00.000Z' });
+    const t = applyChange(empty, { change: change('x', created), covering: [bad], now: NOW });
+    expect(t.pending).toEqual({});
+    expect(t.known.x).toBeDefined();
+  });
+});

@@ -1,3 +1,4 @@
+import { MAX_LINE, cutLine } from './sanitize.js';
 import { STORED_DIFF_CHARS, truncateDiff, type DiffResult } from './text-diff.js';
 import type { SheetSnapshot } from './types.js';
 
@@ -27,6 +28,9 @@ export function rangeOf(title: string): string {
   return quoted(title);
 }
 
+/** Each cell value is capped so that old and new both fit one capped line. */
+const CELL_CHARS = Math.floor((MAX_LINE - 40) / 2);
+
 function cellLines(before: SheetSnapshot, after: SheetSnapshot): string[] {
   const lines: string[] = [];
   const rows = Math.max(before.rows.length, after.rows.length);
@@ -38,9 +42,8 @@ function cellLines(before: SheetSnapshot, after: SheetSnapshot): string[] {
       const old = a[c] ?? '';
       const now = b[c] ?? '';
       if (old !== now) {
-        lines.push(
-          `${sheetRef(after.title)}!${columnName(c)}${r + 1}: ${JSON.stringify(old)} → ${JSON.stringify(now)}`,
-        );
+        const values = `${JSON.stringify(cutLine(old, CELL_CHARS))} → ${JSON.stringify(cutLine(now, CELL_CHARS))}`;
+        lines.push(cutLine(`${sheetRef(after.title)}!${columnName(c)}${r + 1}: ${values}`));
       }
     }
   }
@@ -57,12 +60,12 @@ export function sheetDiff(
   const lines: string[] = [];
   for (const sheet of after) {
     const prev = old.get(sheet.title);
-    if (prev === undefined) lines.push(`+ sheet ${JSON.stringify(sheet.title)}`);
+    if (prev === undefined) lines.push(cutLine(`+ sheet ${JSON.stringify(sheet.title)}`));
     else lines.push(...cellLines(prev, sheet));
   }
   const titles = new Set(after.map((s) => s.title));
   for (const sheet of before) {
-    if (!titles.has(sheet.title)) lines.push(`- sheet ${JSON.stringify(sheet.title)}`);
+    if (!titles.has(sheet.title)) lines.push(cutLine(`- sheet ${JSON.stringify(sheet.title)}`));
   }
   const cut = truncateDiff(
     lines.join('\n'),

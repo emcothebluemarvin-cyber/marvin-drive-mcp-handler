@@ -66,3 +66,17 @@ describe('sheetDiff', () => {
     expect(d.changes).toBe(100);
   });
 });
+
+describe('sheetDiff review fixes', () => {
+  it('caps an overlong cell line so later cells stay visible', () => {
+    const long = 'x'.repeat(9000);
+    const d = sheetDiff(
+      [{ title: 'S', rows: [[long], ['1'], ['2']] }],
+      [{ title: 'S', rows: [[`${long}y`], ['10'], ['20']] }],
+    );
+    expect(d.text).toContain('S!A2: "1" → "10"');
+    expect(d.text).toContain('S!A3: "2" → "20"');
+    expect(d.changes).toBe(3);
+    for (const l of d.text.split('\n')) expect([...l].length).toBeLessThanOrEqual(300);
+  });
+});

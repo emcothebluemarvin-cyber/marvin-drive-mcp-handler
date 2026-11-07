@@ -70,3 +70,32 @@ describe('truncateDiff', () => {
     expect(isChangeLine('…')).toBe(false);
   });
 });
+
+describe('review fixes', () => {
+  const points = (s: string): number => [...s].length;
+
+  it('caps overlong lines so later changes stay visible', () => {
+    const long = 'x'.repeat(9000);
+    const d = textDiff(`a\n${long}\nb\n`, `a\n${long}y\nb\nc\nd\n`);
+    expect(d?.text).toContain('+ c');
+    expect(d?.text).toContain('+ d');
+    expect(d?.changes).toBe(4);
+    expect(d?.truncated).toBe(false);
+    for (const l of d?.text.split('\n') ?? []) expect(points(l)).toBeLessThanOrEqual(300);
+  });
+
+  it('caps by code points without splitting surrogate pairs', () => {
+    const d = textDiff('a\n', `a\n${'😀'.repeat(400)}\n`);
+    const added = d?.text.split('\n').find((l) => l.startsWith('+ ')) ?? '';
+    expect(points(added)).toBe(300);
+    expect(added.endsWith('…')).toBe(true);
+    expect(added).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+
+  it('omits the tail when only context lines were cut', () => {
+    expect(truncateDiff('+ a\n  ctx1\n  ctx2', 6, (n) => `+${n}`)).toEqual({
+      text: '+ a',
+      truncated: false,
+    });
+  });
+});
