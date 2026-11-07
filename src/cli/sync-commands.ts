@@ -1,16 +1,16 @@
 import type { Command } from 'commander';
 import type { SyncService } from '../sync/sync-service.js';
-import { formatPairs, formatReport, reportFailed } from './sync-format.js';
+import { formatPairs, formatRelease, formatReport, reportFailed } from './sync-format.js';
 
 export interface SyncCliDeps {
-  sync: () => Pick<SyncService, 'listPairs' | 'run' | 'repairMarker'>;
+  sync: () => Pick<SyncService, 'listPairs' | 'run' | 'repairMarker' | 'release'>;
   out: (line: string) => void;
   /** Asks a yes/no question on the terminal; injectable for tests. */
   confirm: (question: string) => Promise<boolean>;
   setExitCode: (code: number) => void;
 }
 
-/** `marvin-drive sync list | run | repair-marker` (spec §9, Phase A). */
+/** `marvin-drive sync list | run | release | repair-marker` (spec §9). */
 export function registerSyncCommands(program: Command, deps: SyncCliDeps): void {
   const sync = program
     .command('sync')
@@ -45,6 +45,27 @@ export function registerSyncCommands(program: Command, deps: SyncCliDeps): void 
         if (reportFailed(report)) deps.setExitCode(1);
       },
     );
+
+  sync
+    .command('release')
+    .description(
+      'Remove local copies of synced files and keep them in Drive only (dry run unless --apply)',
+    )
+    .argument('<name>', 'pair name')
+    .argument('[paths...]', 'relative paths to release')
+    .option('--all', 'every file that is in sync')
+    .option('--apply', 'release (default: dry run)')
+    .action(async (name: string, paths: string[], opts: { all?: boolean; apply?: boolean }) => {
+      const res = await deps.sync().release({
+        name,
+        apply: opts.apply ?? false,
+        // Pass both through: `--all a.pdf` hits the service's "exactly one" ValidationError.
+        ...(opts.all ? { all: true } : {}),
+        ...(paths.length > 0 ? { paths } : {}),
+      });
+      deps.out(formatRelease(res));
+      if (res.failed.length > 0) deps.setExitCode(1);
+    });
 
   sync
     .command('repair-marker')

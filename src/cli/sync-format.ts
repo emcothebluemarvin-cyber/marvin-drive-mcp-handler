@@ -1,3 +1,4 @@
+import type { ReleaseResult } from '../sync/release.js';
 import type { PairSummary } from '../sync/sync-service.js';
 import type { SyncReport } from '../sync/types.js';
 
@@ -67,4 +68,30 @@ export function formatReport(r: SyncReport): string {
 /** Exit code 1 if anything failed or the run aborted (spec §9). */
 export function reportFailed(r: SyncReport): boolean {
   return r.aborted !== null || r.failures.length > 0 || r.notRun.length > 0;
+}
+
+export function formatRelease(r: ReleaseResult): string {
+  const lines = [`${r.pair} — ${r.dryRun ? 'release dry run' : 'release applied'}`];
+  lines.push(
+    ...section(
+      'Release',
+      r.released.map((x) => `${x.status}: ${x.path}`),
+    ),
+  );
+  lines.push(
+    ...section(
+      'Skipped',
+      r.skipped.map((s) => `${s.path} — ${s.reason}`),
+    ),
+  );
+  lines.push(
+    ...section(
+      'Failed (nothing changed)',
+      r.failed.map((f) => `${f.path} — ${f.reason}`),
+    ),
+  );
+  lines.push(...section('Removed empty folders', r.removedDirs));
+  if (r.dryRun && r.released.length > 0) lines.push('Run again with --apply to release.');
+  if (lines.length === 1) lines.push('Nothing to release.');
+  return lines.join('\n');
 }

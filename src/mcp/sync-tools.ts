@@ -13,6 +13,7 @@ export const SYNC_TOOL_NAMES = [
   'sync_scan',
   'sync_select',
   'sync_run',
+  'sync_release',
   'sync_remove_pair',
 ] as const;
 
@@ -133,6 +134,21 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
         }
         return sync.run(args);
       }),
+  );
+
+  server.registerTool(
+    'sync_release',
+    {
+      description:
+        'Move to Drive: remove the local copies of synced files and keep them in Drive only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
+      inputSchema: {
+        name,
+        paths: relPaths.optional(),
+        all: z.boolean().optional().describe('Release every file that is in sync'),
+        apply: z.boolean().optional().describe('Default false (dry run)'),
+      },
+    },
+    async (args) => respond(log, () => sync.release(args)),
   );
 
   server.registerTool(
