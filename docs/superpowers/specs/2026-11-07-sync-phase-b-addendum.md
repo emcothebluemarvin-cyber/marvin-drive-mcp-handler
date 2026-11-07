@@ -91,3 +91,7 @@ Commit 1 is a pure move: all 616 tests pass with at most import changes. Commit 
 6. Report wording, README, CHANGELOG, FEATURES; live E2E.
 
 Each step is a local commit; push waits until the GitHub account is restored.
+
+## 8. Implementation notes
+
+- **N5 moves, not copies.** The local edit is moved aside with the exclusive `moveLocal` (sync spec §6.6 N5 said `place-exclusive`). The export stream is opened first, so an export that cannot be obtained leaves the edit at its key; any failure after the move reports the kept name (`conflictCopy`, warning `native-local-edit-kept`).
