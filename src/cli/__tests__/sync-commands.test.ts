@@ -136,7 +136,17 @@ describe('sync CLI', () => {
     expect(text).toContain('marvin-drive sync release docs');
     expect(deps.setExitCode).not.toHaveBeenCalled();
   });
-  it('refuses --confirm-remote-trash without --plan-id', async () => {
+  it('allows --confirm-remote-trash on a dry run without --plan-id', async () => {
+    const { service, run } = setup();
+    await run('run', 'docs', '--confirm-remote-trash');
+    expect(service.run).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: false,
+      allowMassDelete: false,
+      confirmRemoteTrash: true,
+    });
+  });
+  it('refuses --confirm-remote-trash with --apply but without --plan-id', async () => {
     const { service, run } = setup();
     await expect(run('run', 'docs', '--apply', '--confirm-remote-trash')).rejects.toThrow(
       'pass the planId of the dry run you reviewed',

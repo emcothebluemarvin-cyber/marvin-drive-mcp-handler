@@ -42,7 +42,8 @@ export function registerSyncCommands(program: Command, deps: SyncCliDeps): void 
           confirmRemoteTrash?: boolean;
         },
       ) => {
-        if (opts.confirmRemoteTrash && !opts.planId) {
+        // Addendum §2.3: a dry run may preview the confirmation; an apply must name its plan.
+        if (opts.confirmRemoteTrash && opts.apply && !opts.planId) {
           throw new ValidationError(
             '--confirm-remote-trash: pass the planId of the dry run you reviewed (--plan-id <id>)',
           );
