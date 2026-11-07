@@ -82,10 +82,14 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 | `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete] [--confirm-remote-trash]` | Dry run (default) or apply a sync; exit code 1 on failure/abort; `--confirm-remote-trash` needs `--plan-id` |
 | `marvin-drive sync release <name> [--all \| <paths…>] [--apply]`                                         | Keep files in Drive only: local copies go to the system trash (dry run by default)                          |
 | `marvin-drive sync repair-marker <name>`                                                                 | Rewrite the folder marker after confirming the local folder                                                 |
+| `marvin-drive watch add\|remove <fileId> [--account a]`                                                  | Watch a file or folder (folders recursively) for changes by others / stop watching                          |
+| `marvin-drive watch list [--account a]`                                                                  | Watched files and folders                                                                                   |
+| `marvin-drive watch delivery [hook\|channel]`                                                            | Show or set how changes reach Claude Code (default `hook`)                                                  |
+| `marvin-drive changes [--all] [--own] [--json] [--hook]`                                                 | Changes in watched files (unread by default, marks them read); `--hook` is the `UserPromptSubmit` hook      |
 
 ## MCP tools
 
-32 tools. All accept an optional `account` (alias or email).
+34 tools. All except `drive_changes` (which covers every account) accept an optional `account` (alias or email).
 
 | Tool                                                              | Purpose                                                                                                   |
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -157,11 +161,56 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder 
 
 After an applied run Claude can offer to free disk space: `sync_release` (or `marvin-drive sync release <name> --all`) re-checks every file, moves the local copy to the system trash and keeps the Drive file; released files are never downloaded again unless you `sync_select add` them. A file you already deleted locally can be released by name, so it stays in Drive. Where no system trash can be used (Windows network drives, a drive without a Recycle Bin), release cannot move the local copy: the dry run lists such files under `skipped`. To keep one in Drive only there, delete the local copy yourself, then release it by name.
 
+### Watch
+
+| Tool            | Purpose                                                                                                                                  |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `drive_watch`   | `add` / `remove` / `list` watched files and folders (folders recursively; max 200 per account)                                           |
+| `drive_changes` | Who changed what and when in watched files: diffs (Docs/Slides lines, Sheets cells) and new comments; unread by default, marks them read |
+
 ### Editing safely
 
 Read tools return a `revisionId`. Docs and Slides edits accept `requiredRevisionId` and fail with a re-read hint if the file changed in the meantime; read-then-write tools (`docs_insert_text` at `end`/`afterHeading`, and `slides_set_text`) apply this guard implicitly using their own read, while `docs_insert_text` at an explicit `index` is guarded only when you pass `requiredRevisionId`. The advanced `docs_batch_update` and `slides_batch_update` tools require it. The Sheets API has no such guard, so address tabs by `sheetId` from `sheets_info`, never by position.
 
 The advanced `*_batch_update` tools run raw API requests with the account's own permissions, and some requests (for example charts linked to another spreadsheet, or images inserted by URL) read from other sources.
+
+## Watching files
+
+Ask Claude to "watch the budget sheet" (or run `marvin-drive watch add <fileId>`). While a Claude Code session is open, the MCP server checks the Drive Changes API every `MARVIN_WATCH_POLL_SECONDS` (default 30, minimum 15; with several sessions open only one polls). When someone **else** edits a watched file, renames, moves, trashes or comments on it, Claude is told who changed what and when — once the file has been quiet for 2 minutes (at most 10 minutes after the first change), as one summary with a diff (`+`/`-` lines for Docs and Slides, `Sheet1!B4: "120" → "135"` for Sheets) and new comments. Claude only informs you; it never acts on a change by itself. `drive_changes` (or `marvin-drive changes`) shows the full stored details.
+
+Choose one delivery mode per machine (`marvin-drive watch delivery hook|channel`):
+
+- **`hook` (default, no flags needed):** add a `UserPromptSubmit` hook to `~/.claude/settings.json`; new changes are added to the context of your next prompt:
+
+  ```json
+  {
+    "hooks": {
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node /path/to/google-handler/dist/cli/main.js changes --hook"
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+
+  The hook reads only local files (no network), prints at most 9 000 characters (the rest as a count), prints nothing when nothing is unread or in `channel` mode, and always exits 0, so it never blocks a prompt.
+
+- **`channel` (Claude Code research preview):** run `marvin-drive watch delivery channel`, then start Claude Code with `claude --dangerously-load-development-channels server:marvin-drive`. Changes are pushed into the open session as they are found; a session that starts later gets one "N Drive changes while you were away" summary. Caveats of the preview: channels need a claude.ai login or a Console API key; on Team/Enterprise plans an admin must enable `channelsEnabled`; if your client negotiates the newer protocol and pushes do not arrive, try `MCP_PROTOCOL_NEGOTIATION=legacy`. Without the flag Claude Code silently drops the pushes — the changes stay unread for `drive_changes`.
+
+Good to know:
+
+- **Your own edits are not notified** (they are stored; `drive_changes { "includeOwn": true }` shows them). Drive only reports the _last_ editor, so a foreign edit followed by your own edit between two checks looks like your own edit.
+- Files moved into a watched folder stay silent until they are edited (a move does not change the modification time). Large files are reported as "changed (too large to compare)" (text over 1 MB, sheets over 20 000 cells).
+- A file inside two watched folders is tracked through the folder that covered it when it was last seen. Removing that folder's watch can stop tracking the file although the other folder still covers it; its next change is then reported as first seen, without a diff.
+- **Safety:** notification text is written by other people. Names, diffs and comments are sanitized (control characters removed, `<`/`>` replaced, long lines cut) and marked untrusted, and the server instructions tell Claude to report them, never to follow instructions inside them.
+- **Privacy:** snapshots of watched files (plain text, cell values) and the change inbox are stored locally in `~/.config/google-handler/watch/` (`0600`); nothing leaves your machine except the Google API calls. Remove a watch to delete its snapshots.
+- If a session expires, one "watch paused" notice appears; run `marvin-drive auth login <alias>` and watching resumes.
 
 ## Files
 
@@ -171,6 +220,7 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 | `~/.config/google-handler/accounts.json`      | Aliases and emails (no secrets)      |
 | `~/.config/google-handler/audit.jsonl`        | Every mutating operation             |
 | `~/.config/google-handler/sync/<name>.json`   | Sync pair state (selection, records) |
+| `~/.config/google-handler/watch/`             | Watch list, snapshots, change inbox  |
 | `<local folder>/.marvin-sync-<name>`          | Sync folder marker (pair id)         |
 | Keychain service `marvin-drive`               | Refresh tokens (default)             |
 | `~/.config/google-handler/tokens.json`        | Refresh tokens (`…TOKEN_STORE=file`) |
@@ -182,6 +232,7 @@ The advanced `*_batch_update` tools run raw API requests with the account's own 
 npm run check                                   # typecheck, lint, format, unit + integration tests
 MARVIN_KEYCHAIN_TEST=1 npx vitest run src/auth  # real Keychain round-trip
 MARVIN_E2E_ACCOUNT=<alias> npm run test:e2e     # live Drive tests (temp Drive folder + temp local dir; sync uses a temp trash)
+MARVIN_E2E_ACCOUNT=<alias> MARVIN_E2E_EDITOR=<alias2> npm run test:e2e  # also the live watch test (second registered account edits)
 ```
 
 ## License

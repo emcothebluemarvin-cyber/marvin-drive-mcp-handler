@@ -48,6 +48,16 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ Local trash for sync deletions on Windows (Recycle Bin, `$I` record) and Linux/Unix (freedesktop.org trash); fails safely when no trash is usable (spec `2026-11-05-local-trash-design.md`)
 - ⬜ Manual check on a real Windows machine: trashed file shows in the Recycle Bin and *Restore* works
 
+### 7. Drive watch (spec: `docs/superpowers/specs/2026-11-07-drive-watch-design.md`)
+- ✅ `drive_watch` add/remove/list (files and recursive folders, 200 per account), CLI `watch add|remove|list|delivery`
+- ✅ Drive Changes API poll inside the MCP server: local tick, one poller per machine (lease + heartbeat), gap / paused / backoff handling
+- ✅ Relevance rules (no-op drop, own edits stored not notified), 120 s / 600 s coalescing, Docs/Slides line diffs, Sheets cell diffs, new comments
+- ✅ Shared inbox with read state; delivery by `UserPromptSubmit` hook (`changes --hook`) or Claude Code channel push
+- ✅ Third-party text sanitized and marked untrusted; server instructions forbid acting on it
+- ✅ Provider seam (`ChangeFeed`, `ContentSnapshotter`) for a later OneDrive provider; no runtime `googleapis` outside `src/watch/google`
+- ⬜ Live E2E with two accounts (`MARVIN_E2E_EDITOR`)
+- ⬜ Comment-only changes polled separately if Drive does not report them (decided by the live E2E, plan Task 33)
+
 ## Later
 - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)
 - ⬜ Sync watch mode (continuous sync)
