@@ -1,4 +1,5 @@
-import type { ContentSnapshotter } from '../feed.js';
+import { AccountNotFoundError, NotFoundError } from '../../errors.js';
+import type { ChangeFeed, ContentSnapshotter, WatchAccount, WatchProvider } from '../feed.js';
 import type {
   ChangeEvent,
   CommentInfo,
@@ -138,5 +139,89 @@ export function comment(over: Partial<CommentInfo> = {}): CommentInfo {
     resolved: false,
     replies: [],
     ...over,
+  };
+}
+
+/** A Drive change log in memory; the cursor is the log index. */
+export class MemoryFeed implements ChangeFeed {
+  readonly files = new Map<string, RawFile>();
+  readonly log: RawChange[] = [];
+  readonly calls: string[] = [];
+  /** Thrown by the next poll() calls, in order. */
+  readonly failures: Error[] = [];
+
+  async start(): Promise<string> {
+    this.calls.push('start');
+    return String(this.log.length);
+  }
+
+  async poll(cursor: string): Promise<{ changes: RawChange[]; next: string }> {
+    this.calls.push(`poll:${cursor}`);
+    const failure = this.failures.shift();
+    if (failure) throw failure;
+    return { changes: this.log.slice(Number(cursor)), next: String(this.log.length) };
+  }
+
+  async parentsOf(id: string): Promise<string[] | null> {
+    this.calls.push(`parents:${id}`);
+    return this.files.get(id)?.parents ?? null;
+  }
+
+  async file(id: string): Promise<RawFile> {
+    const f = this.files.get(id);
+    if (!f) throw new NotFoundError(id);
+    return f;
+  }
+
+  /** A file that already existed (no change recorded). */
+  seed(id: string, over: Partial<RawFile> = {}): RawFile {
+    const f = { ...rawFile(), ...over };
+    this.files.set(id, f);
+    return f;
+  }
+
+  /** Creates or updates a file and records the change. */
+  put(id: string, over: Partial<RawFile> = {}): RawFile {
+    const f = { ...(this.files.get(id) ?? rawFile()), ...over };
+    this.files.set(id, f);
+    this.log.push({ fileId: id, time: f.modifiedTime, removed: false, file: f });
+    return f;
+  }
+
+  remove(id: string): void {
+    this.files.delete(id);
+    this.log.push({ fileId: id, time: '', removed: true, file: null });
+  }
+}
+
+export const ACCOUNT: WatchAccount = { email: 'me@example.com', alias: 'me' };
+
+export function memoryProvider(
+  feed: MemoryFeed,
+  snapshotter: MemorySnapshotter,
+  account: WatchAccount = ACCOUNT,
+): WatchProvider {
+  return {
+    resolveAccount: async (ref) => {
+      if (ref !== undefined && ref !== account.alias && ref !== account.email) {
+        throw new AccountNotFoundError(`Unknown account "${ref}"`);
+      }
+      return account;
+    },
+    feed: () => feed,
+    snapshotter: () => snapshotter,
+  };
+}
+
+export function testClock(start = '2026-11-07T11:00:00.000Z'): {
+  now: () => Date;
+  advance: (ms: number) => void;
+} {
+  let t = Date.parse(start);
+  return {
+    now: () => new Date(t),
+    advance: (ms) => {
+      t += ms;
+    },
   };
 }
