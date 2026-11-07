@@ -6430,7 +6430,10 @@ Per account after polling: `readyToRelease(pending, now)`; for each item enrich 
     it('filters by file and marks by id only', async () => {
       const res = await readChanges(deps(), { fileId: 'S' });
       expect(seqs(res)).toEqual([3]);
-      expect(await store.loadRead()).toMatchObject({ readSeq: 0, readIds: [makeEvent({ seq: 3 }).id] });
+      expect(await store.loadRead()).toMatchObject({
+        readSeq: 0,
+        readIds: [{ id: makeEvent({ seq: 3 }).id, seq: 3 }],
+      });
       expect(res.unread).toBe(2);
     });
 
@@ -7088,7 +7091,9 @@ Spec §5.2, §7.2, §9: every process runs a local tick every `intervalMs` (`MAR
           this.poller = null;
         } else if (this.poller === null) {
           const writer = new InboxWriter(this.inbox);
-          await writer.init();
+          // Never reuse a seq already read or pushed (a deleted inbox restarts above it).
+          const rs = await this.deps.store.loadRead();
+          await writer.init(Math.max(rs.readSeq, rs.pushedSeq));
           this.poller = new Poller({
             store: this.deps.store,
             provider: this.deps.provider,
