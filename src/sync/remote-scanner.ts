@@ -44,6 +44,7 @@ export function toRemoteEntry(
     createdTime: file.createdTime ?? '',
     canEdit: file.capabilities?.canEdit ?? false,
     canTrash: file.capabilities?.canTrash ?? false,
+    native: null,
   };
 }
 

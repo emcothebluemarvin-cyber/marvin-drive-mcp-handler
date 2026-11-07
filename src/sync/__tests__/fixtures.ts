@@ -1,5 +1,6 @@
 import { rename } from 'node:fs/promises';
 import path from 'node:path';
+import { GOOGLE_MIME } from '../../files/export-formats.js';
 import type { LocalTrash } from '../trash.js';
 import type { LocalEntry, Pair, PairFile, RemoteEntry, SyncRecord } from '../types.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
@@ -82,6 +83,7 @@ export function remoteEntry(
     createdTime: '2026-11-01T00:00:00.000Z',
     canEdit: true,
     canTrash: true,
+    native: null,
     ...overrides,
   };
 }
@@ -113,4 +115,39 @@ export function record(
     remoteTrashed: false,
     ...overrides,
   };
+}
+
+export const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** A Google Doc exported as docx; `key` is the export key (e.g. `Plan.docx`). */
+export function nativeEntry(
+  id: string,
+  key: string,
+  overrides: Partial<RemoteEntry> = {},
+): RemoteEntry {
+  const base = key.slice(key.lastIndexOf('/') + 1);
+  return remoteEntry(id, key, {
+    name: base.replace(/\.docx$/, ''),
+    mimeType: GOOGLE_MIME.document,
+    md5: null,
+    size: null,
+    native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx', exportMime: DOCX_MIME },
+    ...overrides,
+  });
+}
+
+/** A native record in sync with `localEntry(key)` and `nativeEntry(remoteId, key)`. */
+export function nativeRecord(
+  remoteId: string,
+  key: string,
+  overrides: Partial<SyncRecord> = {},
+): SyncRecord {
+  const base = key.slice(key.lastIndexOf('/') + 1);
+  return record(remoteId, key, {
+    remoteName: base.replace(/\.docx$/, ''),
+    remoteMd5: null,
+    remoteSize: null,
+    native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx' },
+    ...overrides,
+  });
 }

@@ -93,6 +93,13 @@ export interface OnDiskProbe {
   ino: number;
 }
 
+/** Export settings of a Google-native Drive file (addendum §4.1). */
+export interface NativeInfo {
+  mimeType: string;
+  exportFormat: ExportFormat;
+  exportMime: string;
+}
+
 export interface RemoteEntry {
   id: string;
   key: string;
@@ -108,6 +115,8 @@ export interface RemoteEntry {
   createdTime: string;
   canEdit: boolean;
   canTrash: boolean;
+  /** Google-native file synced as a read-only export; null for binary files. */
+  native: NativeInfo | null;
 }
 
 export type RemoteIgnoreReason = 'native-skipped' | 'shortcut' | 'unrepresentable' | 'ignored-name';
