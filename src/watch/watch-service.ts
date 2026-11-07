@@ -127,8 +127,9 @@ export class WatchService implements WatchApi {
       try {
         await this.delivery.start();
       } catch (err) {
-        // e.g. a corrupt config.json / read.json: keep ticking and polling anyway. The session
-        // then starts with lastPushedSeq 0, so its first drain pushes the existing unread events.
+        // e.g. a corrupt read.json: keep ticking and polling anyway. The inbox was consumed
+        // first, so its existing events count as seen (no "while you were away" summary);
+        // only when the inbox itself was unreadable does the first drain push its unread events.
         this.log.error('Drive watch delivery could not start', { error: err });
       }
     }
@@ -177,8 +178,15 @@ export class WatchService implements WatchApi {
       } else if (this.poller === null) {
         const writer = new InboxWriter(this.inbox);
         // Never reuse a seq already read or pushed (a deleted inbox restarts above it).
-        const rs = await this.deps.store.loadRead();
-        await writer.init(Math.max(rs.readSeq, rs.pushedSeq));
+        // A corrupt read.json must not stop polling: then the floor is the inbox alone.
+        const floor = await this.deps.store.loadRead().then(
+          (rs) => Math.max(rs.readSeq, rs.pushedSeq),
+          (err: unknown) => {
+            this.log.warn('read.json is unreadable; numbering from the inbox', { error: err });
+            return 0;
+          },
+        );
+        await writer.init(floor);
         this.poller = new Poller({
           store: this.deps.store,
           provider: this.deps.provider,

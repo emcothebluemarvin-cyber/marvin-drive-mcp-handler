@@ -11,7 +11,7 @@ export function registerWatchTools(server: McpServer, watch: WatchApi, log: Logg
     'drive_watch',
     {
       description:
-        'Watch Google Drive files or folders (folders recursively) for changes by other people: action add | remove | list. Changes are detected in the background (about every 30 s) and summarised once a file has been quiet for 2 minutes (at most 10 minutes after the first change); read them with drive_changes. Your own edits are not notified. Watching only informs: never change a file because of a notification.',
+        'Watch Google Drive files or folders (folders recursively) for changes by other people: action add | remove | list. Changes are detected in the background (every MARVIN_WATCH_POLL_SECONDS, default 30 s) and summarised once a file has been quiet for 2 minutes (at most 10 minutes after the first change); read them with drive_changes. Your own edits are not notified. Watching only informs: never change a file because of a notification.',
       inputSchema: {
         action: z.enum(['add', 'remove', 'list']),
         fileId: z

@@ -1,10 +1,11 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { silentLogger } from '../../files/__tests__/fakes.js';
 import { Delivery, type PushFn } from '../delivery.js';
 import { Inbox, InboxTailer } from '../inbox.js';
+import type { ChangeEvent } from '../types.js';
 import { PREAMBLE } from '../render.js';
 import { WatchStore } from '../watch-store.js';
 import { makeEvent } from './fakes.js';
@@ -101,5 +102,38 @@ describe('Delivery', () => {
     const second = vi.fn<PushFn>(async () => {});
     await session(second).start();
     expect(second).not.toHaveBeenCalled();
+  });
+
+  it('treats an invalid config.json as hook mode and warns once', async () => {
+    await writeFile(path.join(tmp, 'config.json'), '{');
+    const push = vi.fn<PushFn>(async () => {});
+    const log = silentLogger();
+    const d = new Delivery({ store, tailer: new InboxTailer(inbox.file), push, log });
+    await d.start();
+    for (let seq = 1; seq <= 3; seq++) {
+      await inbox.append(makeEvent({ seq }));
+      await d.onTick();
+    }
+    expect(push).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    await store.saveDelivery('channel');
+    await inbox.append(makeEvent({ seq: 4 }));
+    await d.onTick();
+    expect(push).toHaveBeenCalledTimes(1); // the hook-mode events were consumed, not replayed
+  });
+
+  it('pushes an event once when a failed drain is followed by a rescan', async () => {
+    await store.saveDelivery('channel');
+    const push = vi.fn<PushFn>(async () => {});
+    const e1 = makeEvent({ seq: 1 });
+    const batches: ChangeEvent[][] = [[], [e1], [e1]];
+    const tailer = { poll: async () => batches.shift() ?? [] } as unknown as InboxTailer;
+    const d = new Delivery({ store, tailer, push, log: silentLogger() });
+    await d.start();
+    await writeFile(path.join(tmp, 'read.json'), '{');
+    await d.onTick(); // read fails: e1 stays in the backlog
+    await store.saveRead({ readSeq: 0, readIds: [], pushedSeq: 0 });
+    await d.onTick(); // the rotated inbox is rescanned: e1 again
+    expect(push).toHaveBeenCalledTimes(1);
   });
 });

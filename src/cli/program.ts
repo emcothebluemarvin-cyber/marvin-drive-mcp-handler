@@ -4,11 +4,11 @@ import { Command } from 'commander';
 import { buildApp } from '../app.js';
 import { ValidationError } from '../errors.js';
 import { logger } from '../logger.js';
-import { channelPush } from '../mcp/channel.js';
 import { createMcpServer } from '../mcp/server.js';
 import { VERSION } from '../version.js';
 import { formatAccounts } from './format.js';
 import { runHookCli } from './hook.js';
+import { serve } from './serve.js';
 import { registerSyncCommands } from './sync-commands.js';
 import { registerWatchCommands } from './watch-commands.js';
 
@@ -218,29 +218,15 @@ program
       auth: app.auth,
       version: VERSION,
     });
-    // Drive watch starts once the client is initialized (pushes before that would be lost).
-    server.server.oninitialized = (): void => {
-      app.watch.start(channelPush(server, logger)).catch((err: unknown) => {
-        logger.error('Drive watch failed to start', { error: err });
-      });
-    };
-    let stopping = false;
-    const shutdown = (): void => {
-      if (stopping) return;
-      stopping = true;
-      // A slow poll must not delay the exit for long: give the clean stop 3 s.
-      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 3_000).unref());
-      Promise.race([app.watch.stop(), timeout])
-        .catch((err: unknown) => {
-          logger.error('Drive watch failed to stop cleanly', { error: err });
-        })
-        .finally(() => process.exit(0));
-    };
-    process.stdin.once('end', shutdown);
-    process.stdin.once('close', shutdown);
-    process.once('SIGINT', shutdown);
-    process.once('SIGTERM', shutdown);
-    await server.connect(new StdioServerTransport());
+    await serve({
+      server,
+      watch: app.watch,
+      transport: new StdioServerTransport(),
+      log: logger,
+      stdin: process.stdin,
+      signals: process,
+      exit: (code) => process.exit(code),
+    });
   });
 
 registerSyncCommands(program, {

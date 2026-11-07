@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -225,5 +225,17 @@ describe('WatchService', () => {
     await a.tick();
     expect(a.isLeader).toBe(false);
     expect(feed.calls.filter((c) => c.startsWith('poll')).length).toBe(polls);
+  });
+
+  it('still polls with a corrupt read.json (seq floor 0)', async () => {
+    await writeFile(path.join(dir, 'read.json'), '{');
+    const a = session(1);
+    await a.watch({ action: 'add', fileId: 'D' });
+    await a.start(null, { timers: false });
+    edit();
+    await a.tick();
+    clock.advance(QUIET_MS);
+    await a.tick();
+    expect((await a.inbox.readAll()).map((e) => e.kind)).toEqual(['edited']);
   });
 });
