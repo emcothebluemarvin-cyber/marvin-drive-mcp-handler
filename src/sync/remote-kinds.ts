@@ -37,7 +37,7 @@ export function classifyRemote(file: DriveFile, prefs: GoogleExportPrefs): Remot
   const pref = PREF_BY_MIME[mimeType];
   if (pref === undefined) return { kind: 'unsupported', reason: 'native-unsupported' };
   const plan = resolveExport(mimeType, prefs[pref]);
-  if (plan === null) return { kind: 'binary' };
+  if (plan === null) return { kind: 'unsupported', reason: 'native-unsupported' };
   return {
     kind: 'native',
     mimeType,
