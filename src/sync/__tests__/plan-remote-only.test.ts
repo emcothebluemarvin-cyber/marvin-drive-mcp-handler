@@ -72,7 +72,47 @@ describe('remote-only records (spec §6.7)', () => {
   it('a released Google Doc modified in Drive is never exported', () => {
     const n = nativeRecord('g1', 'Plan.docx', { remoteOnly: true });
     const p = run({ remote: [nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER })] }, n);
-    expect(p.actions.map((a) => a.kind)).toEqual(['refresh']);
+    expect(p.actions).toEqual([]);
+  });
+  it('O3 a native keeps remoteModifiedTime (the export baseline); other fields refresh', () => {
+    const n = nativeRecord('g1', 'Plan.docx', { remoteOnly: true });
+    const p = run(
+      { remote: [nativeEntry('g1', 'Plan.docx', { name: 'Plan v2', modifiedTime: NEWER })] },
+      n,
+    );
+    expect(p.actions).toMatchObject([
+      { kind: 'refresh', rule: 'O3', patch: { remoteName: 'Plan v2' } },
+    ]);
+    expect(p.actions[0]?.patch).not.toHaveProperty('remoteModifiedTime');
+    const touched = run({ remote: [nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER })] }, n);
+    expect(touched.actions).toEqual([]);
+    const o6 = run(
+      { remote: [nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER })] },
+      { ...n, remoteTrashed: true },
+    );
+    expect(o6.actions).toMatchObject([{ rule: 'O6', patch: { remoteTrashed: false } }]);
+    expect(o6.actions[0]?.patch).not.toHaveProperty('remoteModifiedTime');
+  });
+  it('O0/O8 a native whose last export is back but the Doc changed since → export-replace', () => {
+    const n = nativeRecord('g1', 'Plan.docx', { remoteOnly: true, localMd5: 'exp' });
+    const back = localEntry('Plan.docx', { mtimeMs: 5000 });
+    const changed = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    const o = { local: [back], remote: [changed], md5s: [['Plan.docx', 'exp']] } as InputOptions;
+    expect(summary(o, n)).toEqual([['export-replace', 'O8', 'Plan.docx']]);
+    expect(summary(o, { ...n, restorePending: true })).toEqual([
+      ['export-replace', 'O0', 'Plan.docx'],
+    ]);
+    const same = { ...o, remote: [nativeEntry('g1', 'Plan.docx')] };
+    expect(summary(same, n)).toEqual([['adopt', 'O8', 'Plan.docx']]);
+  });
+  it('O8 binary: a back file equal to the changed Drive md5 is still adopted', () => {
+    const changed = remoteEntry('r1', 'a.pdf', { md5: 'new', modifiedTime: NEWER });
+    expect(summary({ local: [BACK], remote: [changed], md5s: [['a.pdf', 'new']] })).toEqual([
+      ['adopt', 'O8', 'a.pdf'],
+    ]);
+    expect(
+      summary({ local: [BACK], remote: [changed], md5s: [['a.pdf', 'new']] }, PENDING),
+    ).toEqual([['adopt', 'O0', 'a.pdf']]);
   });
   it('O4 moved in Drive → record path and selection follow', () => {
     expect(

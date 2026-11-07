@@ -1,17 +1,21 @@
-import { localMatchesRemote } from './content-compare.js';
+import { localMatchesRemote, remoteChanged } from './content-compare.js';
 import { foldKey } from './paths.js';
 import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
 import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
 import type { RemoteEntry, SyncRecord } from './types.js';
 
-/** Remote-side record fields that differ from R (O3 record refresh). */
+/**
+ * Remote-side record fields that differ from R (O3/O4/O6 record refresh). A native's
+ * remoteModifiedTime is the baseline of its last export and is never refreshed here, so a
+ * Doc edited in Drive after the release still counts as changed when its export comes back.
+ */
 function remotePatch(record: SyncRecord, remote: RemoteEntry): Partial<SyncRecord> {
   const patch: Partial<SyncRecord> = {};
   if (remote.name !== record.remoteName) patch.remoteName = remote.name;
   if (remote.parentId !== record.remoteParentId) patch.remoteParentId = remote.parentId;
   if (remote.md5 !== record.remoteMd5) patch.remoteMd5 = remote.md5;
   if (remote.size !== record.remoteSize) patch.remoteSize = remote.size;
-  if (remote.modifiedTime !== record.remoteModifiedTime) {
+  if (remote.native === null && remote.modifiedTime !== record.remoteModifiedTime) {
     patch.remoteModifiedTime = remote.modifiedTime;
   }
   return patch;
@@ -38,9 +42,13 @@ export function planRemoteOnly(
   const untrack = { remove: [record.path], exclude: [record.path] };
   const present = R.kind === 'present' ? R.entry : null;
   const same = present !== null && lMd5 !== null && localMatchesRemote(lMd5, record, present);
+  // L is the unmodified last export but the Doc changed since: re-export over it (like N4).
+  const stale = same && present.native !== null && remoteChanged(record, present).changed;
+  const back = (rule: 'O0' | 'O8', remote: RemoteEntry): TrackedResult =>
+    act({ ...base, kind: stale ? 'export-replace' : 'adopt', rule, remote });
 
   if (record.restorePending) {
-    if (entry && same) return act({ ...base, kind: 'adopt', rule: 'O0', remote: present });
+    if (entry && same) return back('O0', present);
     if (present) {
       const target = present.key;
       if ((ctx.localByFold.get(foldKey(target)) ?? []).length > 0) {
@@ -98,7 +106,7 @@ export function planRemoteOnly(
   if (R.kind === 'unknown') return note('unknown-state', 'unknown', R.reason);
   const remote = R.entry;
   if (entry) {
-    if (same) return act({ ...base, kind: 'adopt', rule: 'O8', remote });
+    if (same) return back('O8', remote);
     return note(
       'collision',
       'O8',

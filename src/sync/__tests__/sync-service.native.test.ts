@@ -84,6 +84,26 @@ describe('Google-native files (spec §6.6)', () => {
       expect.objectContaining({ path: 'Plan.docx', code: 'native-local-edit-kept' }),
     );
   });
+  it('a stale export restored after the Doc changed in Drive is re-exported, not adopted (O8)', async () => {
+    await apply();
+    mem.addNative('g1', 'Plan', 'ROOT', 'doc v1');
+    await apply();
+    await sync.release({ name: 'docs', paths: ['Plan.docx'], apply: true });
+    setDoc('g1', 'doc v2', '2026-11-03T14:00:00.000Z');
+    expect((await apply()).actions).toEqual({});
+    await writeFile(at('Plan.docx'), 'doc v1');
+    expect((await apply()).actions).toEqual({ 'export-replace': ['Plan.docx'] });
+    expect(await readFile(at('Plan.docx'), 'utf8')).toBe('doc v2');
+    expect((await store.load('docs')).records).toMatchObject([
+      {
+        remoteId: 'g1',
+        remoteOnly: false,
+        restorePending: false,
+        remoteModifiedTime: '2026-11-03T14:00:00.000Z',
+      },
+    ]);
+    expect((await sync.run({ name: 'docs' })).actions).toEqual({});
+  });
   it('upgrade: Phase A natives stay candidates, later ones are adopted, selected ones export', async () => {
     await apply();
     const file = await store.load('docs');
