@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { hasErrorCode } from '../errors.js';
 import { renameReplacing } from '../files/rename-replacing.js';
@@ -147,5 +147,64 @@ export class InboxWriter {
       const old = this.recent.shift();
       if (old !== undefined && !this.recent.includes(old)) this.recentSet.delete(old);
     }
+  }
+}
+
+/** Follows the inbox by byte offset (spec §7.3); used by every process. */
+export class InboxTailer {
+  private offset = 0;
+  private ino: number | null = null;
+  private partial: Buffer = Buffer.alloc(0);
+  private lastSeq = 0;
+
+  constructor(private readonly file: string) {}
+
+  /** Highest seq returned so far. */
+  get seenSeq(): number {
+    return this.lastSeq;
+  }
+
+  async poll(): Promise<ChangeEvent[]> {
+    let info: { ino: number; size: number };
+    try {
+      info = await stat(this.file);
+    } catch (err) {
+      if (hasErrorCode(err, 'ENOENT')) {
+        this.reset();
+        return [];
+      }
+      throw err;
+    }
+    if (this.ino !== null && (info.ino !== this.ino || info.size < this.offset)) this.reset();
+    this.ino = info.ino;
+    if (info.size <= this.offset) return [];
+    const length = info.size - this.offset;
+    const buf = Buffer.alloc(length);
+    const handle = await open(this.file, 'r');
+    let bytesRead: number;
+    try {
+      ({ bytesRead } = await handle.read(buf, 0, length, this.offset));
+    } finally {
+      await handle.close();
+    }
+    this.offset += bytesRead;
+    const data = Buffer.concat([this.partial, buf.subarray(0, bytesRead)]);
+    const nl = data.lastIndexOf(0x0a);
+    if (nl < 0) {
+      this.partial = data;
+      return [];
+    }
+    this.partial = Buffer.from(data.subarray(nl + 1));
+    const events = parseEvents(data.subarray(0, nl + 1).toString('utf8')).filter(
+      (e) => e.seq > this.lastSeq,
+    );
+    for (const e of events) this.lastSeq = Math.max(this.lastSeq, e.seq);
+    return events;
+  }
+
+  private reset(): void {
+    this.offset = 0;
+    this.ino = null;
+    this.partial = Buffer.alloc(0);
   }
 }
