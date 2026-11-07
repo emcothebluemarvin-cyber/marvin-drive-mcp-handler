@@ -98,4 +98,15 @@ describe('review fixes', () => {
       truncated: false,
     });
   });
+
+  it('counts an earlier tail line as the changes it stands for, not as one line', () => {
+    expect(isChangeLine('… 7 more changed lines not shown')).toBe(false);
+    const text = ['+ aaaa', '- bbbb', '+ cccc', '… 7 more changed lines not shown'].join('\n');
+    expect(truncateDiff(text, 12, (n) => `+${n}`)).toEqual({ text: '+ aaaa\n+9', truncated: true });
+  });
+
+  it('still states hidden changes when only context and an earlier tail were cut', () => {
+    const text = ['+ a', '  ctx', '… 3 more changed cells not shown'].join('\n');
+    expect(truncateDiff(text, 8, (n) => `+${n}`)).toEqual({ text: '+ a\n+3', truncated: true });
+  });
 });

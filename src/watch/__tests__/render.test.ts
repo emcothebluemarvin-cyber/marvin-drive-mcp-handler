@@ -75,6 +75,14 @@ describe('renderEvent (channel push)', () => {
     expect(text).toMatch(/… \d+ more changes; use drive_changes\nFull details/);
   });
 
+  it('adds the changes behind a stored tail line to the pushed count', () => {
+    const stored = `${longDiff}\n… 37 more changed lines not shown`;
+    const text = renderEvent(makeEvent({ diff: stored }));
+    const shownLines = text.split('\n').filter((l) => l.startsWith('+ line')).length;
+    expect(text).toContain(`… ${400 - shownLines + 37} more changes; use drive_changes`);
+    expect(text).not.toContain('not shown');
+  });
+
   it('never splits a surrogate pair when it has to clamp', () => {
     for (const name of ['😀'.repeat(1200), `x${'😀'.repeat(1200)}`]) {
       const text = renderEvent(makeEvent({ name }));

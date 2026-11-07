@@ -19,9 +19,18 @@ interface Row {
   text: string;
 }
 
-/** Not context (two leading spaces) and not the hunk separator. */
+/** Not context (two leading spaces), not the hunk separator and not an earlier tail line. */
 export function isChangeLine(line: string): boolean {
-  return line !== '…' && !line.startsWith('  ');
+  return !line.startsWith('…') && !line.startsWith('  ');
+}
+
+const EARLIER_TAIL = /^… (\d+) more /;
+
+/** Changes a line stands for: 1 for a change line, N for an earlier `… N more …` tail. */
+function changeWeight(line: string): number {
+  const tail = EARLIER_TAIL.exec(line);
+  if (tail) return Number(tail[1]);
+  return isChangeLine(line) ? 1 : 0;
 }
 
 /**
@@ -35,7 +44,8 @@ export function truncateDiff(
 ): { text: string; truncated: boolean } {
   if (text.length <= maxChars) return { text, truncated: false };
   const all = text.split('\n');
-  const reserve = tail(all.length).length + 1;
+  const total = all.reduce((n, line) => n + changeWeight(line), 0);
+  const reserve = tail(Math.max(total, all.length)).length + 1;
   const kept: string[] = [];
   let used = 0;
   let i = 0;
@@ -46,7 +56,7 @@ export function truncateDiff(
     kept.push(line);
     used += cost;
   }
-  const remaining = all.slice(i).filter(isChangeLine).length;
+  const remaining = all.slice(i).reduce((n, line) => n + changeWeight(line), 0);
   // Only context was cut: nothing worth stating is hidden.
   if (remaining === 0) {
     while (kept[kept.length - 1] === '…') kept.pop();
