@@ -121,6 +121,27 @@ describe('sync_release', () => {
       false,
     );
   });
+  it('a location without a trash is skipped on the dry run and the apply; R0 still works', async () => {
+    await rm(at('sub', 'b.pdf'));
+    const noBin = withTrash({
+      trash: async () => {
+        throw new Error('must not be called');
+      },
+      unavailableReason: async () => 'network and device paths have no local Recycle Bin',
+    });
+    const reason = 'no trash for this location: network and device paths have no local Recycle Bin';
+    const dry = await noBin.release({ name: 'docs', paths: ['a.pdf', 'sub/b.pdf'] });
+    expect(dry.released).toEqual([
+      { path: 'sub/b.pdf', status: 'would release (already deleted locally)' },
+    ]);
+    expect(dry.skipped).toEqual([{ path: 'a.pdf', reason }]);
+    const res = await noBin.release({ name: 'docs', paths: ['a.pdf', 'sub/b.pdf'], apply: true });
+    expect(res.skipped).toEqual([{ path: 'a.pdf', reason }]);
+    expect(res.failed).toEqual([]);
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+    expect(await remoteOnlyOf('a.pdf')).toBe(false);
+    expect(await remoteOnlyOf('sub/b.pdf')).toBe(true);
+  });
   const withTrash = (trash: LocalTrash): SyncService =>
     new SyncService({
       runner: createRunner(mem.drive),

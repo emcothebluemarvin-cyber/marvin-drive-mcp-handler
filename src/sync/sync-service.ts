@@ -20,6 +20,7 @@ import { buildReport, type ReportOptions } from './report.js';
 import {
   applyRelease,
   releaseStatus,
+  withoutTrash,
   selectReleasable,
   type ReleaseInput,
   type ReleaseResult,
@@ -241,7 +242,11 @@ export class SyncService {
       const file = await this.store.load(input.name);
       await checkRoots(this.env, file.pair);
       const { input: planInput } = await gatherInput(this.env, file);
-      const selection = selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] });
+      const selection = await withoutTrash(
+        selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] }),
+        file.pair.localDir,
+        this.deps.trash,
+      );
       const pair = file.pair.name;
       if (!(input.apply ?? false)) {
         return {

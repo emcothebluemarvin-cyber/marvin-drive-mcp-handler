@@ -24,6 +24,7 @@
 
 ### Fixed
 - `package-lock.json` records the MIT license, so `npm install` no longer rewrites it.
+- Sync: `sync_release` skips files on Windows network drives or drives without a Recycle Bin in the dry run too, instead of promising a release that the apply then fails.
 - Sync: a released Google file whose old export comes back (restored from the OS trash, or via `sync_select add`) after the file was edited in Drive is re-exported instead of being adopted as in sync.
 - Sync: a local file that vanished while being moved to the trash is reported as "already gone" instead of an unclassified failure.
 - Windows: a `drive_download` destination ending in `\` is treated as a folder (it used to become a file of that name); `~\` expands to the home folder.

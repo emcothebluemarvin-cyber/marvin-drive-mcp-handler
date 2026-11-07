@@ -155,7 +155,7 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder 
 
 #### Move to Drive
 
-After an applied run Claude can offer to free disk space: `sync_release` (or `marvin-drive sync release <name> --all`) re-checks every file, moves the local copy to the system trash and keeps the Drive file; released files are never downloaded again unless you `sync_select add` them. A file you already deleted locally can be released by name, so it stays in Drive.
+After an applied run Claude can offer to free disk space: `sync_release` (or `marvin-drive sync release <name> --all`) re-checks every file, moves the local copy to the system trash and keeps the Drive file; released files are never downloaded again unless you `sync_select add` them. A file you already deleted locally can be released by name, so it stays in Drive. Where no system trash can be used (Windows network drives, a drive without a Recycle Bin), release cannot move the local copy: the dry run lists such files under `skipped`. To keep one in Drive only there, delete the local copy yourself, then release it by name.
 
 ### Editing safely
 

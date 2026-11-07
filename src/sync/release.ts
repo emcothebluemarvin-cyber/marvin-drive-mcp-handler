@@ -138,6 +138,29 @@ export function selectReleasable(
   return out;
 }
 
+/**
+ * Moves candidates whose local copy the trash certainly cannot take (e.g. a Windows network
+ * path) to skipped, so a dry run never promises a release the apply would fail. R0 candidates
+ * need no trash and are kept.
+ */
+export async function withoutTrash(
+  selection: ReleaseSelection,
+  localDir: string,
+  trash: LocalTrash,
+): Promise<ReleaseSelection> {
+  if (!trash.unavailableReason) return selection;
+  const out: ReleaseSelection = { eligible: [], skipped: [...selection.skipped] };
+  for (const c of selection.eligible) {
+    const reason =
+      c.kind === 'present' && c.localName !== null
+        ? await trash.unavailableReason(absInside(localDir, c.localName))
+        : null;
+    if (reason === null) out.eligible.push(c);
+    else out.skipped.push({ path: c.record.path, reason: `no trash for this location: ${reason}` });
+  }
+  return out;
+}
+
 export interface ReleaseDeps {
   ops: OperationRunner;
   audit: AuditSink;

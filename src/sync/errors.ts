@@ -35,6 +35,15 @@ export class ChecksumMismatchError extends AppError {
 
 export class LocalTrashError extends AppError {
   readonly code = 'SYNC_LOCAL_TRASH';
+
+  /** @param reason short cause without the path, when known (used by pre-checks). */
+  constructor(
+    message: string,
+    options?: ErrorOptions,
+    readonly reason?: string,
+  ) {
+    super(message, options);
+  }
 }
 
 /** The pair file could not be saved; continuing would act without a durable record (spec §7). */
