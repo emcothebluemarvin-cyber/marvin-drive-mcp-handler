@@ -22,7 +22,10 @@ export interface EnrichInput {
   account: string;
   snapshotter: ContentSnapshotter;
   previous: StoredSnapshot | null;
-  /** lastCommentCheck of the file (or the item's firstSeen). */
+  /**
+   * lastCommentCheck of the file. The poller seeds it for a newly seen item with the previous
+   * poll time (else the covering entry's addedAt), so comments made before firstSeen still count.
+   */
   since: string;
   now: Date;
   log: Logger;

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DriveApiError, ReauthRequiredError } from '../../errors.js';
+import { AccountNotFoundError, DriveApiError, ReauthRequiredError } from '../../errors.js';
 import { silentLogger } from '../../files/__tests__/fakes.js';
 import { InvalidCursorError } from '../feed.js';
 import { Inbox, InboxWriter } from '../inbox.js';
@@ -111,6 +111,31 @@ describe('Poller.runOnce: polling', () => {
     expect(state.cursor).toBe('other');
   });
 
+  it('discards the batch when an entry was added during the poll', async () => {
+    await watching([folderEntry()]);
+    feed.seed('G', { kind: 'folder', parents: ['ROOT'] });
+    feed.put('M', { parents: ['G'], createdTime: '2026-11-07T10:30:00.000Z' });
+    const poll = feed.poll.bind(feed);
+    let once = true;
+    feed.poll = async (cursor) => {
+      const res = await poll(cursor);
+      if (once) {
+        once = false;
+        const s = await store.load(EMAIL);
+        await store.save(EMAIL, { ...s, entries: [...s.entries, folderEntry({ id: 'G' })] });
+      }
+      return res;
+    };
+    await poller.runOnce();
+    let state = await store.load(EMAIL);
+    expect(state.pending).toEqual({});
+    expect(state.cursor).toBe('0');
+    await poller.runOnce();
+    state = await store.load(EMAIL);
+    expect(state.pending.M?.flags).toEqual(['added']);
+    expect(state.cursor).toBe('1');
+  });
+
   it('marks a removed watch entry inaccessible and records a pending removal', async () => {
     const D = fileEntry();
     await watching([D], { D: toKnown(rawFile(), ['D']) });
@@ -133,7 +158,7 @@ describe('Poller.runOnce: errors', () => {
     expect(events[0]).toMatchObject({
       seq: 1,
       kind: 'gap',
-      id: `${EMAIL}:gap:2026-11-07T11:00:00.000Z`,
+      id: `${EMAIL}:gap:0`,
       note: 'changes between T0 and 2026-11-07T11:00:00.000Z may be missing',
       own: false,
       untrusted: false,
@@ -191,5 +216,40 @@ describe('Poller.runOnce: errors', () => {
     });
     expect(state.cursor).toBe('0');
     expect(await inbox.readAll()).toEqual([]);
+  });
+
+  it('backs off when the provider has no such account', async () => {
+    await watching([folderEntry()]);
+    const writer = new InboxWriter(inbox);
+    await writer.init();
+    const p = new Poller({
+      store,
+      provider: {
+        ...memoryProvider(feed, new MemorySnapshotter()),
+        feed: () => {
+          throw new AccountNotFoundError('gone');
+        },
+      },
+      writer,
+      inbox,
+      now: clock.now,
+      log,
+    });
+    const error = vi.spyOn(log, 'error');
+    await p.runOnce();
+    expect((await store.load(EMAIL)).backoff).toMatchObject({ failures: 1 });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('does not repeat the gap event when saving after it failed', async () => {
+    await watching([folderEntry()]);
+    feed.put('A', {});
+    feed.failures.push(new InvalidCursorError(), new InvalidCursorError());
+    vi.spyOn(store, 'save').mockRejectedValueOnce(new Error('disk full'));
+    await poller.runOnce();
+    clock.advance(1_000);
+    await poller.runOnce();
+    expect((await inbox.readAll()).map((e) => e.kind)).toEqual(['gap']);
+    expect((await store.load(EMAIL)).cursor).toBe('1');
   });
 });

@@ -5,14 +5,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { silentLogger } from '../../files/__tests__/fakes.js';
 import { QUIET_MS } from '../coalesce.js';
 import { Inbox, InboxWriter, ROTATE_AT_LINES } from '../inbox.js';
-import { LeaseLostError, Poller } from '../poller.js';
+import { BASE_BACKOFF_MS, LeaseLostError, Poller } from '../poller.js';
 import { isUnread } from '../read-state.js';
 import { toKnown } from '../relevance.js';
 import { emptyState } from '../types.js';
 import { WatchStore } from '../watch-store.js';
 import {
   AYSE,
+  ADDED_AT,
   ME,
+  comment,
+  folderEntry,
   MemoryFeed,
   MemorySnapshotter,
   fileEntry,
@@ -169,5 +172,95 @@ describe('Poller release', () => {
     await expect(poller.runOnce()).rejects.toBeInstanceOf(LeaseLostError);
     expect(await inbox.readAll()).toEqual([]);
     expect((await store.load(EMAIL)).pending.D).toBeDefined();
+  });
+
+  it('keeps quiet items pending while the poll fails, then releases the real diff', async () => {
+    const poller = await newPoller();
+    edit();
+    await poller.runOnce();
+    clock.advance(QUIET_MS);
+    feed.failures.push(new Error('ECONNRESET'));
+    snap.content.set('D', new Error('offline'));
+    await poller.runOnce();
+    expect(await inbox.readAll()).toEqual([]);
+    expect((await store.load(EMAIL)).pending.D).toBeDefined();
+    snap.content.set('D', textSnap('a\nB\n'));
+    clock.advance(BASE_BACKOFF_MS);
+    await poller.runOnce();
+    const events = await inbox.readAll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ diff: '  a\n- b\n+ B', note: null });
+  });
+
+  it.each([
+    ['the previous poll', '2026-11-07T10:59:30.000Z'],
+    ['the folder addedAt', null],
+  ])('reports comments on a first-seen member made since %s', async (_label, lastPollAt) => {
+    clock = testClock('2026-11-07T10:59:50.000Z');
+    feed.seed('M', { parents: ['F'], createdTime: '2026-11-01T00:00:00.000Z' });
+    await store.save(EMAIL, {
+      ...emptyState(),
+      entries: [folderEntry({ addedAt: ADDED_AT })],
+      cursor: await feed.start(),
+      lastPollAt,
+    });
+    snap.comments.set('M', [
+      comment({
+        createdTime: '2026-11-07T10:59:40.000Z',
+        modifiedTime: '2026-11-07T10:59:40.000Z',
+      }),
+    ]);
+    feed.put('M', { modifiedTime: clock.now().toISOString(), modifier: AYSE });
+    snap.content.set('M', textSnap('x\n'));
+    clock.advance(10_000); // 11:00:00
+    const poller = await newPoller();
+    await poller.runOnce();
+    clock.advance(QUIET_MS);
+    await poller.runOnce();
+    const [event] = await inbox.readAll();
+    expect(event?.fileId).toBe('M');
+    expect(event?.comments.map((c) => c.time)).toEqual(['2026-11-07T10:59:40.000Z']);
+  });
+
+  it('appends nothing when the pending item vanished during enrichment', async () => {
+    const poller = await newPoller();
+    edit();
+    await poller.runOnce();
+    clock.advance(QUIET_MS);
+    const original = snap.snapshot.bind(snap);
+    snap.snapshot = async (fileId) => {
+      const s = await store.load(EMAIL);
+      await store.save(EMAIL, { ...s, pending: {} }); // the watch was removed meanwhile
+      return original(fileId);
+    };
+    await poller.runOnce();
+    expect(await inbox.readAll()).toEqual([]);
+  });
+
+  it('keeps a newer baseline written while the item was enriched', async () => {
+    const poller = await newPoller();
+    edit();
+    await poller.runOnce();
+    clock.advance(QUIET_MS);
+    const original = snap.snapshot.bind(snap);
+    snap.snapshot = async (fileId) => {
+      // removed and re-added: a fresh baseline and comment check
+      const s = await store.load(EMAIL);
+      await store.save(EMAIL, {
+        ...s,
+        lastCommentCheck: { D: '2026-11-07T11:01:00.000Z' },
+      });
+      await store.saveSnapshot(EMAIL, 'D', { takenAt: 'readded', snapshot: textSnap('z\n') });
+      return original(fileId);
+    };
+    await poller.runOnce();
+    expect((await store.loadSnapshot(EMAIL, 'D'))?.takenAt).toBe('readded');
+    expect((await store.load(EMAIL)).lastCommentCheck.D).toBe('2026-11-07T11:01:00.000Z');
+  });
+
+  it('survives an invalid read.json during rotation', async () => {
+    await writeFile(path.join(tmp, 'read.json'), '{"readSeq":"nope"}');
+    const poller = await newPoller();
+    await expect(poller.runOnce()).resolves.toBeUndefined();
   });
 });

@@ -7,7 +7,14 @@ import type { Inbox, InboxWriter } from './inbox.js';
 import { Membership } from './membership.js';
 import { isUnread } from './read-state.js';
 import { applyChange, type Tracking } from './relevance.js';
-import type { AccountState, EventDraft, RawChange, WatchEntry } from './types.js';
+import {
+  isNative,
+  type AccountState,
+  type EventDraft,
+  type PendingItem,
+  type RawChange,
+  type WatchEntry,
+} from './types.js';
 import type { WatchStore } from './watch-store.js';
 
 /** Spec §5.2: per-account backoff up to 5 min. */
@@ -51,9 +58,10 @@ export function systemEvent(
   kind: 'gap' | 'watch-paused',
   time: string,
   note: string,
+  id = `${account}:${kind}:${time}`,
 ): EventDraft {
   return {
-    id: `${account}:${kind}:${time}`,
+    id,
     account,
     kind,
     flags: [],
@@ -94,7 +102,8 @@ export class Poller {
       // released without content. A failing account never stops the others (spec §9).
       if (this.backingOff(state)) continue;
       try {
-        await this.pollAccount(email, state.cursor, state.entries);
+        // A failed poll (now backing off) must not release quiet items without content.
+        if (!(await this.pollAccount(email, state.cursor, state.entries))) continue;
       } catch (err) {
         if (err instanceof LeaseLostError) throw err;
         this.deps.log.error('Drive watch poll failed', { account: email, error: err });
@@ -107,13 +116,25 @@ export class Poller {
         this.deps.log.error('Releasing Drive changes failed', { account: email, error: err });
       }
     }
-    const rs = await this.deps.store.loadRead();
-    await this.deps.inbox.rotateIfNeeded((e) => isUnread(e, rs), this.deps.now());
+    try {
+      const rs = await this.deps.store.loadRead();
+      await this.deps.inbox.rotateIfNeeded((e) => isUnread(e, rs), this.deps.now());
+    } catch (err) {
+      this.deps.log.error('Rotating the Drive watch inbox failed', { error: err });
+    }
+  }
+
+  /** Comment-check start of an item without lastCommentCheck: the earliest covering addedAt. */
+  private static coveredSince(state: AccountState, item: PendingItem): string | null {
+    const via = new Set((item.after ?? item.before)?.via ?? []);
+    const times = state.entries.filter((e) => via.has(e.id)).map((e) => e.addedAt);
+    return times.sort()[0] ?? null;
   }
 
   /** Quiet items: enrich (network) → append → remove under the lock if unchanged (spec §6, §7.3). */
   private async releaseAccount(email: string): Promise<void> {
     const state = await this.deps.store.load(email);
+    if (this.backingOff(state)) return;
     const ready = readyToRelease(
       state.pending,
       this.deps.now(),
@@ -129,23 +150,34 @@ export class Poller {
         account: email,
         snapshotter,
         previous,
-        since: state.lastCommentCheck[item.fileId] ?? item.firstSeen,
+        since:
+          state.lastCommentCheck[item.fileId] ?? Poller.coveredSince(state, item) ?? item.firstSeen,
         now: this.deps.now(),
         log: this.deps.log,
       });
+      // The watch may have been removed during enrichment: then there is nothing to report.
+      if ((await this.deps.store.load(email)).pending[item.fileId] === undefined) continue;
       if (result.event) await this.append(result.event);
       await this.deps.store.withLock(async () => {
         const s = await this.deps.store.load(email);
         const current = s.pending[item.fileId];
         if (current && current.lastSeen === item.lastSeen) delete s.pending[item.fileId];
         const tracked = s.known[item.fileId] !== undefined;
-        if (!tracked || result.snapshot === 'drop') {
-          await this.deps.store.removeSnapshot(email, item.fileId);
-        } else if (result.snapshot !== 'keep') {
-          await this.deps.store.saveSnapshot(email, item.fileId, result.snapshot);
+        // Removed and re-added meanwhile: the new baseline and comment check win.
+        const stored = await this.deps.store.loadSnapshot(email, item.fileId);
+        const baselineKept = (stored?.takenAt ?? null) === (previous?.takenAt ?? null);
+        const checkKept = s.lastCommentCheck[item.fileId] === state.lastCommentCheck[item.fileId];
+        if (baselineKept) {
+          if (!tracked || result.snapshot === 'drop') {
+            await this.deps.store.removeSnapshot(email, item.fileId);
+          } else if (result.snapshot !== 'keep') {
+            await this.deps.store.saveSnapshot(email, item.fileId, result.snapshot);
+          }
         }
         if (!tracked) delete s.lastCommentCheck[item.fileId];
-        else if (result.commentCheck) s.lastCommentCheck[item.fileId] = result.commentCheck;
+        else if (checkKept && result.commentCheck) {
+          s.lastCommentCheck[item.fileId] = result.commentCheck;
+        }
         await this.deps.store.save(email, s);
       });
     }
@@ -175,9 +207,10 @@ export class Poller {
     email: string,
     cursor: string,
     entries: readonly WatchEntry[],
-    feed: ChangeFeed,
   ): Promise<Fetched | null> {
+    let feed: ChangeFeed | null = null;
     try {
+      feed = this.deps.provider.feed(email);
       const batch = await feed.poll(cursor);
       const members = this.membership(email, feed);
       for (const c of batch.changes) {
@@ -197,23 +230,26 @@ export class Poller {
     }
   }
 
+  /** True when the batch was fetched (applied or discarded); false after a handled failure. */
   private async pollAccount(
     email: string,
     cursor: string,
     entries: readonly WatchEntry[],
-  ): Promise<void> {
-    const feed = this.deps.provider.feed(email);
-    const fetched = await this.fetch(email, cursor, entries, feed);
-    if (fetched === null) return;
+  ): Promise<boolean> {
+    const fetched = await this.fetch(email, cursor, entries);
+    if (fetched === null) return false;
     const observed = this.deps.now().toISOString();
+    const fetchedIds = new Set(entries.map((e) => e.id));
     await this.deps.store.withLock(async () => {
       const state = await this.deps.store.load(email);
-      if (state.cursor !== cursor) {
+      // A new entry was unknown to the membership walk: keep the cursor and re-poll.
+      if (state.cursor !== cursor || state.entries.some((e) => !fetchedIds.has(e.id))) {
         this.deps.log.info('Watch list changed during a poll; discarding the batch', {
           account: email,
         });
         return;
       }
+      const previousPoll = state.lastPollAt;
       const live = new Map(state.entries.map((e) => [e.id, e]));
       let t: Tracking = { known: state.known, pending: state.pending };
       fetched.changes.forEach((change, i) => {
@@ -222,6 +258,13 @@ export class Poller {
           return current ? [current] : [];
         });
         t = applyChange(t, { change, covering, now: observed });
+        // Comments made between the previous poll and this sighting still count (not firstSeen).
+        const item = t.pending[change.fileId];
+        const kind = (item?.after ?? item?.before)?.kind;
+        if (kind && isNative(kind) && state.lastCommentCheck[change.fileId] === undefined) {
+          const since = previousPoll ?? covering.map((e) => e.addedAt).sort()[0];
+          if (since !== undefined) state.lastCommentCheck[change.fileId] = since;
+        }
         const entry = live.get(change.fileId);
         if (entry && change.removed) entry.inaccessible = true;
         else if (entry && !change.removed) delete entry.inaccessible;
@@ -233,17 +276,18 @@ export class Poller {
       state.lastPollAt = observed;
       await this.deps.store.save(email, state);
     });
+    return true;
   }
 
   private async failed(
     email: string,
     cursor: string,
-    feed: ChangeFeed,
+    feed: ChangeFeed | null,
     err: unknown,
   ): Promise<void> {
     const now = this.deps.now();
     const time = now.toISOString();
-    if (err instanceof InvalidCursorError) {
+    if (err instanceof InvalidCursorError && feed !== null) {
       let fresh: string;
       try {
         fresh = await feed.start();
@@ -256,7 +300,14 @@ export class Poller {
         if (state.cursor !== cursor) return;
         const from = state.lastPollAt ?? state.entries.map((e) => e.addedAt).sort()[0] ?? time;
         await this.append(
-          systemEvent(email, 'gap', time, `changes between ${from} and ${time} may be missing`),
+          // One id per failed cursor: a retry after a failed save is deduped by the writer.
+          systemEvent(
+            email,
+            'gap',
+            time,
+            `changes between ${from} and ${time} may be missing`,
+            `${email}:gap:${cursor}`,
+          ),
         );
         state.cursor = fresh;
         state.lastPollAt = time;
