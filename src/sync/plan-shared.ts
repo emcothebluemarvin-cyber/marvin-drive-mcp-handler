@@ -18,6 +18,8 @@ export interface TrackedResult {
   claimedFolds: string[];
   /** On-disk name of the local file matched to this record. */
   claimedLocal: string | null;
+  /** B1/N1: in sync on both sides (releasable hint). */
+  inSync: boolean;
 }
 
 /** One tracked record being classified (first match wins). */
@@ -43,6 +45,7 @@ export function makeScope(ctx: PlanContext, record: SyncRecord): TrackedScope {
     notes: [],
     claimedFolds: [foldKey(record.path)],
     claimedLocal: null,
+    inSync: false,
   };
   return {
     ctx,

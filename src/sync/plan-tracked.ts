@@ -129,6 +129,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
   if (!R.moved) {
     if (entry) {
       if (!rs.changed && !lChanged) {
+        out.inSync = true;
         if (needsRefresh(record, entry, remote)) {
           return act({ ...base, kind: 'refresh', rule: 'B1', remote });
         }

@@ -191,7 +191,13 @@ export class SyncService {
         file.pair.nativeBaselineDone = true;
       }
       await this.store.save(file);
-      return buildReport(name, plan, { dryRun: false, outcomes });
+      const done = new Set(outcomes.filter((o) => o.status === 'done').map((o) => o.path));
+      const inSync = new Set(plan.inSync);
+      const releasable = file.records
+        .filter((r) => !r.remoteOnly && (inSync.has(r.path) || done.has(r.path)))
+        .map((r) => r.path)
+        .sort();
+      return buildReport(name, plan, { dryRun: false, outcomes, releasable });
     });
   }
 

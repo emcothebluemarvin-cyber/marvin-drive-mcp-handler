@@ -66,6 +66,7 @@ export function plan(input: PlanInput): Plan {
   const notes: Note[] = [];
   const claimedFolds = new Set<string>();
   const claimedLocal = new Set<string>();
+  const inSync: string[] = [];
   const records = [...input.records].sort((a, b) =>
     a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
   );
@@ -75,6 +76,7 @@ export function plan(input: PlanInput): Plan {
     notes.push(...result.notes);
     for (const f of result.claimedFolds) claimedFolds.add(f);
     if (result.claimedLocal !== null) claimedLocal.add(result.claimedLocal);
+    if (result.inSync) inSync.push(record.path);
   }
   const untracked = planUntracked(ctx, { folds: claimedFolds, localNames: claimedLocal });
   actions.push(...untracked.actions);
@@ -129,5 +131,6 @@ export function plan(input: PlanInput): Plan {
           .map((r) => r.id),
       ),
     ].sort(),
+    inSync: inSync.sort(),
   };
 }

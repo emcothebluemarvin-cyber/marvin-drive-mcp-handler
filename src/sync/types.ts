@@ -249,6 +249,8 @@ export interface Plan {
   baseline: { files: string[]; folders: string[] };
   /** Untracked Google-native files seen (upgrade baseline, addendum §4.1). */
   nativeBaseline: string[];
+  /** Record paths in sync at planning (B1/N1). */
+  inSync: string[];
 }
 
 export interface ActionOutcome {
@@ -275,4 +277,6 @@ export interface SyncReport {
   failures: Array<{ path: string; kind: ActionKind; message: string }>;
   notRun: string[];
   candidates: { local: Candidate[]; remote: Candidate[]; truncated: boolean };
+  /** Applied runs: files sync_release could release now (spec §10). */
+  releasable?: string[];
 }

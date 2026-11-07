@@ -813,6 +813,7 @@ describe('Executor exports (Google-native)', () => {
       brake: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 1 },
       baseline: { files: [], folders: [] },
       nativeBaseline: [],
+      inSync: [],
     };
     expect(buildReport('docs', plan, { dryRun: false, outcomes: out }).warnings).toContainEqual({
       path: 'Plan.docx',

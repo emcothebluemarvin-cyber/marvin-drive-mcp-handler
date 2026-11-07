@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brakeFor, computePlanId, plan } from '../planner.js';
 import type { Action } from '../types.js';
-import { localEntry, nativeEntry, record, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
 import { planInput } from './plan-input.js';
 
 function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
@@ -95,6 +95,20 @@ describe('plan composition', () => {
       }),
     );
     expect(p.nativeBaseline).toEqual(['g1', 'g2']);
+  });
+  it('lists records in sync (B1, N1) for releasable', () => {
+    const p = plan(
+      planInput({
+        records: [record('r1', 'a.pdf'), record('r2', 'b.pdf'), nativeRecord('g1', 'Plan.docx')],
+        local: [localEntry('a.pdf'), localEntry('Plan.docx')],
+        remote: [
+          remoteEntry('r1', 'a.pdf'),
+          remoteEntry('r2', 'b.pdf'),
+          nativeEntry('g1', 'Plan.docx'),
+        ],
+      }),
+    );
+    expect(p.inSync).toEqual(['Plan.docx', 'a.pdf']);
   });
 });
 

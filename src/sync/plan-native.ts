@@ -44,6 +44,7 @@ export function planNative(
   if (R.moved) return planMoved(s, base, remote, lChanged, changed);
   if (!changed) {
     if (entry && !lChanged) {
+      s.out.inSync = true;
       return needsRefresh(record, entry, remote)
         ? act({ ...base, kind: 'refresh', rule: 'N1', remote })
         : out;

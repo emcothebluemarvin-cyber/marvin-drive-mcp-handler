@@ -60,6 +60,14 @@ describe('sync_release', () => {
     await sync.select({ name: 'docs', add: ['a.pdf', 'sub/b.pdf'] });
     await apply();
   });
+  it('an applied run lists releasable files; a dry run does not', async () => {
+    await writeFile(at('c.pdf'), 'C');
+    await sync.select({ name: 'docs', add: ['c.pdf'] });
+    const dry = await sync.run({ name: 'docs' });
+    expect(dry.releasable).toBeUndefined();
+    const applied = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
+    expect(applied.releasable).toEqual(['a.pdf', 'c.pdf', 'sub/b.pdf']);
+  });
   it('dry run changes nothing; apply trashes local copies and keeps them in Drive', async () => {
     const dry = await sync.release({ name: 'docs', all: true });
     expect(dry).toMatchObject({
