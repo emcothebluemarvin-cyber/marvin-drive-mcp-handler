@@ -14,7 +14,7 @@ export interface GoogleExportPrefs {
   drawing: ExportFormat;
 }
 
-/** Phase B uses these; Phase A stores the defaults unvalidated. */
+/** Export formats used when a pair gives no `googleExport`; validated at sync_create_pair. */
 export const DEFAULT_GOOGLE_EXPORT: GoogleExportPrefs = {
   document: 'docx',
   spreadsheet: 'xlsx',

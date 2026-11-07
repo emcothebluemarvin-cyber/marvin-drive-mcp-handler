@@ -35,7 +35,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ AI-assisted selection: `sync_scan` (previews, remote candidates) → `sync_select` (add/remove/exclude)
 - ✅ Pure three-way planner (B1–B14, U0–U8), ambiguity/unknown-state protection, mass-delete brake, stable `planId`
 - ✅ Executor: spec order, re-verification, exclusive local writes, conflict copies, Drive/OS trash, per-action persistence, audit
-- ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_remove_pair`; CLI `sync list/run/repair-marker`
+- ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_release`, `sync_remove_pair`; CLI `sync list/run/release/repair-marker`
 - ✅ Phase B: Google-native exports (N1–N9, `googleExport`, upgrade baseline), release / "move to Drive" (`sync_release`, O0–O8, R0, `releasable`)
 - ✅ Confirmation before a local deletion trashes the Drive copy (`confirmRemoteTrash`, `pendingConfirmation`)
 - ✅ Provider boundary for a later OneDrive provider: `remote-kinds`, `content-compare`, no runtime `googleapis` under `src/sync`

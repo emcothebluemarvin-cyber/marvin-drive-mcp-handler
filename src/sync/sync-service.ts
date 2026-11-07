@@ -69,7 +69,10 @@ const CONFIRM_NEEDS_MASS_DELETE = {
   message: 'confirming these deletions would also need allowMassDelete',
 };
 
-/** Sub-project 5 Phase A: pairs, AI-assisted selection, dry-run/apply two-way sync. */
+/**
+ * Sub-project 5: pairs, AI-assisted selection, dry-run/apply two-way sync, Google-native
+ * exports, release to Drive only and confirmation of remote trashes (Phase B).
+ */
 export class SyncService {
   private readonly ops: OperationRunner;
   private readonly log: Logger;
