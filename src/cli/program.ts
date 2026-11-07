@@ -8,7 +8,9 @@ import { channelPush } from '../mcp/channel.js';
 import { createMcpServer } from '../mcp/server.js';
 import { VERSION } from '../version.js';
 import { formatAccounts } from './format.js';
+import { runHookCli } from './hook.js';
 import { registerSyncCommands } from './sync-commands.js';
+import { registerWatchCommands } from './watch-commands.js';
 
 const TESTING_MODE_HINT =
   'Note: while the OAuth app is in Testing mode, the Google account must be listed under Audience → Test users, and the login expires every 7 days.';
@@ -248,6 +250,12 @@ registerSyncCommands(program, {
   setExitCode: (code) => {
     process.exitCode = code;
   },
+});
+
+registerWatchCommands(program, {
+  watch: () => buildApp().watch,
+  out,
+  hook: () => runHookCli(),
 });
 
 program.parseAsync().catch((err: unknown) => {
