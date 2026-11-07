@@ -70,6 +70,36 @@ describe('Google-native tracked records (spec §6.6)', () => {
       }),
     ).toEqual([['move-local', 'N6', 'sub/Plan.docx']]);
   });
+  it('N6 moved into an excluded key → untrack with moved-into-excluded', () => {
+    const p = run({
+      pair: { excluded: ['sub/Plan.docx'] },
+      local: [L],
+      remote: [nativeEntry('g1', 'sub/Plan.docx')],
+      folders: FOLDERS,
+    });
+    expect(p.actions).toMatchObject([
+      { kind: 'untrack', rule: 'N6', selection: { exclude: ['Plan.docx'] } },
+    ]);
+    expect(p.notes[0]).toMatchObject({ code: 'moved-into-excluded', rule: 'N6' });
+  });
+  it('N6 resume: the moved file is already at the new key → adopt, record stays native', () => {
+    const p = run({
+      local: [localEntry('sub/Plan.docx')],
+      remote: [nativeEntry('g1', 'sub/Plan.docx')],
+      md5s: [['sub/Plan.docx', K.localMd5 ?? '']],
+      folders: FOLDERS,
+    });
+    expect(p.actions).toMatchObject([
+      {
+        kind: 'adopt',
+        rule: 'N6',
+        key: 'sub/Plan.docx',
+        selection: { remove: ['Plan.docx'], add: ['sub/Plan.docx'] },
+      },
+    ]);
+    expect(p.actions[0]?.record?.native).toEqual(K.native);
+    expect(p.actions[0]?.remote?.native).toBeTruthy();
+  });
   it('N7 trashed → trash-local when unchanged, forget when gone', () => {
     const trashed: InputOptions['probes'] = [['g1', { state: 'trashed' }]];
     expect(kinds({ local: [L], probes: trashed })).toEqual([['trash-local', 'N7', 'Plan.docx']]);
