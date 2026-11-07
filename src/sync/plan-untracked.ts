@@ -31,6 +31,7 @@ function isBaseline(ctx: PlanContext, r: RemoteEntry): boolean {
   const { pair } = ctx.input;
   return (
     pair.firstAppliedRunAt === null ||
+    (r.native !== null && !pair.nativeBaselineDone) ||
     pair.remoteBaseline.includes(r.id) ||
     r.ancestorIds.some((id) => pair.baselineFolders.includes(id))
   );
@@ -125,6 +126,17 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
         note('collision', 'U7', 'a local folder or special file uses this path', R.key, R.id);
       continue;
     }
+    // U0b: a local file already sits at a Google file's export path (never upload/adopt).
+    if (R?.native && L) {
+      note(
+        'ambiguous-native',
+        'U0b',
+        'a local file has the export name of this Google file; rename one of them',
+        R.key,
+        R.id,
+      );
+      continue;
+    }
     // Fold-only matches across sides (spec §6.1 step 2): ambiguous on a case-sensitive
     // volume; on a case-insensitive one only when the volume itself maps the other spelling
     // onto the local file (lstat hits the same inode) — never on our fold alone.
@@ -137,16 +149,6 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
           note('ambiguous', 'ambiguous', 'names differ only in case', p);
         continue;
       }
-    }
-    // Interim (removed in Task 11): Google-native exports arrive with the native rules.
-    if (R?.native) {
-      out.candidates.remote.push({
-        path: R.key,
-        size: R.size,
-        modifiedTime: R.modifiedTime,
-        remoteId: R.id,
-      });
-      continue;
     }
     const base = { record: null, selection: {} as SelectionChange };
 
@@ -199,7 +201,7 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
       } else if (R) {
         out.actions.push({
           ...base,
-          kind: 'download-new',
+          kind: R.native ? 'export-new' : 'download-new',
           rule: 'U3',
           key: R.key,
           local: null,
@@ -225,7 +227,7 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
       } else {
         out.actions.push({
           ...base,
-          kind: 'download-new',
+          kind: R.native ? 'export-new' : 'download-new',
           rule: 'U6',
           key: R.key,
           local: null,

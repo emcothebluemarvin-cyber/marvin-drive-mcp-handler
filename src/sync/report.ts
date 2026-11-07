@@ -10,6 +10,7 @@ const WARNING_CODES: ReadonlySet<NoteCode> = new Set([
   'missing',
   'native-unsupported',
   'unrepresentable',
+  'ambiguous-native',
   'weak-compare',
 ]);
 

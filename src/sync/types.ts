@@ -207,6 +207,7 @@ export type NoteCode =
   | 'missing'
   | 'native-unsupported'
   | 'unrepresentable'
+  | 'ambiguous-native'
   | 'weak-compare'
   | 'ignored';
 
