@@ -114,6 +114,35 @@ describe('sync CLI', () => {
     expect(f.deps.setExitCode).toHaveBeenCalledWith(1);
   });
 
+  it('passes --confirm-remote-trash and prints pending deletions without failing', async () => {
+    const pending: SyncReport = {
+      ...REPORT,
+      dryRun: true,
+      pendingConfirmation: [{ path: 'gone.pdf', remoteId: 'r9' }],
+    };
+    const { service, run, lines, deps } = setup(pending);
+    await run('run', 'docs', '--apply', '--plan-id', 'abc', '--confirm-remote-trash');
+    expect(service.run).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: true,
+      allowMassDelete: false,
+      planId: 'abc',
+      confirmRemoteTrash: true,
+    });
+    const text = lines.at(-1) ?? '';
+    expect(text).toContain('Deleted locally');
+    expect(text).toContain('gone.pdf');
+    expect(text).toContain(`--plan-id ${pending.planId} --confirm-remote-trash`);
+    expect(text).toContain('marvin-drive sync release docs');
+    expect(deps.setExitCode).not.toHaveBeenCalled();
+  });
+  it('refuses --confirm-remote-trash without --plan-id', async () => {
+    const { service, run } = setup();
+    await expect(run('run', 'docs', '--apply', '--confirm-remote-trash')).rejects.toThrow(
+      'pass the planId of the dry run you reviewed',
+    );
+    expect(service.run).not.toHaveBeenCalled();
+  });
   it('repair-marker asks for confirmation', async () => {
     const yes = setup(REPORT, true);
     await yes.run('repair-marker', 'docs');

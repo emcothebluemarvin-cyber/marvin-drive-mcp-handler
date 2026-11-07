@@ -45,7 +45,9 @@ export function formatReport(r: SyncReport): string {
   lines.push(
     ...section(
       'Warnings',
-      r.warnings.map((w) => `${w.path}: ${w.code}${w.message ? ` — ${w.message}` : ''}`),
+      r.warnings.map(
+        (w) => `${w.path ? `${w.path}: ` : ''}${w.code}${w.message ? ` — ${w.message}` : ''}`,
+      ),
     ),
   );
   lines.push(
@@ -55,6 +57,19 @@ export function formatReport(r: SyncReport): string {
     ),
   );
   lines.push(...section('Not run', r.notRun));
+  if (r.pendingConfirmation.length > 0) {
+    lines.push(
+      ...section(
+        'Deleted locally — Drive copy kept until you decide',
+        r.pendingConfirmation.map((p) => p.path),
+      ),
+      r.dryRun
+        ? `  Delete in Drive too: marvin-drive sync run ${r.pair} --apply --plan-id ${r.planId} --confirm-remote-trash`
+        : '  Delete in Drive too: run a new dry run, then apply it with its --plan-id and --confirm-remote-trash',
+      `  Keep in Drive only: marvin-drive sync release ${r.pair} <paths…> --apply`,
+      '  (Confirming covers all of them; release the ones to keep first.)',
+    );
+  }
   const { local, remote, truncated } = r.candidates;
   if (local.length + remote.length > 0) {
     lines.push(

@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { ValidationError } from '../errors.js';
 import type { SyncService } from '../sync/sync-service.js';
 import { formatPairs, formatRelease, formatReport, reportFailed } from './sync-format.js';
 
@@ -30,16 +31,28 @@ export function registerSyncCommands(program: Command, deps: SyncCliDeps): void 
     .option('--apply', 'apply the plan (default: dry run)')
     .option('--allow-mass-delete', 'allow more deletions than the safety brake permits')
     .option('--plan-id <id>', 'apply only if the plan still matches this dry-run planId')
+    .option('--confirm-remote-trash', 'also trash the Drive copies of files deleted locally')
     .action(
       async (
         name: string,
-        opts: { apply?: boolean; allowMassDelete?: boolean; planId?: string },
+        opts: {
+          apply?: boolean;
+          allowMassDelete?: boolean;
+          planId?: string;
+          confirmRemoteTrash?: boolean;
+        },
       ) => {
+        if (opts.confirmRemoteTrash && !opts.planId) {
+          throw new ValidationError(
+            '--confirm-remote-trash: pass the planId of the dry run you reviewed (--plan-id <id>)',
+          );
+        }
         const report = await deps.sync().run({
           name,
           apply: opts.apply ?? false,
           allowMassDelete: opts.allowMassDelete ?? false,
           ...(opts.planId ? { planId: opts.planId } : {}),
+          ...(opts.confirmRemoteTrash ? { confirmRemoteTrash: true } : {}),
         });
         deps.out(formatReport(report));
         if (reportFailed(report)) deps.setExitCode(1);

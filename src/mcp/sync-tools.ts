@@ -113,7 +113,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_run',
     {
       description:
-        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion.',
+        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
       inputSchema: {
         name,
         apply: z.boolean().optional().describe('Default false (dry run)'),
@@ -123,6 +123,12 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           .optional()
           .describe('planId of the dry run the user approved; required with apply: true'),
         allowMassDelete: z.boolean().optional(),
+        confirmRemoteTrash: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also move the Drive copies of locally deleted files (pendingConfirmation) to the Drive trash; only after the user agreed, with the planId of the dry run they saw',
+          ),
       },
     },
     async (args) =>
