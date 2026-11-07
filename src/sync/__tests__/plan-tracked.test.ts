@@ -128,6 +128,14 @@ describe('binary tracked records (spec §6.4)', () => {
     });
   });
 
+  it('B5 trash-remote carries reason local-deleted', () => {
+    expect(only({ remote: [R] })).toMatchObject({
+      kind: 'trash-remote',
+      rule: 'B5',
+      reason: 'local-deleted',
+    });
+  });
+
   it('B5 without canTrash → cannot-trash report', () => {
     const result = run({ remote: [remoteEntry('r1', 'a.pdf', { canTrash: false })] });
     expect(result.actions).toEqual([]);

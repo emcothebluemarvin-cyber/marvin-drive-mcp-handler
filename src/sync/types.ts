@@ -194,6 +194,8 @@ export interface Action {
   localEdit?: boolean;
   /** refresh: record fields to set (remote-only bookkeeping O3–O6); no file is touched. */
   patch?: Partial<SyncRecord>;
+  /** B5 only: the local copy was deleted; trash-remote waits for confirmRemoteTrash (addendum §2). */
+  reason?: 'local-deleted';
 }
 
 export type NoteCode =
@@ -245,6 +247,8 @@ export interface Plan {
   notes: Note[];
   candidates: { local: Candidate[]; remote: Candidate[]; truncated: boolean };
   brake: BrakeInfo;
+  /** Brake over deletions that run without confirmation (addendum §2.6). */
+  brakeUnconfirmed: BrakeInfo;
   /** What the first applied run stores as remoteBaseline / baselineFolders (spec §5 step 7). */
   baseline: { files: string[]; folders: string[] };
   /** Untracked Google-native files seen (upgrade baseline, addendum §4.1). */

@@ -117,6 +117,10 @@ export function plan(input: PlanInput): Plan {
     notes,
     candidates: untracked.candidates,
     brake: brakeFor(actions, tracked),
+    brakeUnconfirmed: brakeFor(
+      actions.filter((a) => a.reason !== 'local-deleted'),
+      tracked,
+    ),
     baseline: {
       files: [...new Set(baselineFiles)].sort(),
       folders: [

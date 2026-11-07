@@ -153,6 +153,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
         ...base,
         kind: 'trash-remote',
         rule: 'B5',
+        reason: 'local-deleted',
         remote,
         selection: { remove: [record.path] },
       });

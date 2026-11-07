@@ -36,6 +36,7 @@ const PLAN: Plan = {
     truncated: false,
   },
   brake: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 0 },
+  brakeUnconfirmed: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 0 },
   baseline: { files: [], folders: [] },
   nativeBaseline: [],
   inSync: [],

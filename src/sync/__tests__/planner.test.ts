@@ -113,6 +113,30 @@ describe('plan composition', () => {
 });
 
 describe('mass-delete brake (spec §6.8)', () => {
+  it('brake counts every deletion; brakeUnconfirmed only those not awaiting confirmation', () => {
+    const records = ['a', 'b', 'c'].map((n, i) => record(`r${i}`, `${n}.pdf`));
+    const p = plan(
+      planInput({ records, remote: records.map((r) => remoteEntry(r.remoteId, r.path)) }),
+    );
+    expect(p.actions.map((a) => a.reason)).toEqual([
+      'local-deleted',
+      'local-deleted',
+      'local-deleted',
+    ]);
+    expect(p.brake.tripped).toBe(true);
+    expect(p.brakeUnconfirmed).toEqual({
+      tripped: false,
+      trashRemote: 0,
+      trashLocal: 0,
+      tracked: 3,
+    });
+  });
+
+  it('planId does not depend on the reason', () => {
+    const [a] = trash('trash-remote', 1);
+    expect(computePlanId([{ ...a!, reason: 'local-deleted' }])).toBe(computePlanId([a!]));
+  });
+
   it('trips above max(10, 20% of tracked)', () => {
     expect(brakeFor(trash('trash-remote', 10), 100).tripped).toBe(false);
     expect(brakeFor(trash('trash-remote', 11), 30).tripped).toBe(true);

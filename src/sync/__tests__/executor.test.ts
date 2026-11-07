@@ -811,6 +811,7 @@ describe('Executor exports (Google-native)', () => {
       notes: [],
       candidates: { local: [], remote: [], truncated: false },
       brake: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 1 },
+      brakeUnconfirmed: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 1 },
       baseline: { files: [], folders: [] },
       nativeBaseline: [],
       inSync: [],
