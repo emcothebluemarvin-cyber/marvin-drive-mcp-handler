@@ -103,8 +103,14 @@ async function moveLocalEditAside(host: ExportHost, action: Action): Promise<str
       if (err instanceof CollisionError) continue;
       throw err;
     }
-    await syncDir(path.dirname(from));
-    return path.relative(root, to).split(path.sep).join('/');
+    const kept = path.relative(root, to).split(path.sep).join('/');
+    try {
+      await syncDir(path.dirname(from));
+    } catch (err) {
+      // L is already renamed: the failure must still name the kept copy.
+      throw new LocalEditKeptError(kept, err);
+    }
+    return kept;
   }
   throw new CollisionError(path.join(path.dirname(from), localEditName(base, at, 0)));
 }

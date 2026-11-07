@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OperationRunner } from '../../core/operation.js';
 import { QuotaExceededError } from '../../errors.js';
 import {
@@ -17,10 +17,11 @@ import {
 } from '../../files/__tests__/fakes.js';
 import { Executor, conflictName } from '../executor.js';
 import { foldKey } from '../paths.js';
+import { buildReport } from '../report.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import { SYNC_EXPORT_FIELDS } from '../exec-export.js';
-import type { Action, LocalEntry, PairFile, RemoteEntry, SyncRecord } from '../types.js';
+import type { Action, LocalEntry, PairFile, Plan, RemoteEntry, SyncRecord } from '../types.js';
 import type { LocalTrash } from '../trash.js';
 import {
   ROOT_ID,
@@ -31,6 +32,23 @@ import {
   record,
   remoteEntry,
 } from './fixtures.js';
+
+/** Set to make the next `syncDir` call throw (directory fsync failure). */
+const fsyncFault = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('../transfer.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../transfer.js')>();
+  return {
+    ...real,
+    syncDir: async (...args: Parameters<typeof real.syncDir>): Promise<void> => {
+      const err = fsyncFault.error;
+      if (err) {
+        fsyncFault.error = null;
+        throw err;
+      }
+      return real.syncDir(...args);
+    },
+  };
+});
 
 const NOW = new Date('2026-11-03T10:15:00');
 const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
@@ -47,6 +65,7 @@ beforeEach(async () => {
   drive = createFakeDrive();
   audit = createAudit();
   saves = [];
+  fsyncFault.error = null;
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -756,6 +775,36 @@ describe('Executor exports (Google-native)', () => {
     ]);
     const kept = 'Plan (local edit 2026-11-03 10.15).docx';
     expect(out[0]).toMatchObject({ status: 'failed', conflictCopy: kept });
+    expect(await readFile(path.join(dir, kept), 'utf8')).toBe('my edit');
+    expect(saves).toEqual([]);
+  });
+  it('N5 reports the kept name when syncing the directory fails after the move', async () => {
+    const l = await put('Plan.docx', 'my edit');
+    const k = nativeRecord('g1', 'Plan.docx');
+    const r = nativeEntry('g1', 'Plan.docx', { modifiedTime: NEWER });
+    drive.getFile.mockResolvedValueOnce(current(r));
+    exportServes('DOCX v2');
+    fsyncFault.error = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    const out = await executor(pairFile([k])).run([
+      action('export-new', 'Plan.docx', { record: k, local: l, remote: r, localEdit: true }),
+    ]);
+    const kept = 'Plan (local edit 2026-11-03 10.15).docx';
+    expect(out[0]).toMatchObject({ status: 'failed', conflictCopy: kept });
+    expect(out[0]?.message).toContain('EACCES');
+    const plan: Plan = {
+      planId: 'p1',
+      actions: [],
+      notes: [],
+      candidates: { local: [], remote: [], truncated: false },
+      brake: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 1 },
+      baseline: { files: [], folders: [] },
+      nativeBaseline: [],
+    };
+    expect(buildReport('docs', plan, { dryRun: false, outcomes: out }).warnings).toContainEqual({
+      path: 'Plan.docx',
+      code: 'native-local-edit-kept',
+      message: `your local edit is kept as ${kept}`,
+    });
     expect(await readFile(path.join(dir, kept), 'utf8')).toBe('my edit');
     expect(saves).toEqual([]);
   });
