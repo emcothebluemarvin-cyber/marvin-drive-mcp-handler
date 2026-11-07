@@ -1,4 +1,11 @@
-import type { Modifier, RawChange, RawFile, WatchEntry } from '../types.js';
+import type {
+  ChangeEvent,
+  EventDraft,
+  Modifier,
+  RawChange,
+  RawFile,
+  WatchEntry,
+} from '../types.js';
 
 export const ME: Modifier = { name: 'Emco', email: 'me@example.com', me: true };
 export const AYSE: Modifier = { name: 'Ayşe Demir', email: 'ayse@example.com', me: false };
@@ -32,4 +39,33 @@ export function folderEntry(over: Partial<WatchEntry> = {}): WatchEntry {
 
 export function fileEntry(over: Partial<WatchEntry> = {}): WatchEntry {
   return { id: 'D', name: 'Plan', kind: 'doc', folder: false, addedAt: ADDED_AT, ...over };
+}
+
+export function makeDraft(over: Partial<EventDraft> = {}): EventDraft {
+  return {
+    id: 'me@example.com:D:2026-11-07T11:00:00.000Z',
+    account: 'me@example.com',
+    kind: 'edited',
+    flags: ['edited'],
+    fileId: 'D',
+    name: 'Plan',
+    previousName: null,
+    fileKind: 'doc',
+    time: '2026-11-07T11:00:00.000Z',
+    firstSeen: '2026-11-07T11:00:00.000Z',
+    modifiers: [AYSE],
+    own: false,
+    alsoByYou: false,
+    diff: '- a\n+ b',
+    note: null,
+    comments: [],
+    untrusted: true,
+    ...over,
+  };
+}
+
+/** An inbox event; the id defaults to one derived from `seq`. */
+export function makeEvent(over: Partial<ChangeEvent> = {}): ChangeEvent {
+  const seq = over.seq ?? 1;
+  return { ...makeDraft({ id: `me@example.com:D:${seq}` }), seq, ...over };
 }
