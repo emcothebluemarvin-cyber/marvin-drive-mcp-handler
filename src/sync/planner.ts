@@ -120,5 +120,12 @@ export function plan(input: PlanInput): Plan {
         ...input.remote.ignored.filter((i) => i.isFolder).map((i) => i.id),
       ].sort(),
     },
+    nativeBaseline: [
+      ...new Set(
+        input.remote.entries
+          .filter((r) => r.native !== null && !ctx.trackedIds.has(r.id))
+          .map((r) => r.id),
+      ),
+    ].sort(),
   };
 }

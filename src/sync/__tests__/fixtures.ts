@@ -40,6 +40,7 @@ export function makePair(overrides: Partial<Pair> = {}): Pair {
     createdAt: '2026-11-01T00:00:00.000Z',
     lastAppliedRunAt: '2026-11-02T00:00:00.000Z',
     firstAppliedRunAt: '2026-11-02T00:00:00.000Z',
+    nativeBaselineDone: true,
     ...overrides,
   };
 }

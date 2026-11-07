@@ -37,6 +37,8 @@ export interface Pair {
   createdAt: string;
   lastAppliedRunAt: string | null;
   firstAppliedRunAt: string | null;
+  /** Addendum §4.1: false until the first applied run that baselined Google-native files. */
+  nativeBaselineDone: boolean;
 }
 
 export interface SyncRecord {
@@ -234,6 +236,8 @@ export interface Plan {
   brake: BrakeInfo;
   /** What the first applied run stores as remoteBaseline / baselineFolders (spec §5 step 7). */
   baseline: { files: string[]; folders: string[] };
+  /** Untracked Google-native files seen (upgrade baseline, addendum §4.1). */
+  nativeBaseline: string[];
 }
 
 export interface ActionOutcome {

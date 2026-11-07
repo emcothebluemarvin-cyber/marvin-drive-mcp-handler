@@ -43,6 +43,15 @@ function store(isAlive: (pid: number) => boolean = () => true): PairStore {
 }
 
 describe('PairStore', () => {
+  it('loads a Phase A pair file without nativeBaselineDone as false', async () => {
+    const file = makePairFile();
+    const oldPair: Record<string, unknown> = { ...file.pair };
+    delete oldPair.nativeBaselineDone;
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...file, pair: oldPair }));
+    expect((await store().load('docs')).pair.nativeBaselineDone).toBe(false);
+  });
+
   it('tightens an existing sync dir to 0700', async () => {
     await mkdir(dir, { recursive: true });
     await chmod(dir, 0o755);

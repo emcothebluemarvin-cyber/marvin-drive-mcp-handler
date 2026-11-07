@@ -193,6 +193,16 @@ export class SyncService {
         file.pair.remoteBaseline = plan.baseline.files;
         file.pair.baselineFolders = plan.baseline.folders;
       }
+      // Addendum §4.1: baseline the natives Phase A never recorded, in the same save.
+      if (!file.pair.nativeBaselineDone) {
+        file.pair.remoteBaseline = [
+          ...new Set([...file.pair.remoteBaseline, ...plan.nativeBaseline]),
+        ].sort();
+        file.pair.baselineFolders = [
+          ...new Set([...file.pair.baselineFolders, ...plan.baseline.folders]),
+        ].sort();
+        file.pair.nativeBaselineDone = true;
+      }
       await this.store.save(file);
       return buildReport(name, plan, { dryRun: false, outcomes });
     });

@@ -66,6 +66,7 @@ describe('createPair', () => {
       presentation: 'pptx',
       drawing: 'pdf',
     });
+    expect(file.pair.nativeBaselineDone).toBe(false);
   });
 
   it('creates a new Drive folder by name and audits it', async () => {

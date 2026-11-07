@@ -142,6 +142,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       createdAt: env.clock().toISOString(),
       lastAppliedRunAt: null,
       firstAppliedRunAt: null,
+      nativeBaselineDone: false,
     };
     const file: PairFile = { version: 1, pair, records: [] };
     await env.store.save(file);

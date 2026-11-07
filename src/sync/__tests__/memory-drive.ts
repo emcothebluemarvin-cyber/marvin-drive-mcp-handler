@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { DriveFile } from '../../drive/drive-adapter.js';
-import { GOOGLE_MIME } from '../../files/export-formats.js';
+import { GOOGLE_MIME, isGoogleNative } from '../../files/export-formats.js';
 import { createFakeDrive, httpError, type FakeDrive } from '../../files/__tests__/fakes.js';
 
 export interface MemFile {
@@ -28,6 +28,8 @@ export interface MemoryDrive {
     content: string,
     extra?: Partial<MemFile>,
   ): MemFile;
+  /** A Google-native file; its export (any format) is `content`. */
+  addNative(id: string, name: string, parent: string, content: string, mimeType?: string): MemFile;
   childrenOf(parent: string): MemFile[];
 }
 
@@ -57,7 +59,7 @@ export function memoryDrive(rootId = 'ROOT'): MemoryDrive {
       trashed: f.trashed,
       createdTime: f.createdTime,
       modifiedTime: f.modifiedTime,
-      ...(isFolder
+      ...(isGoogleNative(f.mimeType)
         ? {}
         : {
             md5Checksum: createHash('md5').update(f.content).digest('hex'),
@@ -128,6 +130,11 @@ export function memoryDrive(rootId = 'ROOT'): MemoryDrive {
     if (!f) throw httpError(404, 'notFound');
     return Readable.from([f.content]);
   });
+  drive.exportMedia.mockImplementation(async (id) => {
+    const f = files.get(id);
+    if (!f) throw httpError(404, 'notFound');
+    return Readable.from([f.content]);
+  });
   add({
     id: rootId,
     name: 'Sync root',
@@ -149,6 +156,8 @@ export function memoryDrive(rootId = 'ROOT'): MemoryDrive {
         content: Buffer.from(content),
         ...extra,
       }),
+    addNative: (id, name, parent, content, mimeType = GOOGLE_MIME.document) =>
+      add({ id, name, mimeType, parents: [parent], content: Buffer.from(content) }),
     childrenOf: (parent) =>
       [...files.values()].filter((f) => f.parents.includes(parent) && !f.trashed),
   };

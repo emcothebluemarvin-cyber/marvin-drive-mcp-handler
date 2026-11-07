@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brakeFor, computePlanId, plan } from '../planner.js';
 import type { Action } from '../types.js';
-import { localEntry, record, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, record, remoteEntry } from './fixtures.js';
 import { planInput } from './plan-input.js';
 
 function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
@@ -79,6 +79,22 @@ describe('plan composition', () => {
       }),
     );
     expect(p.baseline).toEqual({ files: ['d1', 'd2', 'g1', 'n1'], folders: ['dupF', 'f9'] });
+  });
+
+  it('lists untracked Google-native Drive files for the upgrade baseline', () => {
+    const p = plan(
+      planInput({
+        records: [record('r0', 'a.pdf')],
+        local: [localEntry('a.pdf')],
+        remote: [
+          remoteEntry('r0', 'a.pdf'),
+          nativeEntry('g2', 'B.docx'),
+          nativeEntry('g1', 'A.docx'),
+          remoteEntry('n1', 'new.pdf'),
+        ],
+      }),
+    );
+    expect(p.nativeBaseline).toEqual(['g1', 'g2']);
   });
 });
 

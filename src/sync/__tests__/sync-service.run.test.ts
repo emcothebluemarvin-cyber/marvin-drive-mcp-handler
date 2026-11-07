@@ -286,3 +286,39 @@ describe('run (review regressions)', () => {
     expect(pair.lastAppliedRunAt).toBe(stamps[before]?.toISOString());
   });
 });
+
+describe('upgrade from Phase A (nativeBaselineDone)', () => {
+  async function phaseAPair(): Promise<void> {
+    await apply();
+    const file = await store.load('docs');
+    file.pair.nativeBaselineDone = false;
+    await store.save(file);
+  }
+  const done = async (): Promise<boolean> => (await store.load('docs')).pair.nativeBaselineDone;
+
+  it('dry runs and plan-changed aborts change nothing; an applied run baselines natives', async () => {
+    await phaseAPair();
+    mem.addNative('g1', 'Plan', 'ROOT', 'doc v1');
+    const dry = await sync.run({ name: 'docs' });
+    expect(await done()).toBe(false);
+    await writeFile(at('new.pdf'), 'N');
+    await sync.select({ name: 'docs', add: ['new.pdf'] });
+    const changed = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
+    expect(changed.aborted?.reason).toBe('plan-changed');
+    expect(await done()).toBe(false);
+    await apply();
+    const after = await store.load('docs');
+    expect(after.pair.nativeBaselineDone).toBe(true);
+    expect(after.pair.remoteBaseline).toContain('g1');
+  });
+
+  it('a mass-delete abort leaves it false', async () => {
+    for (const n of ['a', 'b', 'c']) await writeFile(at(`${n}.pdf`), n);
+    await sync.select({ name: 'docs', add: ['a.pdf', 'b.pdf', 'c.pdf'] });
+    await phaseAPair();
+    for (const f of mem.childrenOf('ROOT')) f.trashed = true;
+    const braked = await apply();
+    expect(braked.aborted?.reason).toBe('mass-delete');
+    expect(await done()).toBe(false);
+  });
+});

@@ -37,6 +37,7 @@ const PLAN: Plan = {
   },
   brake: { tripped: false, trashRemote: 0, trashLocal: 0, tracked: 0 },
   baseline: { files: [], folders: [] },
+  nativeBaseline: [],
 };
 
 describe('buildReport', () => {
