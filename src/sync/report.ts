@@ -12,6 +12,9 @@ const WARNING_CODES: ReadonlySet<NoteCode> = new Set([
   'unrepresentable',
   'ambiguous-native',
   'weak-compare',
+  'native-readonly-edited',
+  'native-local-missing',
+  'native-trashed-edited',
 ]);
 
 function unique(values: string[]): string[] {

@@ -209,6 +209,9 @@ export type NoteCode =
   | 'unrepresentable'
   | 'ambiguous-native'
   | 'weak-compare'
+  | 'native-readonly-edited'
+  | 'native-local-missing'
+  | 'native-trashed-edited'
   | 'ignored';
 
 export interface Note {
