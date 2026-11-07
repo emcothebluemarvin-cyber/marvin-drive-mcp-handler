@@ -15,6 +15,7 @@ const WARNING_CODES: ReadonlySet<NoteCode> = new Set([
   'native-readonly-edited',
   'native-local-missing',
   'native-trashed-edited',
+  'remote-only-trashed',
 ]);
 
 function unique(values: string[]): string[] {

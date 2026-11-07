@@ -58,13 +58,6 @@ describe('dispatch (spec §6.3)', () => {
     expect(result.actions).toEqual([]);
     expect(result.notes[0]).toMatchObject({ code: 'ambiguous', path: 'a.pdf' });
   });
-
-  it('(c)/(d) Phase B records never act', () => {
-    const remoteOnly = { ...K, remoteOnly: true };
-    const result = run({ remote: [R] }, remoteOnly);
-    expect(result.actions).toEqual([]);
-    expect(result.notes[0]).toMatchObject({ code: 'unknown-state', rule: 'phase-b' });
-  });
 });
 
 describe('binary tracked records (spec §6.4)', () => {

@@ -266,6 +266,13 @@ export class Executor {
   }
 
   private async refresh(action: Action): Promise<Partial<ActionOutcome>> {
+    if (action.patch) {
+      // Remote-only bookkeeping (O3–O6): only the record changes, no file is touched.
+      const record = need(action.record, 'record');
+      const patch = action.patch;
+      await this.commit(action, () => putRecord(this.file, { ...record, ...patch }));
+      return {};
+    }
     const local = need(action.local, 'local');
     const remote = need(action.remote, 'remote');
     const md5 = need(action.localMd5, 'local md5');

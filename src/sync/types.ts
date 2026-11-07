@@ -192,6 +192,8 @@ export interface Action {
   rebaseFrom?: string;
   /** export-new (N5): move the locally edited L aside as `<stem> (local edit …)<ext>` first. */
   localEdit?: boolean;
+  /** refresh: record fields to set (remote-only bookkeeping O3–O6); no file is touched. */
+  patch?: Partial<SyncRecord>;
 }
 
 export type NoteCode =
@@ -212,6 +214,7 @@ export type NoteCode =
   | 'native-readonly-edited'
   | 'native-local-missing'
   | 'native-trashed-edited'
+  | 'remote-only-trashed'
   | 'ignored';
 
 export interface Note {

@@ -1,6 +1,7 @@
 import { localMatchesRemote, remoteChanged } from './content-compare.js';
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
+import { planRemoteOnly } from './plan-remote-only.js';
 import { makeScope, needsRefresh, planMoved, type TrackedResult } from './plan-shared.js';
 import {
   isUnknownKey,
@@ -44,10 +45,8 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
   if (R.kind === 'present' && (record.native !== null) !== (R.entry.native !== null)) {
     return note('unknown-state', 'type-changed', TYPE_CHANGED);
   }
-  // (c) remote-only records: the O rules arrive in Task 14.
-  if (record.remoteOnly) {
-    return note('unknown-state', 'phase-b', 'needs release support (Phase B)');
-  }
+  // (c) remote-only records, natives included (spec §6.7).
+  if (record.remoteOnly) return planRemoteOnly(s, L, R);
 
   const entry = L.kind === 'present' ? L.entry : null;
   let lChanged = false;

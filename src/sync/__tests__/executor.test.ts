@@ -151,6 +151,20 @@ function serve(content: string): void {
 }
 
 describe('Executor', () => {
+  it('applies a refresh patch to the record and its selection change (O4)', async () => {
+    const k = record('r1', 'a.pdf', { remoteOnly: true });
+    const file = pairFile([k]);
+    await executor(file).run([
+      action('refresh', 'sub/a.pdf', {
+        record: k,
+        patch: { path: 'sub/a.pdf', localName: 'sub/a.pdf' },
+        selection: { remove: ['a.pdf'], add: ['sub/a.pdf'] },
+      }),
+    ]);
+    expect(saves.at(-1)?.records).toMatchObject([{ path: 'sub/a.pdf', remoteOnly: true }]);
+    expect(saves.at(-1)?.pair.selection).toEqual(['sub/a.pdf']);
+  });
+
   it('runs stages in spec order regardless of plan order', async () => {
     const a = await put('a.pdf', 'A');
     const r = remote('r2', 'b.pdf', 'B');
