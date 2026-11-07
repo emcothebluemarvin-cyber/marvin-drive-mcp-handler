@@ -1,3 +1,4 @@
+import { localMatchesRemote } from './content-compare.js';
 import { baseName, foldKey, parentKey } from './paths.js';
 import {
   isBlocked,
@@ -159,7 +160,7 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
       } else if (L && R) {
         const lMd5 = ctx.input.md5s.get(L.name);
         if (lMd5 === undefined) note('unknown-state', 'U2', 'local file could not be hashed');
-        else if (R.md5 !== null && lMd5 === R.md5) {
+        else if (localMatchesRemote(lMd5, null, R)) {
           out.actions.push({
             ...base,
             kind: 'adopt',

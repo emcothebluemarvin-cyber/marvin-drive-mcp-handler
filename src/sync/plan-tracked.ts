@@ -1,9 +1,9 @@
+import { localMatchesRemote, remoteChanged } from './content-compare.js';
 import { foldKey } from './paths.js';
 import {
   isExcluded,
   isUnknownKey,
   localState,
-  remoteState,
   resolveLocal,
   resolveRemote,
   type PlanContext,
@@ -154,7 +154,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
   }
 
   const remote = R.entry;
-  const rs = remoteState(record, remote);
+  const rs = remoteChanged(record, remote);
   if (rs.weak) note('weak-compare', 'R', 'Drive has no md5; compared size and modifiedTime');
 
   if (!R.moved) {
@@ -171,7 +171,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       }
       if (rs.changed && !lChanged)
         return act({ ...base, kind: 'download-replace', rule: 'B3', remote });
-      if (lMd5 !== null && lMd5 === remote.md5)
+      if (lMd5 !== null && localMatchesRemote(lMd5, null, remote))
         return act({ ...base, kind: 'adopt', rule: 'B4', remote });
       if (!remote.canEdit)
         note('remote-readonly', 'B4', 'no edit permission; kept a conflict copy only');

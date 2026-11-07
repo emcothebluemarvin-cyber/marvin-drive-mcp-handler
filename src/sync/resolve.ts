@@ -204,20 +204,6 @@ export function localState(
   return { changed: md5 !== record.localMd5, md5 };
 }
 
-/** R content vs the record (md5, else size + modifiedTime with `weak`). */
-export function remoteState(
-  record: SyncRecord,
-  entry: RemoteEntry,
-): { changed: boolean; weak: boolean } {
-  if (entry.md5 !== null && record.remoteMd5 !== null) {
-    return { changed: entry.md5 !== record.remoteMd5, weak: false };
-  }
-  return {
-    changed: entry.size !== record.remoteSize || entry.modifiedTime !== record.remoteModifiedTime,
-    weak: true,
-  };
-}
-
 /**
  * Keys the service must `lstat` before planning (`PlanInput.onDisk`): record keys without
  * an exact scan match, and Drive/selected keys that match a local file only by fold.

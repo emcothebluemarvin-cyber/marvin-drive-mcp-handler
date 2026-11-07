@@ -6,6 +6,7 @@ import type { DriveFile } from '../drive/drive-adapter.js';
 import { AppError, ValidationError, hasErrorCode } from '../errors.js';
 import { escapeQueryValue } from '../files/query.js';
 import type { Logger } from '../logger.js';
+import { remoteUnchangedSince } from './content-compare.js';
 import {
   CollisionError,
   PersistenceError,
@@ -217,11 +218,7 @@ export class Executor {
   /** Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7). */
   private async verifyRemote(planned: RemoteEntry): Promise<DriveFile> {
     const current = await this.readRemote(planned.id);
-    if (
-      current.trashed ||
-      (current.md5Checksum ?? null) !== planned.md5 ||
-      (current.modifiedTime ?? '') !== planned.modifiedTime
-    ) {
+    if (current.trashed || !remoteUnchangedSince(planned, current)) {
       throw new TargetChangedError(`${planned.key} changed in Drive since planning`);
     }
     return current;
@@ -491,8 +488,7 @@ export class Executor {
     const current = await this.readRemote(remote.id);
     if (!current.trashed) {
       if (
-        (current.md5Checksum ?? null) !== remote.md5 ||
-        (current.modifiedTime ?? '') !== remote.modifiedTime ||
+        !remoteUnchangedSince(remote, current) ||
         (current.parents?.[0] ?? '') !== remote.parentId
       ) {
         throw new TargetChangedError(`${action.key} changed or moved in Drive since planning`);

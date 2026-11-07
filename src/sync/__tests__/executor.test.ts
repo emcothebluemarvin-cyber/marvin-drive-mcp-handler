@@ -522,6 +522,23 @@ describe('Executor', () => {
 });
 
 describe('Executor (review regressions)', () => {
+  it('re-verification needs md5 and modifiedTime unchanged (remoteUnchangedSince)', async () => {
+    const a = await put('a.pdf', 'L2');
+    const r = remote('r1', 'a.pdf', 'R1');
+    const k = record('r1', 'a.pdf');
+    drive.getFile.mockResolvedValueOnce({
+      id: 'r1',
+      md5Checksum: r.md5,
+      modifiedTime: '2026-11-03T09:00:00.000Z',
+      parents: [ROOT_ID],
+    });
+    const out = await executor(pairFile([k])).run([
+      action('update-remote', 'a.pdf', { record: k, local: a, localMd5: md5('L2'), remote: r }),
+    ]);
+    expect(out[0]).toMatchObject({ status: 'skipped' });
+    expect(drive.updateFile).not.toHaveBeenCalled();
+  });
+
   it('skips trash-remote when the local file is back or the Drive file moved', async () => {
     await put('back.pdf', 'restored from Trash');
     const r = remote('r2', 'moved.pdf', 'M');
