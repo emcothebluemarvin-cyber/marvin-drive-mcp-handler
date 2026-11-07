@@ -115,6 +115,18 @@ function otherFileLines(before: KnownFile | null, after: KnownFile | null): stri
   return lines;
 }
 
+const validTime = (t: string | undefined): t is string =>
+  t !== undefined && t !== '' && !Number.isNaN(Date.parse(t));
+
+/**
+ * The comment check time: `since`, else the stored snapshot's time (the baseline of `add`),
+ * else the item's first sighting, else now. Drive rejects an empty `startModifiedTime`.
+ */
+function commentSince(input: EnrichInput): string {
+  const candidates = [input.since, input.previous?.takenAt, input.item.firstSeen];
+  return candidates.find(validTime) ?? input.now.toISOString();
+}
+
 /** Snapshot → diff → comments → event, or null when nothing visible changed (spec §6). */
 export async function enrich(input: EnrichInput): Promise<EnrichResult> {
   const { item, snapshotter, log, now } = input;
@@ -165,10 +177,8 @@ export async function enrich(input: EnrichInput): Promise<EnrichResult> {
 
   if (native && !gone) {
     try {
-      comments = newForeignNotes(
-        await snapshotter.commentsSince(item.fileId, input.since),
-        input.since,
-      );
+      const since = commentSince(input);
+      comments = newForeignNotes(await snapshotter.commentsSince(item.fileId, since), since);
       commentCheck = now.toISOString();
     } catch (err) {
       log.warn('Watch comment check failed', { fileId: item.fileId, error: err });

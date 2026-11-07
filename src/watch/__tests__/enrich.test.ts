@@ -151,6 +151,24 @@ describe('enrich: natives', () => {
   });
 });
 
+describe('enrich: comment check time', () => {
+  it('never asks for comments since an empty or invalid time', async () => {
+    const asked: string[] = [];
+    const spy = Object.assign(Object.create(snap) as MemorySnapshotter, {
+      commentsSince: async (_id: string, since: string) => {
+        asked.push(since);
+        return [];
+      },
+    });
+    await enrich(input({ snapshotter: spy, since: '' }));
+    await enrich(input({ snapshotter: spy, since: 'x', previous: null }));
+    await enrich(
+      input({ snapshotter: spy, since: '', previous: null, item: pendingItem({ firstSeen: '' }) }),
+    );
+    expect(asked).toEqual([T1, T1, NOW.toISOString()]);
+  });
+});
+
 describe('enrich: other files', () => {
   const other = (over: Parameters<typeof knownFile>[0]) => knownFile({ kind: 'other', ...over });
 
