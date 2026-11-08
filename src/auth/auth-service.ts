@@ -2,6 +2,7 @@ import { Auth } from 'googleapis';
 import {
   ALIAS_PATTERN,
   defaultAlias,
+  tokenKey,
   type AccountRecord,
   type AccountRegistry,
 } from '../config/account-registry.js';
@@ -80,7 +81,7 @@ export class AuthService {
     });
     const { saved } = outcome;
     if (!saved) throw new AuthFlowError('Login finished without saving the account');
-    this.reauthNeeded.delete(saved.email);
+    this.reauthNeeded.delete(tokenKey(saved));
     return saved;
   }
 
@@ -95,7 +96,7 @@ export class AuthService {
     const normalized = alias === undefined ? null : alias.trim().toLowerCase();
     const result = await this.finishTwoStep({ command: 'add', account: normalized }, redirectUrl);
     const saved = await this.saveNewAccount(alias, result);
-    this.reauthNeeded.delete(saved.email);
+    this.reauthNeeded.delete(tokenKey(saved));
     return saved;
   }
 
@@ -117,8 +118,8 @@ export class AuthService {
         `Signed in as ${result.email}, but "${record.alias}" is ${record.email}. Nothing was saved.`,
       );
     }
-    await this.deps.tokens.set(record.email, result.refreshToken);
-    this.reauthNeeded.delete(record.email);
+    await this.deps.tokens.set(tokenKey(record), result.refreshToken);
+    this.reauthNeeded.delete(tokenKey(record));
     return record;
   }
 
@@ -192,7 +193,7 @@ export class AuthService {
       email: result.email,
     });
     try {
-      await this.deps.tokens.set(record.email, result.refreshToken);
+      await this.deps.tokens.set(tokenKey(record), result.refreshToken);
     } catch (err) {
       await this.deps.registry.remove(record.alias);
       throw err;
@@ -213,20 +214,20 @@ export class AuthService {
             `Signed in as ${result.email}, but "${record.alias}" is ${record.email}. Nothing was saved.`,
           );
         }
-        await this.deps.tokens.set(record.email, result.refreshToken);
+        await this.deps.tokens.set(tokenKey(record), result.refreshToken);
         outcome.saved = true;
       },
     });
     if (!outcome.saved) throw new AuthFlowError('Login finished without saving the account');
-    this.reauthNeeded.delete(record.email);
+    this.reauthNeeded.delete(tokenKey(record));
     return record;
   }
 
   async removeAccount(ref: string): Promise<AccountRecord> {
     const record = await this.deps.registry.resolve(ref);
-    const token = await this.deps.tokens.get(record.email);
+    const token = await this.deps.tokens.get(tokenKey(record));
     try {
-      await this.deps.tokens.delete(record.email);
+      await this.deps.tokens.delete(tokenKey(record));
     } catch (err) {
       this.log.warn('Failed to delete stored token; removing the account anyway', {
         alias: record.alias,
@@ -234,7 +235,7 @@ export class AuthService {
       });
     }
     await this.deps.registry.remove(record.alias);
-    this.reauthNeeded.delete(record.email);
+    this.reauthNeeded.delete(tokenKey(record));
     if (token) {
       try {
         const credentials = await this.deps.loadCredentials();
@@ -253,34 +254,36 @@ export class AuthService {
     return this.deps.registry.setDefault(ref);
   }
 
+  /** For Google-only surfaces: an email means the Google account of that address. */
   resolveAccount(ref?: string): Promise<AccountRecord> {
-    return this.deps.registry.resolve(ref);
+    return this.deps.registry.resolveGoogleFirst(ref);
   }
 
-  readRefreshToken(email: string): Promise<string | null> {
-    return this.deps.tokens.get(email);
+  /** `key` comes from `tokenKey(record)`. */
+  readRefreshToken(key: string): Promise<string | null> {
+    return this.deps.tokens.get(key);
   }
 
-  markReauthRequired(email: string): void {
-    this.reauthNeeded.add(email);
+  markReauthRequired(key: string): void {
+    this.reauthNeeded.add(key);
   }
 
-  markHealthy(email: string): void {
-    this.reauthNeeded.delete(email);
+  markHealthy(key: string): void {
+    this.reauthNeeded.delete(key);
   }
 
   async authorize(ref?: string): Promise<AuthorizedClient> {
-    const account = await this.deps.registry.resolve(ref);
-    const refreshToken = await this.deps.tokens.get(account.email);
+    const account = await this.deps.registry.resolveGoogleFirst(ref);
+    const refreshToken = await this.deps.tokens.get(tokenKey(account));
     if (!refreshToken) {
-      this.reauthNeeded.add(account.email);
+      this.reauthNeeded.add(tokenKey(account));
       throw new ReauthRequiredError(account.alias);
     }
     const client = this.newClient(await this.deps.loadCredentials());
     client.setCredentials({ refresh_token: refreshToken });
     client.on('tokens', (fresh) => {
       if (fresh.refresh_token && fresh.refresh_token !== refreshToken) {
-        this.deps.tokens.set(account.email, fresh.refresh_token).catch((err: unknown) => {
+        this.deps.tokens.set(tokenKey(account), fresh.refresh_token).catch((err: unknown) => {
           this.log.warn('Failed to persist rotated refresh token', {
             alias: account.alias,
             error: err,
@@ -304,17 +307,17 @@ export class AuthService {
   }
 
   private async checkStatus(account: AccountRecord, verify: boolean): Promise<AccountStatus> {
-    const token = await this.deps.tokens.get(account.email);
+    const token = await this.deps.tokens.get(tokenKey(account));
     if (!token) return 'reauth_required';
-    if (!verify) return this.reauthNeeded.has(account.email) ? 'reauth_required' : 'ok';
+    if (!verify) return this.reauthNeeded.has(tokenKey(account)) ? 'reauth_required' : 'ok';
     try {
       const { client } = await this.authorize(account.alias);
       await client.getAccessToken();
-      this.reauthNeeded.delete(account.email);
+      this.reauthNeeded.delete(tokenKey(account));
       return 'ok';
     } catch (err) {
       if (isInvalidGrant(err) || err instanceof ReauthRequiredError) {
-        this.reauthNeeded.add(account.email);
+        this.reauthNeeded.add(tokenKey(account));
         return 'reauth_required';
       }
       this.log.warn('Token check failed', { alias: account.alias, error: err });

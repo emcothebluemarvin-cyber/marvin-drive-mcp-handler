@@ -302,3 +302,19 @@ describe('two-step login', () => {
     expect(await tokens.get('w@example.com')).toBe('rt-new');
   });
 });
+
+describe('AuthService token keys and email references', () => {
+  it('looks up a shared address as the Google account on Google-only surfaces', async () => {
+    login.mockImplementationOnce(answer(signIn('same@example.com', 'rt-google')));
+    await service.addAccount('g');
+    await registry.add({
+      alias: 'ms',
+      email: 'same@example.com',
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+    await expect(service.resolveAccount('same@example.com')).resolves.toMatchObject({ alias: 'g' });
+    const { refreshToken } = await service.authorize('same@example.com');
+    expect(refreshToken).toBe('rt-google');
+  });
+});
