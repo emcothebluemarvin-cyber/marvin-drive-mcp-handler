@@ -2,7 +2,9 @@ import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import {
+  CopyStillRunningError,
   GraphApiError,
+  NameConflictError,
   NotFoundError,
   ReauthRequiredError,
   ValidationError,
@@ -39,6 +41,14 @@ export interface GraphRequestOptions {
 export const FRAGMENT_SIZE = 10 * 1024 * 1024;
 const MAX_FRAGMENT_RETRIES = 5;
 const SESSION_LOST = Symbol('session lost');
+const COPY_POLL_MS = 2000;
+const COPY_TIMEOUT_MS = 60_000;
+
+interface CopyMonitor {
+  status?: string;
+  resourceId?: string;
+  error?: { code?: string; message?: string };
+}
 
 export interface UploadRequest {
   /** Path of the `createUploadSession` action. */
@@ -271,6 +281,50 @@ export class GraphClient {
       await this.fetch(uploadUrl, { method: 'DELETE' });
     } catch {
       // Best effort: an abandoned session expires by itself.
+    }
+  }
+
+  /**
+   * Starts a copy and waits for it. Once Graph has accepted it (202) it is never repeated; only a
+   * 429 on the initial POST is retried (spec §7.3).
+   */
+  async copy<T>(
+    path: string,
+    body: unknown,
+    target: string,
+    readItem: (id: string) => Promise<T>,
+  ): Promise<T> {
+    const res = await this.send('POST', `${GRAPH_BASE}${path}`, {
+      retry: 'create',
+      body,
+      target,
+    });
+    await res.body?.cancel();
+    const monitor = res.headers.get('location');
+    if (!monitor) throw new GraphApiError(res.status);
+    const started = this.now();
+    for (;;) {
+      await this.sleep(COPY_POLL_MS);
+      const state = await this.readCopyMonitor(monitor);
+      if (state?.status === 'completed' && state.resourceId) return readItem(state.resourceId);
+      if (state?.status === 'failed') {
+        const { code, message } = state.error ?? {};
+        if (code?.toLowerCase() === 'namealreadyexists' || /already exists/i.test(message ?? '')) {
+          throw new NameConflictError(target);
+        }
+        throw new GraphApiError(undefined);
+      }
+      if (this.now() - started >= COPY_TIMEOUT_MS) throw new CopyStillRunningError(target);
+    }
+  }
+
+  /** The monitor URL is pre-authenticated. A failed read just means "ask again". */
+  private async readCopyMonitor(url: string): Promise<CopyMonitor | undefined> {
+    try {
+      const res = await this.fetch(url, { method: 'GET' });
+      return (await res.json()) as CopyMonitor;
+    } catch {
+      return undefined;
     }
   }
 
