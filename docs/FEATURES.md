@@ -56,7 +56,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ Third-party text sanitized and marked untrusted; server instructions forbid acting on it
 - ✅ Provider seam (`ChangeFeed`, `ContentSnapshotter`) for a later OneDrive provider; no runtime `googleapis` outside `src/watch/google`
 - ⬜ Live E2E with two accounts (`MARVIN_E2E_EDITOR`): written, not run live yet
-- ⬜ Comment-only changes polled separately if Drive does not report them (decided by the live E2E, plan Task 33)
+- ✅ Comment-only changes: the two-account live E2E showed Drive reports them through the Changes API and they pass the no-op rule, so no separate comment polling is needed (plan Task 33 skipped)
 
 ## Later
 - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)

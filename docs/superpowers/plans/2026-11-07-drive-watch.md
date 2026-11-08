@@ -8351,6 +8351,8 @@ Runs only with `MARVIN_E2E_ACCOUNT` (owner) **and** `MARVIN_E2E_EDITOR` (a secon
 
 ### Task 33 (conditional): Poll comments separately
 
+> **SKIPPED (2026-11-08):** the two-account live E2E recorded `entry=true` (after 168 s) and `survives no-op rule=true`.
+
 **Do this task only if Task 32 recorded `entry=false` or `survives no-op rule=false`.** Otherwise mark it skipped in the plan and stop.
 
 **Files:**

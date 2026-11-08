@@ -83,7 +83,8 @@ describe.runIf(account && editor)('Watch E2E (live)', () => {
       await docs.insertText({
         account: editor,
         fileId: doc.id,
-        text: 'edited by the second account\n',
+        // `at: 'end'` inserts before the final newline, so a new line needs a leading \n.
+        text: '\nedited by the second account',
         position: { at: 'end' },
       });
       const edited = await until<ChangeEvent>(async () => {
@@ -99,7 +100,7 @@ describe.runIf(account && editor)('Watch E2E (live)', () => {
       await docs.insertText({
         account,
         fileId: doc.id,
-        text: 'own line\n',
+        text: '\nown line',
         position: { at: 'end' },
       });
       const own = await until<ChangeEvent>(async () => {
