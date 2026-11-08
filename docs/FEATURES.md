@@ -58,7 +58,17 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ⬜ Live E2E with two accounts (`MARVIN_E2E_EDITOR`): written, not run live yet
 - ✅ Comment-only changes: the two-account live E2E showed Drive reports them through the Changes API and they pass the no-op rule, so no separate comment polling is needed (plan Task 33 skipped)
 
+### 8. OneDrive sign-in and file operations (spec: `docs/superpowers/specs/2026-11-08-onedrive-files-design.md`)
+- ✅ Microsoft PKCE login (`auth add --provider microsoft`), personal and work/school accounts, two-step login, token rotation
+- ✅ `FileRouter` picks Google or OneDrive from the account; the `drive_*` tools are unchanged
+- ✅ GraphClient: token only to graph.microsoft.com, retry rules, resumable upload sessions, copy monitor
+- ✅ `drive_upload` name conflicts ask Overwrite / Cancel through MCP elicitation; rename, move and copy conflicts are errors
+- ✅ Microsoft accounts are rejected on the Google-only tools (content, sync, watch)
+- ⬜ Live E2E (`MARVIN_E2E_MS_PERSONAL`, `MARVIN_E2E_MS_WORK`): written, not run live yet. Personal: not live-tested. Work/school: not live-tested
+- ⬜ Overwrite / Cancel dialog answered after more than 60 s in Claude Code: manual check, not done yet
+
 ## Later
+- ⬜ OneDrive: sync, change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
 - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)
 - ⬜ Sync watch mode (continuous sync)
 - ⬜ GUI with Claude-API file classification for sync selection (plugs into `sync_select`; terminal use keeps Claude Code as the selector)
