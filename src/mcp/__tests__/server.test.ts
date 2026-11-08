@@ -73,7 +73,9 @@ function textOf(result: unknown): string {
 
 beforeEach(async () => {
   drive = createFakeDrive();
-  statuses = [{ alias: 'emco', email: 'emco@example.com', isDefault: true, status: 'ok' }];
+  statuses = [
+    { alias: 'emco', email: 'emco@example.com', provider: 'google', isDefault: true, status: 'ok' },
+  ];
   verifyArgs = [];
   const files = new FileService({
     runner: createRunner(drive),
