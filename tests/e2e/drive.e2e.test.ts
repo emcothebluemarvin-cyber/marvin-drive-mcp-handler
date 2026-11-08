@@ -8,7 +8,7 @@ const account = process.env.MARVIN_E2E_ACCOUNT;
 
 describe.runIf(account)('Drive E2E (live)', () => {
   it('folder → upload → move → rename → search → download → export → trash → restore → delete', async () => {
-    const { files } = buildApp();
+    const { googleFiles: files } = buildApp();
     const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-e2e-'));
     const root = await files.createFolder({ account, name: `marvin-e2e-${Date.now()}` });
     try {

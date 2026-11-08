@@ -9,7 +9,7 @@ const account = process.env.MARVIN_E2E_ACCOUNT;
 
 describe.runIf(account)('Content E2E (live)', () => {
   it('reads and edits Docs, Sheets and Slides in place', async () => {
-    const { files, docs, sheets, slides } = buildApp();
+    const { googleFiles: files, docs, sheets, slides } = buildApp();
     const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-content-e2e-'));
     const root = await files.createFolder({ account, name: `marvin-content-e2e-${Date.now()}` });
     try {

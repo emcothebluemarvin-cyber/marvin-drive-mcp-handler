@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../app.js';
+import { FileRouter } from '../files/file-router.js';
 import { WatchService } from '../watch/watch-service.js';
 
 let tmp: string;
@@ -14,6 +15,12 @@ afterEach(async () => {
 });
 
 describe('buildApp', () => {
+  it('routes file operations through the FileRouter', () => {
+    const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
+    expect(app.files).toBeInstanceOf(FileRouter);
+    expect(app.paths.microsoftClient).toBe(path.join(tmp, 'microsoft-client.json'));
+  });
+
   it('wires the watch service under <configDir>/watch', () => {
     const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
     expect(app.watch).toBeInstanceOf(WatchService);

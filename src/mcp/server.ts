@@ -3,7 +3,7 @@ import type { AuthService } from '../auth/auth-service.js';
 import type { DocsService } from '../content/docs-service.js';
 import type { SheetsService } from '../content/sheets-service.js';
 import type { SlidesService } from '../content/slides-service.js';
-import type { FileService } from '../files/file-service.js';
+import type { FileProvider } from '../files/file-provider.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import type { SyncService } from '../sync/sync-service.js';
 import type { WatchApi } from '../watch/watch-service.js';
@@ -25,7 +25,7 @@ export const TOOL_NAMES = [
 ] as const;
 
 export interface McpDeps {
-  files: FileService;
+  files: FileProvider;
   docs: DocsService;
   sheets: SheetsService;
   slides: SlidesService;

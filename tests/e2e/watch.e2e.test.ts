@@ -34,7 +34,7 @@ async function until<T>(probe: () => Promise<T | undefined>, timeoutMs: number):
 describe.runIf(account && editor)('Watch E2E (live)', () => {
   it('foreign edit → edited event with diff and push; own edit → stored, no push; comment finding', async () => {
     const app = buildApp();
-    const { files, docs } = app;
+    const { googleFiles: files, docs } = app;
     const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-watch-e2e-'));
     // A temp watch dir (own lease): a running `marvin-drive serve` is not disturbed.
     const runner = new DriveClientFactory(app.auth);
