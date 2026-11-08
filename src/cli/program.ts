@@ -2,10 +2,17 @@ import { createInterface } from 'node:readline/promises';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Command } from 'commander';
 import { buildApp } from '../app.js';
+import { providerOf } from '../config/account-registry.js';
 import { ValidationError } from '../errors.js';
 import { logger } from '../logger.js';
 import { createMcpServer } from '../mcp/server.js';
 import { VERSION } from '../version.js';
+import {
+  parseProviderOption,
+  providerFlag,
+  removedMessage,
+  twoStepInstructions,
+} from './auth-text.js';
 import { formatAccounts } from './format.js';
 import { runHookCli } from './hook.js';
 import { serve } from './serve.js';
@@ -88,9 +95,13 @@ async function withLoginApp<T>(
   }
 }
 
+function googleHint(provider: 'google' | 'microsoft'): void {
+  if (provider === 'google') process.stderr.write(`${TESTING_MODE_HINT}\n`);
+}
+
 const NO_BROWSER_HELP = 'do not open a browser; paste the redirect URL instead (servers, SSH)';
 const PRINT_URL_HELP =
-  'step 1 of a login without waiting: print the Google URL and exit (finish with --redirect-url)';
+  'step 1 of a login without waiting: print the sign-in URL and exit (finish with --redirect-url)';
 const REDIRECT_URL_HELP =
   'step 2: finish a --print-url login with the URL the browser was redirected to (quote it)';
 
@@ -110,46 +121,45 @@ function twoStepMode(opts: LoginOpts): 'print' | 'finish' | null {
   return null;
 }
 
-function printTwoStepUrl(url: string, command: string): void {
+function printTwoStepUrl(url: string, command: string, provider: 'google' | 'microsoft'): void {
   out(url);
-  process.stderr.write(
-    '\nOpen the URL above in a browser on any device and sign in. Google then redirects to ' +
-      'http://127.0.0.1:<port>/?…, which fails to load — that is expected. Copy the full URL ' +
-      'from the address bar and, within 10 minutes, run:\n' +
-      `  marvin-drive ${command} --redirect-url '<that URL>'\n`,
-  );
+  process.stderr.write(twoStepInstructions(command, provider));
 }
 
 const program = new Command()
   .name('marvin-drive')
-  .description('Multi-account Google Drive MCP server and CLI')
+  .description('Multi-account Google Drive and OneDrive MCP server and CLI')
   .version(VERSION);
 
-const auth = program.command('auth').description('Manage Google accounts');
+const auth = program.command('auth').description('Manage Google and Microsoft accounts');
 
 auth
   .command('add')
-  .description('Sign in with a Google account and register it')
+  .description('Sign in with a Google or Microsoft account and register it')
+  .option('--provider <provider>', 'google (default) or microsoft')
   .option('--alias <alias>', 'short name for the account (default: email local part)')
   .option('--no-browser', NO_BROWSER_HELP)
   .option('--print-url', PRINT_URL_HELP)
   .option('--redirect-url <url>', REDIRECT_URL_HELP)
-  .action(async (opts: LoginOpts & { alias?: string }) => {
+  .action(async (opts: LoginOpts & { alias?: string; provider?: string }) => {
     const step = twoStepMode(opts);
     const app = (): ReturnType<typeof buildApp> => buildApp();
+    const asked = parseProviderOption(opts.provider);
+    const provider = asked ?? 'google';
     if (step === 'print') {
-      process.stderr.write(`${TESTING_MODE_HINT}\n`);
-      const url = await app().auth.startAddAccount(opts.alias);
-      printTwoStepUrl(url, `auth add${opts.alias ? ` --alias ${opts.alias}` : ''}`);
+      googleHint(provider);
+      const url = await app().auth.startAddAccount(opts.alias, provider);
+      const command = `auth add${opts.alias ? ` --alias ${opts.alias}` : ''}${providerFlag(provider)}`;
+      printTwoStepUrl(url, command, provider);
       return;
     }
     if (step === 'finish') {
-      const record = await app().auth.finishAddAccount(opts.alias, opts.redirectUrl ?? '');
+      const record = await app().auth.finishAddAccount(opts.alias, opts.redirectUrl ?? '', asked);
       out(`Added ${record.alias} (${record.email})`);
       return;
     }
-    process.stderr.write(`${TESTING_MODE_HINT}\n`);
-    const record = await withLoginApp(opts, (a) => a.auth.addAccount(opts.alias));
+    googleHint(provider);
+    const record = await withLoginApp(opts, (a) => a.auth.addAccount(opts.alias, provider));
     out(`Added ${record.alias} (${record.email})`);
   });
 
@@ -163,8 +173,9 @@ auth
   .action(async (ref: string, opts: LoginOpts) => {
     const step = twoStepMode(opts);
     if (step === 'print') {
-      process.stderr.write(`${TESTING_MODE_HINT}\n`);
-      printTwoStepUrl(await buildApp().auth.startRelogin(ref), `auth login ${ref}`);
+      const provider = providerOf(await buildApp().auth.accountFor(ref));
+      googleHint(provider);
+      printTwoStepUrl(await buildApp().auth.startRelogin(ref), `auth login ${ref}`, provider);
       return;
     }
     if (step === 'finish') {
@@ -172,7 +183,7 @@ auth
       out(`Signed in again: ${record.alias} (${record.email})`);
       return;
     }
-    process.stderr.write(`${TESTING_MODE_HINT}\n`);
+    googleHint(providerOf(await buildApp().auth.accountFor(ref)));
     const record = await withLoginApp(opts, (app) => app.auth.relogin(ref));
     out(`Signed in again: ${record.alias} (${record.email})`);
   });
@@ -187,11 +198,10 @@ auth
 
 auth
   .command('remove')
-  .description('Remove an account and revoke its token')
+  .description('Remove an account (Google: also revokes its token)')
   .argument('<account>', 'alias or email')
   .action(async (ref: string) => {
-    const record = await buildApp().auth.removeAccount(ref);
-    out(`Removed ${record.alias} (${record.email})`);
+    out(removedMessage(await buildApp().auth.removeAccount(ref)));
   });
 
 auth

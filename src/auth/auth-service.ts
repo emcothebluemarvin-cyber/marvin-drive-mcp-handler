@@ -321,6 +321,11 @@ export class AuthService {
     return this.deps.registry.setDefault(ref);
   }
 
+  /** The account as the CLI means it: an email shared by several accounts is an error. */
+  accountFor(ref: string): Promise<AccountRecord> {
+    return this.deps.registry.resolve(ref);
+  }
+
   /** For Google-only surfaces: an email means the Google account of that address. */
   resolveAccount(ref?: string): Promise<AccountRecord> {
     return this.deps.registry.resolveGoogleFirst(ref);

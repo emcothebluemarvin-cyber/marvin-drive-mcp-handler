@@ -158,6 +158,21 @@ describe('AuthService.removeAccount token failures', () => {
   });
 });
 
+describe('AuthService.accountFor', () => {
+  it('rejects a shared address, unlike the Google-only lookup', async () => {
+    login.mockImplementationOnce(answer(signIn('same@example.com')));
+    await service.addAccount('g');
+    await registry.add({
+      alias: 'ms',
+      email: 'same@example.com',
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+    await expect(service.accountFor('same@example.com')).rejects.toThrow(/use an alias/);
+    await expect(service.accountFor('ms')).resolves.toMatchObject({ provider: 'microsoft' });
+  });
+});
+
 describe('AuthService.authorize', () => {
   it('throws ReauthRequiredError when no token is stored', async () => {
     await registry.add({ alias: 'emco', email: 'emco@example.com' });
