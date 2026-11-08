@@ -6,7 +6,7 @@ import {
   type AccountRecord,
   type AccountRegistry,
 } from '../config/account-registry.js';
-import { AppError, AuthFlowError } from '../errors.js';
+import { AppError, AuthFlowError, ReauthRequiredError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import {
   listenLocalhost,
@@ -27,6 +27,8 @@ const LABEL = 'Microsoft';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MANUAL_TIMEOUT_MS = 600_000;
 const DEFAULT_FINISH_TIMEOUT_MS = 60_000;
+const EXPIRY_MARGIN_MS = 60_000;
+const DEFAULT_EXPIRES_IN_S = 3600;
 
 export interface MicrosoftAuthDeps {
   registry: AccountRegistry;
@@ -39,6 +41,7 @@ export interface MicrosoftAuthDeps {
   fetch?: typeof fetch;
   timeoutMs?: number;
   finishTimeoutMs?: number;
+  now?: () => number;
   logger?: Logger;
 }
 
@@ -119,13 +122,88 @@ function hasFilesScope(scope: string | undefined): boolean {
     .some((s) => s.toLowerCase().replace(/^.*\//, '') === 'files.readwrite');
 }
 
+function isRejected(body: TokenResponse): boolean {
+  return body.error === 'invalid_grant' || body.error === 'interaction_required';
+}
+
 export class MicrosoftAuth implements ProviderAuth {
   private readonly log: Logger;
   private readonly post: typeof fetch;
+  private readonly now: () => number;
+  private readonly cache = new Map<string, { token: string; expiresAt: number }>();
+  private readonly inFlight = new Map<string, Promise<string>>();
+  private readonly reauthNeeded = new Set<string>();
 
   constructor(private readonly deps: MicrosoftAuthDeps) {
     this.log = deps.logger ?? defaultLogger;
     this.post = deps.fetch ?? fetch;
+    this.now = deps.now ?? Date.now;
+  }
+
+  /** The only method `GraphClient` uses. Refresh is single-flight per account. */
+  accessToken(record: AccountRecord, options: { forceRefresh?: boolean } = {}): Promise<string> {
+    const key = tokenKey(record);
+    if (!options.forceRefresh) {
+      const cached = this.cache.get(key);
+      if (cached && cached.expiresAt - this.now() > EXPIRY_MARGIN_MS) {
+        return Promise.resolve(cached.token);
+      }
+    }
+    const running = this.inFlight.get(key);
+    if (running) return running;
+    const started = this.refresh(record, key).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, started);
+    return started;
+  }
+
+  private async refresh(record: AccountRecord, key: string): Promise<string> {
+    const stored = await this.deps.tokens.get(key);
+    if (!stored) throw this.reauthRequired(record, key);
+    let { status, body } = await this.refreshRequest(stored);
+    if (isRejected(body)) {
+      // Another session may have rotated the token.
+      const latest = await this.deps.tokens.get(key);
+      if (latest && latest !== stored) ({ status, body } = await this.refreshRequest(latest));
+      if (isRejected(body)) throw this.reauthRequired(record, key);
+    }
+    if (status !== 200 || !body.access_token) {
+      throw new AuthFlowError(`Microsoft token refresh failed (${body.error ?? status}).`);
+    }
+    if (body.refresh_token) {
+      await this.deps.tokens.set(key, body.refresh_token).catch((err: unknown) => {
+        this.log.warn('Failed to persist rotated refresh token', {
+          alias: record.alias,
+          error: err,
+        });
+      });
+    }
+    const expiresIn = body.expires_in ?? DEFAULT_EXPIRES_IN_S;
+    this.cache.set(key, { token: body.access_token, expiresAt: this.now() + expiresIn * 1000 });
+    this.reauthNeeded.delete(key);
+    return body.access_token;
+  }
+
+  private async refreshRequest(refreshToken: string): Promise<{
+    status: number;
+    body: TokenResponse;
+  }> {
+    return this.tokenRequest({
+      client_id: await this.deps.loadClientId(),
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      scope: MICROSOFT_SCOPES,
+    });
+  }
+
+  private reauthRequired(record: AccountRecord, key: string): ReauthRequiredError {
+    this.reauthNeeded.add(key);
+    this.cache.delete(key);
+    return new ReauthRequiredError(record.alias);
+  }
+
+  private clearLocal(key: string): void {
+    this.cache.delete(key);
+    this.reauthNeeded.delete(key);
   }
 
   async add(alias?: string): Promise<AccountRecord> {
@@ -171,12 +249,25 @@ export class MicrosoftAuth implements ProviderAuth {
     return record;
   }
 
-  async checkStatus(record: AccountRecord, _verify: boolean): Promise<AccountStatus> {
-    return (await this.deps.tokens.get(tokenKey(record))) ? 'ok' : 'reauth_required';
+  async checkStatus(record: AccountRecord, verify: boolean): Promise<AccountStatus> {
+    const key = tokenKey(record);
+    if (!(await this.deps.tokens.get(key))) return 'reauth_required';
+    if (!verify) return this.reauthNeeded.has(key) ? 'reauth_required' : 'ok';
+    try {
+      await this.accessToken(record, { forceRefresh: true });
+      return 'ok';
+    } catch (err) {
+      if (err instanceof ReauthRequiredError) return 'reauth_required';
+      this.log.warn('Token check failed', { alias: record.alias, error: err });
+      return 'unknown';
+    }
   }
 
+  /** Deletes this account's token only: this client type has no per-token revoke endpoint. */
   async forget(record: AccountRecord): Promise<void> {
-    await this.deps.tokens.delete(tokenKey(record));
+    const key = tokenKey(record);
+    await this.deps.tokens.delete(key);
+    this.clearLocal(key);
   }
 
   private async saveNew(alias: string | undefined, login: MicrosoftLogin): Promise<AccountRecord> {
@@ -192,6 +283,7 @@ export class MicrosoftAuth implements ProviderAuth {
       await this.deps.registry.remove(record.alias);
       throw err;
     }
+    this.clearLocal(tokenKey(record));
     return record;
   }
 
@@ -202,6 +294,7 @@ export class MicrosoftAuth implements ProviderAuth {
       );
     }
     await this.deps.tokens.set(tokenKey(record), login.refreshToken);
+    this.clearLocal(tokenKey(record));
   }
 
   private async startTwoStep(command: 'add' | 'login', account: string | null): Promise<string> {

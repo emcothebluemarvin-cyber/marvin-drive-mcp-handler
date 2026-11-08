@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccountRegistry } from '../../config/account-registry.js';
-import { AuthFlowError } from '../../errors.js';
+import { AuthFlowError, ReauthRequiredError } from '../../errors.js';
 import { createLogger } from '../../logger.js';
 import { MICROSOFT_SCOPES, MicrosoftAuth, type MicrosoftAuthDeps } from '../microsoft-auth.js';
 import { PendingLoginStore, type PendingLogin } from '../pending-login.js';
@@ -238,5 +238,130 @@ describe('MicrosoftAuth.forget', () => {
     await auth().forget(record);
     expect(await tokens.get('same@example.com')).toBe('google-token');
     expect(await tokens.get('microsoft:t.o')).toBeNull();
+  });
+});
+
+describe('MicrosoftAuth access tokens', () => {
+  const RECORD = {
+    alias: 'w',
+    email: 'a@b.c',
+    addedAt: 'now',
+    provider: 'microsoft',
+    accountId: 't.o',
+  } as const;
+  const KEY = 'microsoft:t.o';
+  let clock: number;
+  const timed = (): MicrosoftAuth => auth({ now: () => clock });
+
+  beforeEach(async () => {
+    clock = 1_000_000;
+    await tokens.set(KEY, 'rt-old');
+    tokenBody = { access_token: 'at1', refresh_token: 'rt-new', expires_in: 3600 };
+  });
+
+  it('replaces the stored refresh token on every response and asks for the same scopes', async () => {
+    await expect(timed().accessToken(RECORD)).resolves.toBe('at1');
+    expect(posted[0]?.get('grant_type')).toBe('refresh_token');
+    expect(posted[0]?.get('refresh_token')).toBe('rt-old');
+    expect(posted[0]?.get('scope')).toBe(MICROSOFT_SCOPES);
+    expect(await tokens.get(KEY)).toBe('rt-new');
+  });
+
+  it('caches until 60 s before expiry', async () => {
+    const a = timed();
+    await a.accessToken(RECORD);
+    clock += 3539_000;
+    await a.accessToken(RECORD);
+    expect(posted).toHaveLength(1);
+    clock += 2_000;
+    await a.accessToken(RECORD);
+    expect(posted).toHaveLength(2);
+  });
+
+  it('forceRefresh bypasses the cache', async () => {
+    const a = timed();
+    await a.accessToken(RECORD);
+    await a.accessToken(RECORD, { forceRefresh: true });
+    expect(posted).toHaveLength(2);
+  });
+
+  it('is single-flight per account', async () => {
+    const a = timed();
+    const [one, two] = await Promise.all([a.accessToken(RECORD), a.accessToken(RECORD)]);
+    expect([one, two]).toEqual(['at1', 'at1']);
+    expect(posted).toHaveLength(1);
+  });
+
+  it('re-reads the store once when another session rotated the token', async () => {
+    let calls = 0;
+    const a = auth({
+      now: () => clock,
+      fetch: async (_u, init) => {
+        calls++;
+        const form = new URLSearchParams(String(init?.body));
+        if (form.get('refresh_token') === 'rt-old') {
+          await tokens.set(KEY, 'rt-other-session');
+          return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+        }
+        return new Response(JSON.stringify({ access_token: 'at2', expires_in: 100 }));
+      },
+    });
+    await expect(a.accessToken(RECORD)).resolves.toBe('at2');
+    expect(calls).toBe(2);
+  });
+
+  it.each(['invalid_grant', 'interaction_required'])(
+    '%s without a newer token means reauth, tracked by this class',
+    async (error) => {
+      tokenStatus = 400;
+      tokenBody = { error };
+      const a = timed();
+      await expect(a.accessToken(RECORD)).rejects.toThrow(ReauthRequiredError);
+      await expect(a.checkStatus(RECORD, false)).resolves.toBe('reauth_required');
+      expect(posted).toHaveLength(1);
+    },
+  );
+
+  it('a successful refresh clears the reauth mark', async () => {
+    tokenStatus = 400;
+    tokenBody = { error: 'invalid_grant' };
+    const a = timed();
+    await expect(a.accessToken(RECORD)).rejects.toThrow(ReauthRequiredError);
+    tokenStatus = 200;
+    tokenBody = { access_token: 'at3', refresh_token: 'rt-3', expires_in: 3600 };
+    await a.accessToken(RECORD);
+    await expect(a.checkStatus(RECORD, false)).resolves.toBe('ok');
+  });
+
+  it('a missing stored token means reauth', async () => {
+    await tokens.delete(KEY);
+    await expect(timed().accessToken(RECORD)).rejects.toThrow(ReauthRequiredError);
+    await expect(timed().checkStatus(RECORD, false)).resolves.toBe('reauth_required');
+  });
+
+  it('a server failure is not a reauth', async () => {
+    tokenStatus = 503;
+    tokenBody = {};
+    const a = timed();
+    await expect(a.accessToken(RECORD)).rejects.toThrow(AuthFlowError);
+    await expect(a.checkStatus(RECORD, true)).resolves.toBe('unknown');
+  });
+
+  it('verify does a live refresh', async () => {
+    const a = timed();
+    await expect(a.checkStatus(RECORD, true)).resolves.toBe('ok');
+    expect(posted).toHaveLength(1);
+    tokenStatus = 400;
+    tokenBody = { error: 'invalid_grant' };
+    await expect(a.checkStatus(RECORD, true)).resolves.toBe('reauth_required');
+  });
+
+  it('keeps working when the rotated token cannot be saved', async () => {
+    const failing = new InMemoryTokenStore();
+    await failing.set(KEY, 'rt-old');
+    failing.set = async () => {
+      throw new Error('keychain');
+    };
+    await expect(auth({ tokens: failing }).accessToken(RECORD)).resolves.toBe('at1');
   });
 });
