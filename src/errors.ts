@@ -143,6 +143,88 @@ export class DriveApiError extends AppError {
   }
 }
 
+export class ProviderNotSupportedError extends AppError {
+  readonly code = 'PROVIDER_NOT_SUPPORTED';
+
+  constructor(
+    readonly account: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `"${account}" is a Microsoft account; this feature is not available on OneDrive yet.`,
+      options,
+    );
+  }
+}
+
+export class NameConflictError extends AppError {
+  readonly code = 'NAME_CONFLICT';
+
+  constructor(name: string, options?: ErrorOptions) {
+    super(`An item named "${name}" already exists there; choose another name.`, options);
+  }
+}
+
+export class TargetChangedError extends AppError {
+  readonly code = 'TARGET_CHANGED';
+
+  constructor(name: string, options?: ErrorOptions) {
+    super(
+      `"${name}" changed on OneDrive after it was checked, so the upload stopped (a lost final response can look the same). Check the file, then try again if needed.`,
+      options,
+    );
+  }
+}
+
+export class GraphThrottledError extends AppError {
+  readonly code = 'GRAPH_THROTTLED';
+
+  constructor(options?: ErrorOptions) {
+    super('OneDrive is limiting requests right now; try again later.', options);
+  }
+}
+
+export class CopyStillRunningError extends AppError {
+  readonly code = 'COPY_STILL_RUNNING';
+
+  constructor(name: string, options?: ErrorOptions) {
+    super(
+      `The copy of "${name}" is still running on OneDrive and continues on the server; check the target folder later.`,
+      options,
+    );
+  }
+}
+
+export class FileLockedError extends AppError {
+  readonly code = 'FILE_LOCKED';
+
+  constructor(name: string, options?: ErrorOptions) {
+    super(`File is locked, probably open in Office: ${name}`, options);
+  }
+}
+
+export class OneDriveFullError extends AppError {
+  readonly code = 'ONEDRIVE_FULL';
+
+  constructor(alias: string, options?: ErrorOptions) {
+    super(`OneDrive storage is full for "${alias}"`, options);
+  }
+}
+
+export class GraphApiError extends AppError {
+  readonly code = 'GRAPH_API_ERROR';
+
+  constructor(
+    readonly status: number | undefined,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `OneDrive request failed${status === undefined ? '' : ` (${status})`}; try again.`,
+      options,
+    );
+  }
+}
+
 /** True when `err` is an object whose `code` property equals `code` (Node fs errors). */
 export function hasErrorCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code;
