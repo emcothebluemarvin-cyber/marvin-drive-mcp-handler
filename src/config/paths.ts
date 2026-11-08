@@ -4,6 +4,7 @@ import path from 'node:path';
 export interface Paths {
   configDir: string;
   clientSecret: string;
+  microsoftClient: string;
   accounts: string;
   tokens: string;
   pendingLogins: string;
@@ -20,6 +21,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
   return {
     configDir,
     clientSecret: path.join(configDir, 'client_secret.json'),
+    microsoftClient: path.join(configDir, 'microsoft-client.json'),
     accounts: path.join(configDir, 'accounts.json'),
     tokens: path.join(configDir, 'tokens.json'),
     pendingLogins: path.join(configDir, 'pending-logins.json'),

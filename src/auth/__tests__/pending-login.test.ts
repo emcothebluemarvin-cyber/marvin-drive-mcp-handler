@@ -74,3 +74,41 @@ describe('PendingLoginStore', () => {
     await expect(store.take('s1')).rejects.toThrow(ConfigError);
   });
 });
+
+describe('PendingLogin provider', () => {
+  const ENTRY = {
+    state: 's',
+    codeVerifier: 'v',
+    redirectUri: 'http://localhost:1',
+    command: 'add',
+    account: null,
+  } as const;
+
+  it('keeps the provider and peeks it without consuming the entry', async () => {
+    const store = new PendingLoginStore(
+      path.join(await mkdtemp(path.join(os.tmpdir(), 'pend-')), 'p.json'),
+    );
+    await store.save({ ...ENTRY, provider: 'microsoft' });
+    await expect(store.peekProvider('s')).resolves.toBe('microsoft');
+    await expect(store.take('s')).resolves.toMatchObject({ provider: 'microsoft' });
+    await expect(store.peekProvider('s')).resolves.toBeNull();
+  });
+
+  it('treats an absent provider as google', async () => {
+    const store = new PendingLoginStore(
+      path.join(await mkdtemp(path.join(os.tmpdir(), 'pend-')), 'p.json'),
+    );
+    await store.save(ENTRY);
+    await expect(store.peekProvider('s')).resolves.toBe('google');
+  });
+
+  it('rejects a file with an unknown provider', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pend-'));
+    const file = path.join(dir, 'p.json');
+    await writeFile(
+      file,
+      JSON.stringify({ version: 1, logins: [{ ...ENTRY, createdAt: 'x', provider: 'other' }] }),
+    );
+    await expect(new PendingLoginStore(file).peekProvider('s')).rejects.toThrow(ConfigError);
+  });
+});
