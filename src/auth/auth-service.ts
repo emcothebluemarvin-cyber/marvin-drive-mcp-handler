@@ -10,7 +10,13 @@ import {
   type AccountRegistry,
 } from '../config/account-registry.js';
 import type { ClientCredentials } from '../config/client-secret.js';
-import { AuthFlowError, ConfigError, ReauthRequiredError, ValidationError } from '../errors.js';
+import {
+  AuthFlowError,
+  ConfigError,
+  ProviderNotSupportedError,
+  ReauthRequiredError,
+  ValidationError,
+} from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import type { LoginResult, TwoStepStart } from './login-flow.js';
 import { readRedirectUrl, redirectError } from './loopback.js';
@@ -335,6 +341,7 @@ export class AuthService {
 
   async authorize(ref?: string): Promise<AuthorizedClient> {
     const account = await this.deps.registry.resolveGoogleFirst(ref);
+    if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
     const refreshToken = await this.deps.tokens.get(tokenKey(account));
     if (!refreshToken) {
       this.reauthNeeded.add(tokenKey(account));

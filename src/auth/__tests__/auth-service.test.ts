@@ -4,7 +4,13 @@ import path from 'node:path';
 import { Auth } from 'googleapis';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { AccountRegistry } from '../../config/account-registry.js';
-import { AuthFlowError, ConfigError, ReauthRequiredError, ValidationError } from '../../errors.js';
+import {
+  AuthFlowError,
+  ConfigError,
+  ProviderNotSupportedError,
+  ReauthRequiredError,
+  ValidationError,
+} from '../../errors.js';
 import { createLogger } from '../../logger.js';
 import { AuthService, type AuthServiceDeps } from '../auth-service.js';
 import type { LoginResult } from '../login-flow.js';
@@ -477,5 +483,12 @@ describe('AuthService dispatch to the Microsoft provider', () => {
 
   it('reports a clear error when no Microsoft provider is configured', async () => {
     await expect(service.addAccount(undefined, 'microsoft')).rejects.toThrow(ConfigError);
+  });
+});
+
+describe('AuthService.authorize', () => {
+  it('rejects a Microsoft account', async () => {
+    await registry.add({ alias: 'ms', email: 'a@b.c', provider: 'microsoft', accountId: 't.o' });
+    await expect(service.authorize('ms')).rejects.toThrow(ProviderNotSupportedError);
   });
 });

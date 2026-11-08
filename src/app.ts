@@ -12,7 +12,7 @@ import {
 import { MicrosoftAuth } from './auth/microsoft-auth.js';
 import { PendingLoginStore } from './auth/pending-login.js';
 import { FileAuditLog } from './audit/audit-log.js';
-import { AccountRegistry } from './config/account-registry.js';
+import { AccountRegistry, isMicrosoft } from './config/account-registry.js';
 import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
 import { loadMicrosoftClientId } from './config/microsoft-client.js';
 import { resolvePaths, type Paths } from './config/paths.js';
@@ -20,6 +20,7 @@ import { DocsService } from './content/docs-service.js';
 import { SheetsService } from './content/sheets-service.js';
 import { SlidesService } from './content/slides-service.js';
 import { DriveClientFactory } from './drive/client-factory.js';
+import { ProviderNotSupportedError } from './errors.js';
 import { PairStore } from './sync/pair-store.js';
 import { SyncService } from './sync/sync-service.js';
 import { createLocalTrash } from './sync/trash.js';
@@ -120,6 +121,10 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
     audit,
     store: new PairStore({ dir: paths.syncDir }),
     trash: createLocalTrash(),
+    assertSupportedAccount: async (ref): Promise<void> => {
+      const account = await auth.resolveAccount(ref);
+      if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
+    },
   });
   const watch = new WatchService({
     store: new WatchStore({ dir: paths.watchDir }),

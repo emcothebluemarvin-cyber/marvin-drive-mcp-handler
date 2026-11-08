@@ -1,8 +1,8 @@
 import type { Auth } from 'googleapis';
 import type { AuthService } from '../auth/auth-service.js';
 import { isInvalidGrant } from '../auth/oauth-errors.js';
-import { tokenKey, type AccountRecord } from '../config/account-registry.js';
-import { ReauthRequiredError } from '../errors.js';
+import { isMicrosoft, tokenKey, type AccountRecord } from '../config/account-registry.js';
+import { ProviderNotSupportedError, ReauthRequiredError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { createDocsAdapter, type DocsAdapter } from './docs-adapter.js';
 import { createDriveAdapter, type DriveAdapter } from './drive-adapter.js';
@@ -92,6 +92,7 @@ export class DriveClientFactory implements DriveRunner {
 
   private async context(accountRef: string | undefined): Promise<CachedContext> {
     const account = await this.auth.resolveAccount(accountRef);
+    if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
     const token = await this.auth.readRefreshToken(tokenKey(account));
     if (!token) {
       this.cache.delete(account.email);
