@@ -1,18 +1,31 @@
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
-import { NotFoundError, UnsupportedTypeError, ValidationError } from '../errors.js';
+import {
+  CopyStillRunningError,
+  NameConflictError,
+  NotFoundError,
+  UnsupportedTypeError,
+  ValidationError,
+} from '../errors.js';
 import { resolveDestination, writeUnique } from '../files/destination.js';
 import {
   clampPageSize,
+  type CopyInput,
+  type CreateFolderInput,
+  type DeleteInput,
+  type DeleteResult,
   type DownloadInput,
   type DownloadResult,
   type FileRef,
+  type FileSummary,
   type ListInput,
   type ListResult,
+  type MoveInput,
   type OneDriveMetadata,
+  type RenameInput,
   type SearchInput,
 } from '../files/file-provider.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import { itemPath, type GraphClient } from './graph-client.js';
+import { assertSafeName, childPath, itemPath, type GraphClient } from './graph-client.js';
 import {
   FOLDER_MIME,
   PACKAGE_MIME,
@@ -106,6 +119,156 @@ export class OneDriveFileService {
       client.download(`${itemPath(item.id)}/content`, item.name),
     );
     return { path: written.path, size: written.size, mimeType: mimeOf(item), exportFormat: null };
+  }
+
+  async createFolder(input: CreateFolderInput): Promise<FileSummary> {
+    const { client, alias } = await this.client(input.account);
+    const parentId = input.parentId ?? 'root';
+    await this.assertOwnItem(client, parentId);
+    const created = await client.json<GraphItem>(
+      'POST',
+      `${itemPath(parentId)}/children?$select=${ITEM_SELECT}`,
+      {
+        retry: 'create',
+        target: input.name,
+        body: { name: input.name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' },
+      },
+    );
+    await this.recordAudit(alias, 'create_folder', created, { parentId });
+    return toSummary(created);
+  }
+
+  async rename(input: RenameInput): Promise<FileSummary> {
+    assertSafeName(input.newName);
+    const { client, alias } = await this.client(input.account);
+    const item = await this.readItem(client, input.fileId);
+    const parentId = item.parentReference?.id;
+    if (!parentId) throw new ValidationError('The root folder cannot be renamed');
+    await this.assertNameFree(client, parentId, input.newName, item.id);
+    const renamed = await client.json<GraphItem>(
+      'PATCH',
+      `${itemPath(item.id)}?$select=${ITEM_SELECT}`,
+      { retry: 'idempotent', target: input.newName, body: { name: input.newName } },
+    );
+    await this.recordAudit(alias, 'rename', renamed, {
+      oldName: item.name,
+      newName: input.newName,
+    });
+    return toSummary(renamed);
+  }
+
+  async move(input: MoveInput): Promise<FileSummary> {
+    const { client, alias } = await this.client(input.account);
+    const item = await this.readItem(client, input.fileId);
+    const { rootId } = await this.driveInfo(client, alias);
+    const targetId = input.newParentId === 'root' ? rootId : input.newParentId;
+    const parent = item.parentReference?.id;
+    if (parent === targetId) return toSummary(item);
+    await this.assertOwnItem(client, input.newParentId);
+    await this.assertNameFree(client, targetId, item.name, item.id);
+    const moved = await client.json<GraphItem>(
+      'PATCH',
+      `${itemPath(item.id)}?$select=${ITEM_SELECT}`,
+      { retry: 'idempotent', target: item.name, body: { parentReference: { id: targetId } } },
+    );
+    await this.recordAudit(alias, 'move', moved, {
+      oldParents: parent ? [parent] : [],
+      newParentId: input.newParentId,
+    });
+    return toSummary(moved);
+  }
+
+  async copy(input: CopyInput): Promise<FileSummary> {
+    if (input.name === undefined && input.parentId === undefined) {
+      throw new ValidationError('Give a name or a target folder for the copy on OneDrive');
+    }
+    const { client, alias } = await this.client(input.account);
+    const { driveId, rootId } = await this.driveInfo(client, alias);
+    const source = await this.readItem(client, input.fileId);
+    const parentId =
+      input.parentId === 'root' ? rootId : (input.parentId ?? source.parentReference?.id);
+    if (input.parentId !== undefined) await this.assertOwnItem(client, input.parentId);
+    if (!parentId) throw new ValidationError('The root folder cannot be copied');
+    const target = input.name ?? input.fileId;
+    const details = { sourceId: input.fileId, parentId: input.parentId ?? null };
+    try {
+      const copied = await client.copy<GraphItem>(
+        `${itemPath(input.fileId)}/copy`,
+        { parentReference: { driveId, id: parentId }, ...(input.name ? { name: input.name } : {}) },
+        target,
+        (id) =>
+          this.readItem(client, id).catch(async (err: unknown) => {
+            // The copy exists even though it could not be read back.
+            await this.recordAudit(
+              alias,
+              'copy',
+              { id, ...(input.name ? { name: input.name } : {}) },
+              details,
+            );
+            throw err;
+          }),
+      );
+      await this.recordAudit(alias, 'copy', copied, details);
+      return toSummary(copied);
+    } catch (err) {
+      if (err instanceof CopyStillRunningError) {
+        await this.recordAudit(
+          alias,
+          'copy',
+          { id: input.fileId, ...(input.name ? { name: input.name } : {}) },
+          { ...details, pending: true },
+        );
+      }
+      throw err;
+    }
+  }
+
+  async delete(input: DeleteInput): Promise<DeleteResult> {
+    if (input.permanent) rejectOption('permanent');
+    const { client, alias } = await this.client(input.account);
+    const item = await this.readItem(client, input.fileId);
+    if (!item.parentReference?.id) throw new ValidationError('The root folder cannot be deleted');
+    await client.json('DELETE', itemPath(item.id), {
+      retry: 'idempotent',
+      target: item.name,
+      notFoundOnRepeatIsOk: true,
+    });
+    await this.recordAudit(alias, 'delete', item, { permanent: false });
+    return { fileId: item.id, name: item.name, permanent: false };
+  }
+
+  async restore(input: FileRef): Promise<FileSummary> {
+    const { client, alias } = await this.client(input.account);
+    const { driveType } = await this.driveInfo(client, alias);
+    if (driveType === 'business') {
+      throw new ValidationError(
+        'Restore works on personal OneDrive only; on a work or school account restore the item from the recycle bin on the OneDrive website.',
+      );
+    }
+    const restored = await client.json<GraphItem>('POST', `${itemPath(input.fileId)}/restore`, {
+      retry: 'create',
+      target: input.fileId,
+      body: {},
+    });
+    await this.recordAudit(alias, 'restore', restored, {});
+    return toSummary(restored);
+  }
+
+  /**
+   * Graph documents no conflict option for PATCH, so the name is checked first. Finding the item
+   * itself (a case-only rename) is fine; any failure other than 404 aborts (spec §5.1).
+   */
+  private async assertNameFree(
+    client: GraphClient,
+    parentId: string,
+    name: string,
+    itemId: string,
+  ): Promise<void> {
+    const found = await client.getOrNull<GraphItem>(
+      `${childPath(parentId, name)}?$select=id`,
+      name,
+    );
+    if (found && found.id !== itemId) throw new NameConflictError(name);
   }
 
   /** `FileRouter` always passes the account's alias. */
