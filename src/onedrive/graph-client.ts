@@ -1,3 +1,4 @@
+import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import {
@@ -32,6 +33,27 @@ export interface GraphRequestOptions {
   headers?: Record<string, string>;
   /** A 404 on a repeat means an earlier attempt already succeeded. */
   notFoundOnRepeatIsOk?: boolean;
+}
+
+/** 10 MiB, a multiple of 320 KiB as Graph requires. */
+export const FRAGMENT_SIZE = 10 * 1024 * 1024;
+const MAX_FRAGMENT_RETRIES = 5;
+const SESSION_LOST = Symbol('session lost');
+
+export interface UploadRequest {
+  /** Path of the `createUploadSession` action. */
+  createPath: string;
+  body: Record<string, unknown>;
+  headers?: Record<string, string>;
+  localPath: string;
+  size: number;
+  target: string;
+}
+
+function nextOffset(ranges: unknown, fallback: number): number {
+  const first = Array.isArray(ranges) ? (ranges[0] as unknown) : undefined;
+  const offset = typeof first === 'string' ? Number(first.split('-')[0]) : Number.NaN;
+  return Number.isInteger(offset) && offset >= 0 ? offset : fallback;
 }
 
 export function itemPath(id: string): string {
@@ -152,6 +174,104 @@ export class GraphClient {
     if (!location) throw new GraphApiError(res.status);
     await res.body?.cancel();
     return this.bodyStream(await this.sendPreauthenticated('GET', location, target));
+  }
+
+  /** Uploads a non-empty file through a session; a 404 on the session restarts it once. */
+  async upload<T>(request: UploadRequest): Promise<T> {
+    for (let restarted = false; ; restarted = true) {
+      const { uploadUrl } = await this.json<{ uploadUrl: string }>('POST', request.createPath, {
+        retry: 'idempotent',
+        body: request.body,
+        target: request.target,
+        ...(request.headers ? { headers: request.headers } : {}),
+      });
+      const result = await this.sendFragments<T>(uploadUrl, request);
+      if (result !== SESSION_LOST) return result;
+      if (restarted) throw new GraphApiError(404);
+    }
+  }
+
+  private async sendFragments<T>(
+    uploadUrl: string,
+    request: UploadRequest,
+  ): Promise<T | typeof SESSION_LOST> {
+    let offset = 0;
+    let failures = 0;
+    const giveUp = async (res: Response | undefined): Promise<AppError> => {
+      const error = await this.failure(res, request.target);
+      await this.deleteSession(uploadUrl);
+      return error;
+    };
+    for (;;) {
+      const end = Math.min(offset + FRAGMENT_SIZE, request.size) - 1;
+      const res = await this.putFragment(uploadUrl, request, offset, end);
+      if (res?.status === 200 || res?.status === 201) return (await res.json()) as T;
+      if (res?.status === 202) {
+        const progress = (await res.json().catch(() => ({}))) as { nextExpectedRanges?: unknown };
+        offset = nextOffset(progress.nextExpectedRanges, end + 1);
+        failures = 0;
+        continue;
+      }
+      if (res?.status === 404) return SESSION_LOST;
+      const transient =
+        res === undefined || res.status === 416 || res.status === 429 || res.status >= 500;
+      const decision = this.decide(
+        res?.status === 416 ? new Response(null, { status: 500 }) : res,
+        'idempotent',
+        failures,
+        MAX_FRAGMENT_RETRIES,
+      );
+      if (!transient || !decision.retry) throw await giveUp(res);
+      await res?.body?.cancel();
+      failures++;
+      await this.sleep(decision.delayMs);
+      offset = await this.resumeOffset(uploadUrl, offset);
+    }
+  }
+
+  /** Sends one fragment. Undefined means no response arrived. */
+  private async putFragment(
+    uploadUrl: string,
+    request: UploadRequest,
+    start: number,
+    end: number,
+  ): Promise<Response | undefined> {
+    const body = createReadStream(request.localPath, { start, end });
+    try {
+      return await this.fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': String(end - start + 1),
+          'Content-Range': `bytes ${start}-${end}/${request.size}`,
+        },
+        body: body as unknown as RequestInit['body'],
+        duplex: 'half',
+      } as RequestInit);
+    } catch {
+      return undefined;
+    } finally {
+      body.destroy();
+    }
+  }
+
+  /** Asks the session where to continue; keeps `current` when it cannot tell. */
+  private async resumeOffset(uploadUrl: string, current: number): Promise<number> {
+    try {
+      const res = await this.fetch(uploadUrl, { method: 'GET' });
+      if (!res.ok) return current;
+      const status = (await res.json()) as { nextExpectedRanges?: unknown };
+      return nextOffset(status.nextExpectedRanges, current);
+    } catch {
+      return current;
+    }
+  }
+
+  private async deleteSession(uploadUrl: string): Promise<void> {
+    try {
+      await this.fetch(uploadUrl, { method: 'DELETE' });
+    } catch {
+      // Best effort: an abandoned session expires by itself.
+    }
   }
 
   private bodyStream(res: Response): Readable {
