@@ -1,8 +1,10 @@
+import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import {
   CopyStillRunningError,
   NameConflictError,
   NotFoundError,
+  TargetChangedError,
   UnsupportedTypeError,
   ValidationError,
 } from '../errors.js';
@@ -15,6 +17,7 @@ import {
   type DeleteResult,
   type DownloadInput,
   type DownloadResult,
+  type FileProvider,
   type FileRef,
   type FileSummary,
   type ListInput,
@@ -23,13 +26,18 @@ import {
   type OneDriveMetadata,
   type RenameInput,
   type SearchInput,
+  type UploadCancelled,
+  type UploadInput,
+  type UploadOptions,
 } from '../files/file-provider.js';
+import { resolveUploadPath } from '../files/local-paths.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { assertSafeName, childPath, itemPath, type GraphClient } from './graph-client.js';
 import {
   FOLDER_MIME,
   PACKAGE_MIME,
   mimeOf,
+  toExistingFile,
   toMetadata,
   toSummary,
   type GraphItem,
@@ -68,7 +76,7 @@ function toResult(page: GraphPage): ListResult {
 }
 
 /** The `drive_*` operations on a user's own OneDrive through Graph (spec §5). */
-export class OneDriveFileService {
+export class OneDriveFileService implements FileProvider {
   protected readonly log: Logger;
   private readonly driveInfos = new Map<string, Promise<DriveInfo>>();
 
@@ -119,6 +127,103 @@ export class OneDriveFileService {
       client.download(`${itemPath(item.id)}/content`, item.name),
     );
     return { path: written.path, size: written.size, mimeType: mimeOf(item), exportFormat: null };
+  }
+
+  /** Spec §6. The dialog runs outside any retry; nothing is written before an `overwrite`. */
+  async upload(
+    input: UploadInput,
+    options: UploadOptions = {},
+  ): Promise<FileSummary | UploadCancelled> {
+    if (input.convertToGoogle) rejectOption('convertToGoogle');
+    const { localPath, size } = await resolveUploadPath(input.localPath);
+    const { client, alias } = await this.client(input.account);
+    const parentId = input.parentId ?? 'root';
+    const name = input.name ?? path.basename(localPath);
+    const target = childPath(parentId, name);
+    await this.assertOwnItem(client, parentId);
+    const read = (): Promise<GraphItem | null> =>
+      client.getOrNull<GraphItem>(`${target}?$select=${ITEM_SELECT}`, name);
+    const details = { localPath, parentId, size };
+
+    let existing = await read();
+    if (!existing) {
+      try {
+        const created = await this.createNew(client, target, name, localPath, size);
+        await this.recordAudit(alias, 'upload', created, { ...details, replaced: false });
+        return toSummary(created);
+      } catch (err) {
+        if (!(err instanceof NameConflictError)) throw err;
+      }
+      existing = await read();
+      if (!existing) throw new TargetChangedError(name);
+    }
+    if (existing.folder || existing.package || existing.remoteItem) {
+      throw new NameConflictError(name);
+    }
+    if (!options.confirmReplace) throw new NameConflictError(name);
+    if (!existing.eTag) throw new TargetChangedError(name);
+
+    const answer = await options.confirmReplace(toExistingFile(existing));
+    if (answer !== 'overwrite') {
+      return {
+        cancelled: true,
+        reason: answer === 'cancel' ? 'user' : 'no_answer',
+        existing: toExistingFile(existing),
+      };
+    }
+    const replaced = await this.replace(client, existing, existing.eTag, localPath, size);
+    await this.recordAudit(alias, 'upload', replaced, { ...details, replaced: true });
+    return toSummary(replaced);
+  }
+
+  /** `fail` is the real guard: a conflict raises NameConflictError even after the first read. */
+  private createNew(
+    client: GraphClient,
+    target: string,
+    name: string,
+    localPath: string,
+    size: number,
+  ): Promise<GraphItem> {
+    if (size === 0) {
+      return client.json<GraphItem>(
+        'PUT',
+        `${target}:/content?@microsoft.graph.conflictBehavior=fail`,
+        { retry: 'create', target: name },
+      );
+    }
+    return client.upload<GraphItem>({
+      createPath: `${target}:/createUploadSession`,
+      body: { item: { '@microsoft.graph.conflictBehavior': 'fail' } },
+      localPath,
+      size,
+      target: name,
+    });
+  }
+
+  private replace(
+    client: GraphClient,
+    existing: GraphItem,
+    eTag: string,
+    localPath: string,
+    size: number,
+  ): Promise<GraphItem> {
+    const headers = { 'If-Match': eTag };
+    const item = itemPath(existing.id);
+    if (size === 0) {
+      return client.json<GraphItem>('PUT', `${item}/content`, {
+        retry: 'create',
+        target: existing.name,
+        headers,
+      });
+    }
+    return client.upload<GraphItem>({
+      createPath: `${item}/createUploadSession`,
+      body: { item: { '@microsoft.graph.conflictBehavior': 'replace' } },
+      headers,
+      localPath,
+      size,
+      target: existing.name,
+    });
   }
 
   async createFolder(input: CreateFolderInput): Promise<FileSummary> {
