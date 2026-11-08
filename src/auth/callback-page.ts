@@ -1,5 +1,5 @@
 /**
- * The page the browser shows after the Google consent redirect hits our loopback server.
+ * The page the browser shows after the consent redirect hits our loopback server.
  * Self-contained by design: no scripts, no external fonts/images, strict CSP.
  */
 

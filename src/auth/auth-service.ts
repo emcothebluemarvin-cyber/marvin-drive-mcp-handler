@@ -9,7 +9,8 @@ import {
 import type { ClientCredentials } from '../config/client-secret.js';
 import { AuthFlowError, ReauthRequiredError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
-import { parseRedirectUrl, type LoginResult, type TwoStepStart } from './login-flow.js';
+import type { LoginResult, TwoStepStart } from './login-flow.js';
+import { parseRedirectUrl } from './loopback.js';
 import type { PendingLogin, PendingLoginStore } from './pending-login.js';
 import { isInvalidGrant } from './oauth-errors.js';
 import type { TokenStore } from './token-store.js';
@@ -150,7 +151,7 @@ export class AuthService {
     redirectUrl: string,
   ): Promise<LoginResult> {
     const twoStep = this.twoStep();
-    const { state } = parseRedirectUrl(redirectUrl);
+    const { state } = parseRedirectUrl(redirectUrl, 'Google');
     const pending = await twoStep.pending.take(state);
     if (!pending) {
       throw new AuthFlowError(
