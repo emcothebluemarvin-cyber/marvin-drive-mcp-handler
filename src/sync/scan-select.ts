@@ -92,6 +92,7 @@ export async function scanBoth(
 export async function gatherInput(
   env: SyncEnv,
   file: PairFile,
+  releaseNames: PlanInput['releaseNames'] = null,
 ): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan }> {
   const { pair, records } = file;
   const { local, remote } = await scanBoth(env, pair);
@@ -110,11 +111,13 @@ export async function gatherInput(
     probes: new Map(),
     onDisk,
     remoteHashKind: syncRemote.hashKind,
+    releaseNames,
   };
   const { digests, failed } = await hashLocal(
     pair.localDir,
     hashTargets(base),
     syncRemote.hashKind,
+    env.digesters,
   );
   for (const name of failed) local.unknownSubtrees.push(toKey(name));
   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);

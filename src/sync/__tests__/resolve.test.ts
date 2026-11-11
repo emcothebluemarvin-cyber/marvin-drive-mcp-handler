@@ -8,7 +8,7 @@ import {
   resolveRemote,
 } from '../resolve.js';
 import { localEntry, record, remoteEntry } from './fixtures.js';
-import { md5Digests, planInput } from './plan-input.js';
+import { md5Digests, planInput, type InputOptions } from './plan-input.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 
@@ -153,6 +153,47 @@ describe('hashTargets', () => {
       ],
     });
     expect(hashTargets(input)).toEqual(['new.pdf', 'touched.pdf']);
+  });
+
+  const releaseCase = (o: Partial<InputOptions> = {}) =>
+    planInput({
+      records: [
+        record('r1', 'same.pdf'),
+        record('r2', 'nohash.pdf'),
+        record('r3', 'gone.pdf'),
+        record('r4', 'released.pdf', { remoteOnly: true }),
+      ],
+      local: [
+        localEntry('same.pdf'),
+        localEntry('nohash.pdf'),
+        localEntry('released.pdf'),
+        localEntry('adopt.pdf'),
+        localEntry('lonely.pdf'),
+      ],
+      remote: [
+        remoteEntry('r1', 'same.pdf'),
+        remoteEntry('r2', 'nohash.pdf', { hash: null }),
+        remoteEntry('r4', 'released.pdf'),
+        remoteEntry('n1', 'Adopt.pdf'),
+      ],
+      ...o,
+    });
+
+  it('on an md5 remote, release requests and adopt candidates add nothing', () => {
+    const base = hashTargets(releaseCase());
+    expect(base).toEqual([]);
+    expect(hashTargets({ ...releaseCase(), releaseNames: 'all' })).toEqual(base);
+    expect(hashTargets({ ...releaseCase(), releaseNames: ['same.pdf'] })).toEqual(base);
+  });
+
+  it('on another hash kind, adds release candidates and untracked same-key files', () => {
+    const qx = releaseCase({ remoteHashKind: 'quickXor' });
+    expect(hashTargets(qx)).toEqual(['adopt.pdf']);
+    expect(hashTargets({ ...qx, releaseNames: 'all' })).toEqual(['adopt.pdf', 'same.pdf']);
+    expect(hashTargets({ ...qx, releaseNames: ['NOHASH.pdf', 'gone.pdf'] })).toEqual([
+      'adopt.pdf',
+      'nohash.pdf',
+    ]);
   });
 });
 

@@ -6,6 +6,7 @@ import type { AuditSink } from '../audit/audit-log.js';
 import { NotFoundError, ValidationError } from '../errors.js';
 import { expandHome } from '../files/destination.js';
 import type { Logger } from '../logger.js';
+import type { DigesterFactory } from './local-scanner.js';
 import { SyncRootError } from './errors.js';
 import {
   checkOverlap,
@@ -31,6 +32,8 @@ export interface SyncEnv {
   openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
   /** Throws when the account cannot be synced, before anything touches the user's folder. */
   assertSupportedAccount: (ref: string | undefined) => Promise<void>;
+  /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
+  digesters: DigesterFactory;
 }
 
 export interface CreatePairInput {

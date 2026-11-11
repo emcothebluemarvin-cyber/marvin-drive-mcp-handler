@@ -25,6 +25,7 @@ export interface InputOptions {
   md5s?: Array<[string, string]>;
   digests?: Array<[string, LocalDigests]>;
   remoteHashKind?: HashKind;
+  releaseNames?: PlanInput['releaseNames'];
   onDisk?: Array<[string, OnDiskProbe]>;
   blocking?: string[];
   folders?: Array<[string, string]>;
@@ -68,6 +69,7 @@ export function planInput(o: InputOptions = {}): PlanInput {
       ...(o.digests ?? []),
     ]),
     remoteHashKind: o.remoteHashKind ?? 'md5',
+    releaseNames: o.releaseNames ?? null,
     onDisk: new Map(o.onDisk ?? []),
   };
 }

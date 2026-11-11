@@ -3,6 +3,7 @@ import { OperationRunner, type OperationDeps } from '../core/operation.js';
 import { ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { Executor } from './executor.js';
+import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
 import {
   checkRoots,
   createPair,
@@ -57,6 +58,8 @@ export interface SyncServiceDeps extends OperationDeps {
   clock?: () => Date;
   /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
   assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
+  /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
+  digesters?: DigesterFactory;
 }
 
 export interface RunInput {
@@ -98,6 +101,7 @@ export class SyncService {
       openRemote: (ref, prefs): Promise<SyncRemote> => GoogleSyncRemote.open(this.ops, ref, prefs),
       assertSupportedAccount:
         deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
+      digesters: deps.digesters ?? defaultDigesters,
     };
   }
 
@@ -255,7 +259,11 @@ export class SyncService {
     return this.store.withLock(input.name, async () => {
       const file = await this.store.load(input.name);
       await checkRoots(this.env, file.pair);
-      const { input: planInput } = await gatherInput(this.env, file);
+      const { input: planInput } = await gatherInput(
+        this.env,
+        file,
+        all ? 'all' : (input.paths ?? []),
+      );
       const selection = await withoutTrash(
         selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] }),
         file.pair.localDir,

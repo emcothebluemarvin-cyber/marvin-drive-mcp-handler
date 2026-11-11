@@ -24,6 +24,8 @@ export interface PlanInput {
   digests: ReadonlyMap<string, LocalDigests>;
   /** The pair remote's hash kind (local digests of this kind are compared with it). */
   remoteHashKind: HashKind;
+  /** sync_release's request (`all` or the given paths); null for scans and runs. */
+  releaseNames: readonly string[] | 'all' | null;
   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
   onDisk: ReadonlyMap<string, OnDiskProbe>;
 }
@@ -247,6 +249,9 @@ export function onDiskProbeKeys(
  * On-disk names the service must hash before planning (spec §5 step 3): tracked
  * files whose stat differs from the record, selected files not yet recorded, and a
  * local file already at a vanished record's Drive-move target (crash after a move).
+ * On a remote whose hash kind is not md5 it also asks for the files whose remote-kind
+ * digest is needed only to adopt or release (OneDrive sync spec §3.1): release candidates
+ * and untracked files with a same-key remote file. With md5 the set is exactly the above.
  */
 export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
   const ctx = buildContext({ ...input, digests: new Map() });
@@ -266,5 +271,30 @@ export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
     if (recordFolds.has(fold)) continue;
     for (const e of ctx.localByFold.get(fold) ?? []) names.add(e.name);
   }
+  if (input.remoteHashKind !== 'md5') {
+    for (const name of digestOnlyTargets(ctx, recordFolds)) names.add(name);
+  }
   return [...names].sort();
+}
+
+/** Release candidates and untracked same-key files (non-md5 remotes only). */
+function digestOnlyTargets(ctx: PlanContext, recordFolds: ReadonlySet<string>): string[] {
+  const { input } = ctx;
+  const names: string[] = [];
+  const release = input.releaseNames;
+  const named = Array.isArray(release) ? new Set(release.map(foldKey)) : null;
+  for (const record of input.records) {
+    const wanted =
+      release === 'all'
+        ? !record.remoteOnly && (ctx.remoteById.get(record.remoteId)?.hash ?? null) !== null
+        : named !== null && named.has(foldKey(record.path));
+    if (!wanted) continue;
+    const l = resolveLocal(ctx, record.path);
+    if (l.kind === 'present') names.push(l.entry.name);
+  }
+  for (const e of input.local.entries) {
+    if (recordFolds.has(e.foldKey)) continue;
+    if ((ctx.remoteByFold.get(e.foldKey) ?? []).length > 0) names.push(e.name);
+  }
+  return names;
 }
