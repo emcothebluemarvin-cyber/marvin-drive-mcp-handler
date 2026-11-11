@@ -337,6 +337,27 @@ describe('OneDrive deletion evidence (spec §4.1)', () => {
     expect((await pair()).remoteDeletedIds).toEqual([]);
   });
 
+  it('a parent seen present by an earlier probe is not evidence for a later one', async () => {
+    const sub = od.addFolder(docs.id, 'sub', 'SUB');
+    od.addFile(sub.id, 'a.txt', 'one', 'SA');
+    od.addFile(sub.id, 'b.txt', 'two', 'SB');
+    await service().select({ name: 'docs', add: ['sub/a.txt', 'sub/b.txt'] });
+    await apply();
+    // Stale evidence for SUB (e.g. deleted and restored in a gap of the feed history).
+    const file = await store.load('docs');
+    file.pair.remoteDeletedIds = ['SUB'];
+    await store.save(file);
+    od.move('SUB', od.rootId); // SUB leaves the scan: its records are probed
+    od.hide('SB');
+    const report = await service().run({ name: 'docs', apply: true });
+    expect(report.actions['trash-local']).toBeUndefined();
+    expect(report.warnings).toContainEqual(
+      expect.objectContaining({ path: 'sub/b.txt', code: 'remote-unavailable' }),
+    );
+    expect(await readFile(at('sub', 'b.txt'), 'utf8')).toBe('two');
+    expect((await pair()).remoteDeletedIds).toEqual([]);
+  });
+
   it('sync_release reads the feed but does not persist it', async () => {
     await tracked();
     const before = await pair();

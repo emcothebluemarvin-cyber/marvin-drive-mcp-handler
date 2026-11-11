@@ -131,12 +131,12 @@ export async function gatherInput(
   const evidence = feed?.evidence ?? new Set<string>();
   for (const id of present) evidence.delete(id);
   const parentOf = new Map(records.map((r) => [r.remoteId, r.remoteParentId]));
-  const probed = new Set<string>();
+  // Ids a probe sees present leave E at once, so a later probe never counts a parent an
+  // earlier probe's walk-up found present as evidence.
   const probes = await probeRecords(missing, remote, syncRemote, {
     evidenced: (id) => evidence.has(id) || evidence.has(parentOf.get(id) ?? ''),
-    seen: probed,
+    seen: { add: (id) => evidence.delete(id) },
   });
-  for (const id of probed) evidence.delete(id);
   return { input: { ...base, probes, digests }, local, remote, feed };
 }
 

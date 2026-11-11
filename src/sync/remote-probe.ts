@@ -20,11 +20,16 @@ function failure(err: unknown): Probe {
   return unknown(err instanceof AppError ? err.message : 'probe failed');
 }
 
+/** Receives the ids a probe found present; a Set works, so does a deleting sink. */
+export interface SeenSink {
+  add(id: string): unknown;
+}
+
 export interface ProbeOptions {
   /** OneDrive (spec §4.1): the feed reported this record (or its parent) deleted. */
   evidenced?: boolean;
-  /** Collects the ids `get` found present (they leave the deletion evidence). */
-  seen?: Set<string>;
+  /** Told each id `get` found present (it leaves the deletion evidence at once). */
+  seen?: SeenSink;
 }
 
 /**
@@ -95,7 +100,7 @@ export async function probeRecords(
   remoteIds: readonly string[],
   scan: RemoteScan,
   remote: ItemGetter,
-  options: { evidenced?: (id: string) => boolean; seen?: Set<string> } = {},
+  options: { evidenced?: (id: string) => boolean; seen?: SeenSink } = {},
 ): Promise<Map<string, Probe>> {
   const probes = new Map<string, Probe>();
   for (const id of remoteIds) {
