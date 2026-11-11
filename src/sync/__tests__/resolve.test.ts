@@ -180,10 +180,27 @@ describe('hashTargets', () => {
     });
 
   it('on an md5 remote, release requests and adopt candidates add nothing', () => {
-    const base = hashTargets(releaseCase());
-    expect(base).toEqual([]);
-    expect(hashTargets({ ...releaseCase(), releaseNames: 'all' })).toEqual(base);
-    expect(hashTargets({ ...releaseCase(), releaseNames: ['same.pdf'] })).toEqual(base);
+    // Also a stat-changed tracked file and a new selected file, so the base set is not empty.
+    const md5Case = (o: Partial<InputOptions> = {}) => {
+      const base = releaseCase(o);
+      return {
+        ...base,
+        records: [...base.records, record('r5', 'touched.pdf')],
+        pair: { ...base.pair, selection: [...base.pair.selection, 'touched.pdf', 'new.pdf'] },
+        local: {
+          ...base.local,
+          entries: [
+            ...base.local.entries,
+            localEntry('touched.pdf', { ctimeMs: 2 }),
+            localEntry('new.pdf'),
+          ],
+        },
+      };
+    };
+    const base = hashTargets(md5Case());
+    expect(base).toEqual(['new.pdf', 'touched.pdf']);
+    expect(hashTargets({ ...md5Case(), releaseNames: 'all' })).toEqual(base);
+    expect(hashTargets({ ...md5Case(), releaseNames: ['same.pdf'] })).toEqual(base);
   });
 
   it('on another hash kind, adds release candidates and untracked same-key files', () => {
