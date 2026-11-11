@@ -1,12 +1,29 @@
+import type { OperationRunner } from '../../core/operation.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
+import { NotFoundError, PermissionDeniedError } from '../../errors.js';
 import {
   GOOGLE_MIME,
   isGoogleNative,
   resolveExport,
   type ExportFormat,
 } from '../../files/export-formats.js';
+import { escapeQueryValue } from '../../files/query.js';
+import { foldKey } from '../paths.js';
 import { DEFAULT_GOOGLE_EXPORT, type GoogleExportPrefs } from '../types.js';
 import type { RemoteItem } from './sync-remote.js';
+
+/** Drive fields every sync read requests (spec §4). */
+export const SYNC_FILE_FIELDS =
+  'id, name, mimeType, md5Checksum, size, modifiedTime, createdTime, parents, trashed, capabilities(canEdit, canTrash, canAddChildren)';
+export const SYNC_LIST_FIELDS = `nextPageToken, files(${SYNC_FILE_FIELDS})`;
+export const SYNC_PAGE_SIZE = 1000;
+const FOLDER_LIST_FIELDS = 'nextPageToken, files(id, name)';
+const NAME_PAGE_SIZE = 100;
+
+/** A folder's non-trashed children. */
+export function childrenQuery(folderId: string): string {
+  return `'${escapeQueryValue(folderId)}' in parents and trashed = false`;
+}
 
 /**
  * The only sync module that knows Drive shapes: Google-native, folder and shortcut MIME
@@ -98,4 +115,91 @@ export function toRemoteItem(file: DriveFile, prefs: GoogleExportPrefs): RemoteI
       exportMime: kind.exportMime,
     },
   };
+}
+
+/**
+ * SyncRemote over the Drive adapter (OneDrive sync spec §2.2). Every call goes through the
+ * OperationRunner with the operation kind and target the engine used before the port.
+ */
+export class GoogleSyncRemote {
+  readonly provider = 'google';
+  readonly hashKind = 'md5';
+  readonly rootId = 'root';
+
+  constructor(
+    private readonly ops: OperationRunner,
+    readonly account: string,
+    private readonly prefs: GoogleExportPrefs,
+  ) {}
+
+  private item(file: DriveFile): RemoteItem {
+    return toRemoteItem(file, this.prefs);
+  }
+
+  async read(id: string): Promise<RemoteItem> {
+    const file = await this.ops.exec(this.account, 'idempotent', id, (ctx) =>
+      ctx.drive.getFile(id, SYNC_FILE_FIELDS),
+    );
+    return this.item(file);
+  }
+
+  async get(id: string): Promise<RemoteItem | null> {
+    try {
+      return await this.read(id);
+    } catch (err) {
+      if (err instanceof NotFoundError || err instanceof PermissionDeniedError) return null;
+      throw err;
+    }
+  }
+
+  async listChildren(
+    folderId: string,
+    pageToken: string | undefined,
+  ): Promise<{ items: RemoteItem[]; next?: string }> {
+    const page = await this.ops.exec(this.account, 'idempotent', folderId, (ctx) =>
+      ctx.drive.listFiles({
+        q: childrenQuery(folderId),
+        pageSize: SYNC_PAGE_SIZE,
+        ...(pageToken ? { pageToken } : {}),
+        fields: SYNC_LIST_FIELDS,
+      }),
+    );
+    const items = (page.files ?? []).map((f) => this.item(f));
+    return page.nextPageToken ? { items, next: page.nextPageToken } : { items };
+  }
+
+  /**
+   * Folders: every page of the parent's folders (id and name only). Files: one page of
+   * the exact-name query, as the duplicate-upload check always did.
+   */
+  async findChildren(parentId: string, name: string, kind?: 'folder'): Promise<RemoteItem[]> {
+    const fold = foldKey(name);
+    const found: RemoteItem[] = [];
+    const parents = `'${escapeQueryValue(parentId)}' in parents and trashed = false`;
+    if (kind !== 'folder') {
+      const q = `${parents} and name = '${escapeQueryValue(name)}'`;
+      const list = await this.ops.exec(this.account, 'idempotent', parentId, (ctx) =>
+        ctx.drive.listFiles({ q, pageSize: NAME_PAGE_SIZE, fields: SYNC_LIST_FIELDS }),
+      );
+      for (const f of list.files ?? []) found.push(this.item(f));
+    } else {
+      const q = `${parents} and mimeType = '${GOOGLE_MIME.folder}'`;
+      let pageToken: string | undefined;
+      do {
+        const page = await this.ops.exec(this.account, 'idempotent', parentId, (ctx) =>
+          ctx.drive.listFiles({
+            q,
+            pageSize: SYNC_PAGE_SIZE,
+            ...(pageToken ? { pageToken } : {}),
+            fields: FOLDER_LIST_FIELDS,
+          }),
+        );
+        for (const f of page.files ?? []) {
+          found.push(this.item({ mimeType: GOOGLE_MIME.folder, parents: [parentId], ...f }));
+        }
+        pageToken = page.nextPageToken ?? undefined;
+      } while (pageToken);
+    }
+    return found.filter((f) => foldKey(f.name) === fold);
+  }
 }

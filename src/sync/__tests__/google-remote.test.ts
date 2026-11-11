@@ -1,10 +1,105 @@
 import { describe, expect, it } from 'vitest';
-import { ValidationError } from '../../errors.js';
+import { NotFoundError, QuotaExceededError, ValidationError } from '../../errors.js';
+import { createFakeDrive, httpError } from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import { classifyRemote, toRemoteItem, validateGoogleExport } from '../remote/google-remote.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder } from './drive-tree.js';
+import { googleRemoteOver } from './fake-remote.js';
 import { DOCX_MIME } from './fixtures.js';
+
+const FILE_FIELDS =
+  'id, name, mimeType, md5Checksum, size, modifiedTime, createdTime, parents, trashed, capabilities(canEdit, canTrash, canAddChildren)';
+const LIST_FIELDS = `nextPageToken, files(${FILE_FIELDS})`;
+const FOLDER_Q =
+  "'P\\'1' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'";
+
+describe('GoogleSyncRemote reads (pinned to the Drive calls sync made before the port)', () => {
+  it('read and get: one getFile with the sync fields; get maps 404/403 to null', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockResolvedValueOnce(binary('r', 'a.pdf', 'P'));
+    const remote = googleRemoteOver(drive);
+    expect(await remote.read('r')).toMatchObject({ id: 'r', parentId: 'P', kind: 'file' });
+    expect(drive.getFile).toHaveBeenCalledWith('r', FILE_FIELDS);
+    drive.getFile.mockRejectedValueOnce(httpError(404, 'notFound'));
+    expect(await remote.get('gone')).toBeNull();
+    drive.getFile.mockRejectedValueOnce(httpError(403, 'forbidden'));
+    expect(await remote.get('denied')).toBeNull();
+    drive.getFile.mockRejectedValueOnce(httpError(404, 'notFound'));
+    await expect(remote.read('gone')).rejects.toBeInstanceOf(NotFoundError);
+    drive.getFile.mockRejectedValueOnce(httpError(403, 'storageQuotaExceeded'));
+    await expect(remote.get('q')).rejects.toBeInstanceOf(QuotaExceededError);
+  });
+
+  it('listChildren: the children query, page size 1000 and the list fields', async () => {
+    const drive = createFakeDrive();
+    drive.listFiles
+      .mockResolvedValueOnce({ files: [binary('a', 'a.pdf', 'P')], nextPageToken: 't2' })
+      .mockResolvedValueOnce({ files: [folder('f', 'docs', 'P')] });
+    const remote = googleRemoteOver(drive);
+    const first = await remote.listChildren("P'1", undefined);
+    expect(first.items.map((i) => i.id)).toEqual(['a']);
+    expect(first.next).toBe('t2');
+    const second = await remote.listChildren("P'1", 't2');
+    expect(second).toEqual({ items: [expect.objectContaining({ id: 'f', kind: 'folder' })] });
+    expect(drive.listFiles.mock.calls.map((c) => c[0])).toEqual([
+      { q: "'P\\'1' in parents and trashed = false", pageSize: 1000, fields: LIST_FIELDS },
+      {
+        q: "'P\\'1' in parents and trashed = false",
+        pageSize: 1000,
+        pageToken: 't2',
+        fields: LIST_FIELDS,
+      },
+    ]);
+  });
+
+  it('findChildren folders: the folder query, paged, id and name only, fold-matched', async () => {
+    const drive = createFakeDrive();
+    drive.listFiles
+      .mockResolvedValueOnce({ files: [{ id: 'f1', name: 'Docs' }], nextPageToken: 'n' })
+      .mockResolvedValueOnce({
+        files: [
+          { id: 'f2', name: 'other' },
+          { id: 'f3', name: 'docs' },
+        ],
+      });
+    const found = await googleRemoteOver(drive).findChildren("P'1", 'docs', 'folder');
+    expect(found.map((f) => [f.id, f.name, f.kind, f.parentId])).toEqual([
+      ['f1', 'Docs', 'folder', "P'1"],
+      ['f3', 'docs', 'folder', "P'1"],
+    ]);
+    expect(drive.listFiles.mock.calls.map((c) => c[0])).toEqual([
+      { q: FOLDER_Q, pageSize: 1000, fields: 'nextPageToken, files(id, name)' },
+      { q: FOLDER_Q, pageSize: 1000, pageToken: 'n', fields: 'nextPageToken, files(id, name)' },
+    ]);
+  });
+
+  it('findChildren files: one page of the name query with the list fields', async () => {
+    const drive = createFakeDrive();
+    drive.listFiles.mockResolvedValueOnce({
+      files: [binary('a', "it's.pdf", 'P'), binary('b', 'other.pdf', 'P')],
+      nextPageToken: 'ignored',
+    });
+    const found = await googleRemoteOver(drive).findChildren('P', "it's.pdf");
+    expect(found.map((f) => f.id)).toEqual(['a']);
+    expect(drive.listFiles).toHaveBeenCalledTimes(1);
+    expect(drive.listFiles).toHaveBeenCalledWith({
+      q: "'P' in parents and trashed = false and name = 'it\\'s.pdf'",
+      pageSize: 100,
+      fields: LIST_FIELDS,
+    });
+  });
+
+  it('is the Google remote with md5 hashes', () => {
+    const remote = googleRemoteOver(createFakeDrive());
+    expect([remote.provider, remote.hashKind, remote.rootId, remote.account]).toEqual([
+      'google',
+      'md5',
+      'root',
+      'emco',
+    ]);
+  });
+});
 
 describe('classifyRemote', () => {
   it('binary files', () => {
