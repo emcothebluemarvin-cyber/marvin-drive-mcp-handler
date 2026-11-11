@@ -243,6 +243,19 @@ describe('OneDrive deletion evidence (spec §4.1)', () => {
     expect(next.warnings.map((w) => w.code)).not.toContain('deletion-history-unavailable');
   });
 
+  it('a stored cursor that is not a Graph link does not block runs; it restarts', async () => {
+    await tracked();
+    const file = await store.load('docs');
+    file.pair.remoteCursor = 'https://evil.example/v1.0/me/drive/root/delta?token=x';
+    await store.save(file);
+    od.remove('A');
+    const report = await service().run({ name: 'docs', apply: true });
+    expect(report.warnings.map((w) => w.code)).toContain('deletion-history-unavailable');
+    expect(report.actions).toEqual({});
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+    expect((await pair()).remoteCursor).toMatch(/^https:\/\/graph\.microsoft\.com\/.*token=g0-/);
+  });
+
   it('an expired cursor still plans with the stored evidence', async () => {
     await tracked();
     od.remove('A');

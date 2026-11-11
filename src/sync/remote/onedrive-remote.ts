@@ -76,6 +76,17 @@ function changedSinceScan(err: unknown, name: string): unknown {
 }
 
 /**
+ * Feed errors that would repeat on every run with the same cursor, so they count as an
+ * expired cursor (warn, report deletions only, restart): 410 resyncRequired, a 400 on the
+ * delta request, and a stored or next link that fails the page-link check (ValidationError).
+ * Transient errors (throttling, 5xx, auth) still throw and keep the stored cursor.
+ */
+function cursorUnusable(err: unknown): boolean {
+  if (err instanceof ValidationError) return true;
+  return err instanceof GraphApiError && (err.status === 410 || err.status === 400);
+}
+
+/**
  * SyncRemote over sub-project 1's GraphClient (OneDrive sync spec §2.2). Personal drives
  * only: the user's own items; shared items (`remoteItem`) are reported, never followed.
  * The optional signals are checked before each request (GraphClient has no cancellation).
@@ -276,11 +287,12 @@ export class OneDriveSyncRemote implements SyncRemote {
               continue;
             }
             const delta = page['@odata.deltaLink'];
-            if (!delta) throw new GraphApiError(undefined);
+            // A chain without a delta link cannot be resumed: start again "from now on".
+            if (!delta) return { expired: true };
             return { deletedIds, cursor: delta };
           }
         } catch (err) {
-          if (err instanceof GraphApiError && err.status === 410) return { expired: true };
+          if (cursorUnusable(err)) return { expired: true };
           throw err;
         }
       },

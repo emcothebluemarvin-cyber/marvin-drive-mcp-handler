@@ -286,11 +286,31 @@ describe('OneDriveSyncRemote deletion feed', () => {
     expect(calls.map((c) => c.url)).toEqual([`${GRAPH}/me/drive?$select=id`, LATEST, PAGE2]);
   });
 
-  it('a 410 means the cursor expired; a foreign cursor is refused', async () => {
+  it('a 410 means the cursor expired', async () => {
     const { remote } = remoteOver(() => graphError(410, 'resyncRequired'));
     expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
-    await expect(
-      remote.deletionFeed().read('https://evil.example/v1.0/me/drive/root/delta'),
-    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('a stored cursor that fails the page-link check is expired, never followed', async () => {
+    const { remote, calls } = remoteOver(() => json({ value: [], '@odata.deltaLink': AFTER }));
+    expect(
+      await remote.deletionFeed().read('https://evil.example/v1.0/me/drive/root/delta'),
+    ).toEqual({ expired: true });
+    expect(calls.map((c) => c.url)).toEqual([`${GRAPH}/me/drive?$select=id`]);
+  });
+
+  it('a 400 on the delta request is expired (a cursor Graph no longer accepts)', async () => {
+    const { remote } = remoteOver(() => graphError(400, 'invalidRequest', 'bad token'));
+    expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
+  });
+
+  it('a page chain that ends without a delta link is expired', async () => {
+    const { remote } = remoteOver(() => json({ value: [{ id: 'gone', deleted: {} }] }));
+    expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
+  });
+
+  it('other errors still throw (the stored cursor is kept)', async () => {
+    const { remote } = remoteOver(() => graphError(500, 'generalException'));
+    await expect(remote.deletionFeed().read(LATEST)).rejects.toThrow();
   });
 });
