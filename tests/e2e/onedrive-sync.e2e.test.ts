@@ -134,7 +134,7 @@ describe.each(ACCOUNTS)('OneDrive sync E2E (%s)', (_kind, account) => {
         expect(changes.actions['download-replace']).toEqual(['edit-remote.txt']);
         expect(changes.actions.conflict).toEqual(['both.txt']);
         expect(await readFile(at('edit-remote.txt'), 'utf8')).toBe('remote v2');
-        expect(changes.conflicts[0]?.conflictCopy).toMatch(/^both \(Drive conflict .*\)\.txt$/);
+        expect(changes.conflicts[0]?.conflictCopy).toMatch(/^both \(OneDrive conflict .*\)\.txt$/);
 
         // Local deletion waits for confirmation, then goes to the OneDrive recycle bin.
         await rm(at('del-local.txt'));

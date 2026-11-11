@@ -88,7 +88,7 @@ Spec §10 results:
 - ✅ `If-Match` on replace and delete; 409 / 412 / 423 skipped, 507 stops the run
 - ✅ OneDrive name rules (`remote-name-invalid`, 255 units per name, 400 per path), ignored OneNote / special / shared items, provider words in reports
 - ✅ Cloud desktop folder guard for both providers (create, repair-marker, list warning, runs refused)
-- ⬜ Live OneDrive sync E2E (`tests/e2e/onedrive-sync.e2e.test.ts`, `MARVIN_E2E_MS_PERSONAL`, optional `MARVIN_E2E_MS_SECOND`): written, not run live yet; spec §10 points open until then
+- ✅ Live OneDrive sync E2E (`tests/e2e/onedrive-sync.e2e.test.ts`, `MARVIN_E2E_MS_PERSONAL`, optional `MARVIN_E2E_MS_SECOND`): passed 2026-11-11 on two personal accounts; Google sync E2E re-run and passed on the same build
 - ⬜ Work/school accounts: supported by the code, not live-tested
 - Known limitation: the pair file does not store the provider (it follows the account alias)
 
