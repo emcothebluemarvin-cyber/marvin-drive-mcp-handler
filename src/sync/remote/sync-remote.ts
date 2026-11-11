@@ -58,6 +58,10 @@ export interface DeletionFeed {
   read(cursor: string): Promise<{ deletedIds: string[]; cursor: string } | { expired: true }>;
 }
 
+/**
+ * Optional `signal` parameters are honoured by OneDrive (stage 3) and ignored by Google,
+ * whose OperationRunner has no cancellation.
+ */
 export interface SyncRemote {
   readonly provider: 'google' | 'microsoft';
   /** The hash kind this remote reports for files. */
@@ -75,7 +79,14 @@ export interface SyncRemote {
     pageToken: string | undefined,
     signal?: AbortSignal,
   ): Promise<{ items: RemoteItem[]; next?: string }>;
-  /** Children whose name folds to `name`'s fold key; the engine decides what to do. */
+  /**
+   * Candidate children named `name`; callers re-check the names they accept.
+   * - Google, `kind: 'folder'`: every folder of the parent (all pages) whose name folds to
+   *   `name`'s fold key.
+   * - Google, files: the first page (100) of Drive's exact-name query, as the duplicate
+   *   upload check always read it; not paged.
+   * - OneDrive (stage 3): every child whose name folds to `name`'s fold key.
+   */
   findChildren(parentId: string, name: string, kind?: 'folder'): Promise<RemoteItem[]>;
   createFolder(parentId: string, name: string): Promise<RemoteItem>;
   uploadNew(parentId: string, name: string, localPath: string): Promise<RemoteItem>;

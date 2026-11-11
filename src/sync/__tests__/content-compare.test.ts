@@ -53,6 +53,14 @@ describe('remoteUnchangedSince', () => {
     );
     expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: LATER }))).toBe(false);
   });
+  it('a quickXor hash compares by kind and value (never always-changed)', () => {
+    const hash = { kind: 'quickXor' as const, value: 'QX' };
+    const r = remoteEntry('r1', 'a.pdf', { hash });
+    const current = { ...item({ modifiedTime: r.modifiedTime }), hash };
+    expect(remoteUnchangedSince(r, current)).toBe(true);
+    expect(remoteUnchangedSince(r, { ...current, hash: { ...hash, value: 'other' } })).toBe(false);
+    expect(remoteUnchangedSince(r, { ...current, hash: { kind: 'md5', value: 'QX' } })).toBe(false);
+  });
   it('native needs modifiedTime equal', () => {
     const r = nativeEntry('g1', 'Plan.docx');
     expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
