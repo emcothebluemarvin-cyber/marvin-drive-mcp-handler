@@ -25,6 +25,7 @@ import {
   type LocalFields,
   type RemoteFields,
 } from './exec-records.js';
+import { pruneEvidence } from './deletion-evidence.js';
 import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-export.js';
 import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
@@ -176,6 +177,8 @@ export class Executor {
 
   /** Atomic pair-file save; a failure aborts the run (see PersistenceError). */
   private async persist(): Promise<void> {
+    // Spec §4.1: a dropped record takes its deletion evidence with it.
+    pruneEvidence(this.file);
     try {
       await this.deps.save(this.file);
     } catch (err) {

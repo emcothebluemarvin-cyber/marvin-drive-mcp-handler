@@ -32,8 +32,15 @@ export interface MemoryOneDrive {
   addFolder(parentId: string, name: string, id?: string): MemoryItem;
   addFile(parentId: string, name: string, content: string, id?: string): MemoryItem;
   edit(id: string, content: string): void;
-  /** Deletes the item (and its subtree): 404 from now on, reported by the delta feed. */
-  remove(id: string): void;
+  /**
+   * Deletes the item and its subtree: 404 from now on, reported by the delta feed (only the
+   * item itself with `feedChildren: false`).
+   */
+  remove(id: string, options?: { feedChildren?: boolean }): void;
+  /** Puts a removed or hidden item back with the same id (recycle bin restore). */
+  restore(item: MemoryItem): void;
+  /** Moves an item to another parent (an update in the feed, never a deletion). */
+  move(id: string, parentId: string): void;
   /** The item becomes unreachable (404) without a feed entry (e.g. a locked vault). */
   hide(id: string): void;
   /** The next delta read with an old cursor answers 410. */
@@ -189,11 +196,20 @@ export function memoryOneDrive(): MemoryOneDrive {
       item.version++;
       item.modified = stamp();
     },
-    remove: (id) => {
+    remove: (id, options = {}) => {
       for (const gone of subtree(id)) {
         items.delete(gone);
-        deletions.push(gone);
+        if (gone === id || options.feedChildren !== false) deletions.push(gone);
       }
+    },
+    restore: (item) => {
+      items.set(item.id, item);
+    },
+    move: (id, parentId) => {
+      const item = items.get(id);
+      if (!item) throw new Error(`no item ${id}`);
+      item.parentId = parentId;
+      item.modified = stamp();
     },
     hide: (id) => {
       for (const gone of subtree(id)) items.delete(gone);

@@ -43,6 +43,28 @@ function getter(files: Record<string, DriveFile | Error>): ItemGetter {
 }
 
 describe('probeRecord', () => {
+  it('a missing item is trashed only with deletion evidence (OneDrive sync spec §4.1)', async () => {
+    const get = getter({});
+    expect(await probeRecord('r', scan(), get)).toEqual({ state: 'unavailable' });
+    expect(await probeRecord('r', scan(), get, { evidenced: false })).toEqual({
+      state: 'unavailable',
+    });
+    expect(await probeRecord('r', scan(), get, { evidenced: true })).toEqual({ state: 'trashed' });
+  });
+
+  it('collects the ids it saw present, parents of the walk included', async () => {
+    const seen = new Set<string>();
+    const get = getter({
+      r: binary('r', 'a.pdf', 'elsewhere'),
+      elsewhere: { id: 'elsewhere', parents: ['my-drive'] },
+      'my-drive': { id: 'my-drive' },
+    });
+    expect(await probeRecord('r', scan(), get, { evidenced: true, seen })).toEqual({
+      state: 'moved-out',
+    });
+    expect([...seen]).toEqual(['r', 'elsewhere', 'my-drive']);
+  });
+
   it('reports trashed files', async () => {
     const get = getter({ r: binary('r', 'a.pdf', ROOT, { trashed: true }) });
     expect(await probeRecord('r', scan(), get)).toEqual({ state: 'trashed' });

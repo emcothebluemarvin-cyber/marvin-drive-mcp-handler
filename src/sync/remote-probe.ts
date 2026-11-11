@@ -20,11 +20,22 @@ function failure(err: unknown): Probe {
   return unknown(err instanceof AppError ? err.message : 'probe failed');
 }
 
-/** Classifies one record missing from the scan (spec §6.2). */
+export interface ProbeOptions {
+  /** OneDrive (spec §4.1): the feed reported this record (or its parent) deleted. */
+  evidenced?: boolean;
+  /** Collects the ids `get` found present (they leave the deletion evidence). */
+  seen?: Set<string>;
+}
+
+/**
+ * Classifies one record missing from the scan (spec §6.2). A missing item is `trashed`
+ * only with deletion evidence (OneDrive); without it, `unavailable` (B14, report only).
+ */
 export async function probeRecord(
   remoteId: string,
   scan: RemoteScan,
   remote: ItemGetter,
+  options: ProbeOptions = {},
 ): Promise<Probe> {
   let file: RemoteItem | null;
   try {
@@ -32,7 +43,8 @@ export async function probeRecord(
   } catch (err) {
     return failure(err);
   }
-  if (file === null) return { state: 'unavailable' };
+  if (file === null) return { state: options.evidenced ? 'trashed' : 'unavailable' };
+  options.seen?.add(file.id);
   if (file.trashed) return { state: 'trashed' };
   const parent = file.parentId;
   if (!parent) return { state: 'moved-out' };
@@ -66,6 +78,7 @@ export async function probeRecord(
       return failure(err);
     }
     if (folder === null) return unknown('a parent folder cannot be read');
+    options.seen?.add(folder.id);
     const up = folder.parentId;
     if (!up) return { state: 'moved-out' };
     if (scan.folders.has(up) || scan.unknownFolderIds.includes(up)) {
@@ -81,8 +94,18 @@ export async function probeRecords(
   remoteIds: readonly string[],
   scan: RemoteScan,
   remote: ItemGetter,
+  options: { evidenced?: (id: string) => boolean; seen?: Set<string> } = {},
 ): Promise<Map<string, Probe>> {
   const probes = new Map<string, Probe>();
-  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, remote));
+  for (const id of remoteIds) {
+    const evidenced = options.evidenced?.(id) ?? false;
+    probes.set(
+      id,
+      await probeRecord(id, scan, remote, {
+        evidenced,
+        ...(options.seen ? { seen: options.seen } : {}),
+      }),
+    );
+  }
   return probes;
 }
