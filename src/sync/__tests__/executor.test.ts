@@ -16,6 +16,8 @@ import {
   type FakeDrive,
 } from '../../files/__tests__/fakes.js';
 import { Executor, conflictName } from '../executor.js';
+import { GoogleSyncRemote } from '../remote/google-remote.js';
+import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
 import { buildReport } from '../report.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
@@ -89,6 +91,7 @@ function executor(
   return new Executor(
     {
       ops,
+      remote: new GoogleSyncRemote(ops, 'emco', DEFAULT_GOOGLE_EXPORT),
       audit,
       logger: silentLogger(),
       clock: () => NOW,

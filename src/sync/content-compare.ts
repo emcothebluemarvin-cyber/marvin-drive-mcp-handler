@@ -1,6 +1,11 @@
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { ValidationError } from '../errors.js';
+import type { RemoteItem } from './remote/sync-remote.js';
 import type { RemoteEntry, SyncRecord } from './types.js';
+
+/** The item's md5, or null when it reports none (or another hash kind). */
+export function md5Of(item: RemoteItem): string | null {
+  return item.hash?.kind === 'md5' ? item.hash.value : null;
+}
 
 /** R content vs the record: binary md5 (else size + modifiedTime, `weak`); native modifiedTime. */
 export function remoteChanged(
@@ -20,9 +25,9 @@ export function remoteChanged(
 }
 
 /** Executor re-verification: binary md5 and modifiedTime equal; native modifiedTime equal. */
-export function remoteUnchangedSince(planned: RemoteEntry, current: DriveFile): boolean {
-  if ((current.modifiedTime ?? '') !== planned.modifiedTime) return false;
-  return planned.native !== null || (current.md5Checksum ?? null) === planned.md5;
+export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem): boolean {
+  if (current.modifiedTime !== planned.modifiedTime) return false;
+  return planned.native !== null || md5Of(current) === planned.md5;
 }
 
 /**

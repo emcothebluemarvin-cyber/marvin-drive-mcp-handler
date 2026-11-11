@@ -17,6 +17,7 @@ import {
   type LocalFields,
 } from './exec-records.js';
 import { absInside, prepareParent } from './paths.js';
+import { toRemoteItem } from './remote/google-remote.js';
 import {
   downloadReplace,
   moveLocal,
@@ -62,7 +63,8 @@ async function reread(host: ExportHost, remote: RemoteEntry): Promise<DriveFile>
   const current = await host.ops.exec(host.file.pair.account, 'idempotent', remote.id, (ctx) =>
     ctx.drive.getFile(remote.id, SYNC_EXPORT_FIELDS),
   );
-  if (current.trashed || !remoteUnchangedSince(remote, current)) {
+  const item = toRemoteItem(current, host.file.pair.googleExport);
+  if (item.trashed || !remoteUnchangedSince(remote, item)) {
     throw new TargetChangedError(`${remote.key} changed in Drive since planning`);
   }
   return current;

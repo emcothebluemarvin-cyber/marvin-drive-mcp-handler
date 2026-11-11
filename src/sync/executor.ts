@@ -32,6 +32,7 @@ import { md5File } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
 import { SYNC_LIST_FIELDS } from './remote/google-remote.js';
+import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import {
   downloadReplace,
   moveLocal,
@@ -41,7 +42,6 @@ import {
 } from './transfer.js';
 import type { LocalTrash } from './trash.js';
 import {
-  SYNC_FILE_FIELDS,
   type Action,
   type ActionKind,
   type ActionOutcome,
@@ -68,6 +68,8 @@ export { conflictName } from './exec-records.js';
 
 export interface ExecutorDeps {
   ops: OperationRunner;
+  /** The pair's remote; every remote read and write goes through it. */
+  remote: SyncRemote;
   audit: AuditSink;
   logger: Logger;
   clock: () => Date;
@@ -234,15 +236,9 @@ export class Executor {
     return { name, md5, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
   }
 
-  private readRemote(id: string): Promise<DriveFile> {
-    return this.deps.ops.exec(this.pair.account, 'idempotent', id, (ctx) =>
-      ctx.drive.getFile(id, SYNC_FILE_FIELDS),
-    );
-  }
-
   /** Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7). */
-  private async verifyRemote(planned: RemoteEntry): Promise<DriveFile> {
-    const current = await this.readRemote(planned.id);
+  private async verifyRemote(planned: RemoteEntry): Promise<RemoteItem> {
+    const current = await this.deps.remote.read(planned.id);
     if (current.trashed || !remoteUnchangedSince(planned, current)) {
       throw new TargetChangedError(`${planned.key} changed in Drive since planning`);
     }
@@ -520,21 +516,12 @@ export class Executor {
       },
     );
     if (back) throw new TargetChangedError(`${action.key} exists locally again`);
-    const current = await this.readRemote(remote.id);
+    const current = await this.deps.remote.read(remote.id);
     if (!current.trashed) {
-      if (
-        !remoteUnchangedSince(remote, current) ||
-        (current.parents?.[0] ?? '') !== remote.parentId
-      ) {
+      if (!remoteUnchangedSince(remote, current) || (current.parentId ?? '') !== remote.parentId) {
         throw new TargetChangedError(`${action.key} changed or moved in Drive since planning`);
       }
-      await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-        ctx.drive.updateFile({
-          fileId: remote.id,
-          requestBody: { trashed: true },
-          fields: 'id, trashed',
-        }),
-      );
+      await this.deps.remote.trash(current);
     }
     await this.commit(action, () => dropRecord(this.file, record.remoteId));
     await this.audit('sync_trash_remote', action, remote.id);

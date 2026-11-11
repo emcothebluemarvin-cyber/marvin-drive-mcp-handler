@@ -9,6 +9,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
 import { md5File } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
+import { toRemoteItem } from './remote/google-remote.js';
 import {
   buildContext,
   isUnknownKey,
@@ -174,14 +175,15 @@ const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
 
 /** R must still be present-same: not trashed, content unchanged, same name and parent. */
 async function verifyRemote(deps: ReleaseDeps, pair: Pair, planned: RemoteEntry): Promise<void> {
-  const current = await deps.ops.exec(pair.account, 'idempotent', planned.id, (ctx) =>
+  const file = await deps.ops.exec(pair.account, 'idempotent', planned.id, (ctx) =>
     ctx.drive.getFile(planned.id, SYNC_FILE_FIELDS),
   );
+  const current = toRemoteItem(file, pair.googleExport);
   if (
     current.trashed ||
     !remoteUnchangedSince(planned, current) ||
-    (current.name ?? '') !== planned.name ||
-    (current.parents?.[0] ?? '') !== planned.parentId
+    current.name !== planned.name ||
+    (current.parentId ?? '') !== planned.parentId
   ) {
     throw new TargetChangedError(
       `${planned.key} changed, moved or was trashed in Drive since the scan`,

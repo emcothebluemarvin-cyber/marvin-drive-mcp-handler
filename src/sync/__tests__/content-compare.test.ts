@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { DriveFile } from '../../drive/drive-adapter.js';
 import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from '../content-compare.js';
+import { toRemoteItem } from '../remote/google-remote.js';
+import type { RemoteItem } from '../remote/sync-remote.js';
+import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
+
+const item = (file: DriveFile): RemoteItem => toRemoteItem(file, DEFAULT_GOOGLE_EXPORT);
 
 const LATER = '2026-11-04T00:00:00.000Z';
 
@@ -34,16 +40,17 @@ describe('remoteChanged', () => {
 describe('remoteUnchangedSince', () => {
   it('binary needs md5 and modifiedTime equal', () => {
     const r = remoteEntry('r1', 'a.pdf');
-    expect(remoteUnchangedSince(r, { md5Checksum: r.md5, modifiedTime: r.modifiedTime })).toBe(
-      true,
+    const md5Checksum = r.md5 ?? undefined;
+    expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: r.modifiedTime }))).toBe(true);
+    expect(remoteUnchangedSince(r, item({ md5Checksum: 'x', modifiedTime: r.modifiedTime }))).toBe(
+      false,
     );
-    expect(remoteUnchangedSince(r, { md5Checksum: 'x', modifiedTime: r.modifiedTime })).toBe(false);
-    expect(remoteUnchangedSince(r, { md5Checksum: r.md5, modifiedTime: LATER })).toBe(false);
+    expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: LATER }))).toBe(false);
   });
   it('native needs modifiedTime equal', () => {
     const r = nativeEntry('g1', 'Plan.docx');
-    expect(remoteUnchangedSince(r, { modifiedTime: r.modifiedTime })).toBe(true);
-    expect(remoteUnchangedSince(r, { modifiedTime: LATER })).toBe(false);
+    expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
+    expect(remoteUnchangedSince(r, item({ modifiedTime: LATER }))).toBe(false);
   });
 });
 describe('localMatchesRemote', () => {
