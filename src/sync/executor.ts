@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
-import { md5Value, remoteUnchangedSince, sameContent } from './content-compare.js';
+import { remoteUnchangedSince, sameContent } from './content-compare.js';
 import {
   CollisionError,
   LocalEditKeptError,
@@ -30,7 +30,7 @@ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
 import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
-import { downloadReplace, moveLocal, placeExclusive } from './transfer.js';
+import { downloadReplace, moveLocal, placeExclusive, type DownloadCheck } from './transfer.js';
 import type { LocalTrash } from './trash.js';
 import {
   type Action,
@@ -282,6 +282,11 @@ export class Executor {
 
   // ---- uploads ----------------------------------------------------------------------
 
+  /** A download must match R's hash and size (OneDrive sync spec §3.3). */
+  private check(remote: RemoteEntry): DownloadCheck {
+    return { expected: remote.hash, expectedSize: remote.size, digesters: this.digesters };
+  }
+
   /** The planned local content; actions built without digests carry the md5 alone. */
   private plannedDigests(action: Action): LocalDigests {
     if (action.localDigests) return action.localDigests;
@@ -401,7 +406,7 @@ export class Executor {
     const written = remote.native
       ? await exportOver(this.host(), to, expect, remote)
       : await this.deps.remote.download(remote.id, (open) =>
-          downloadReplace(to, open, { expect, expectedMd5: md5Value(remote.hash) }),
+          downloadReplace(to, open, { expect, ...this.check(remote) }),
         );
     const after = await this.statFields(action.key, written.md5);
     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
@@ -415,7 +420,7 @@ export class Executor {
     const abs = await prepareParent(this.pair.localDir, action.key);
     const written = await this.deps.remote.download(remote.id, (open) =>
       placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
-        expectedMd5: md5Value(remote.hash),
+        ...this.check(remote),
       }),
     );
     const local = await this.statFields(action.key, written.md5);
@@ -431,7 +436,7 @@ export class Executor {
     const remote = need(action.remote, 'remote');
     const abs = absInside(this.pair.localDir, local.name);
     const written = await this.deps.remote.download(remote.id, (open) =>
-      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: md5Value(remote.hash) }),
+      downloadReplace(abs, open, { expect: statOf(local), ...this.check(remote) }),
     );
     const after = await this.statFields(local.name, written.md5);
     await this.commit(action, () =>
@@ -451,7 +456,7 @@ export class Executor {
     const base = path.basename(abs);
     const copy = await this.deps.remote.download(remote.id, (open) =>
       placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
-        expectedMd5: md5Value(remote.hash),
+        ...this.check(remote),
         maxAttempts: MAX_CONFLICT_NAMES,
       }),
     );

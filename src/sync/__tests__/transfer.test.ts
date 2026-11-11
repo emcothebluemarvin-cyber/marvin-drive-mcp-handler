@@ -4,7 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ChecksumMismatchError, CollisionError, TargetChangedError } from '../errors.js';
+import {
+  ChecksumMismatchError,
+  CollisionError,
+  SizeMismatchError,
+  TargetChangedError,
+} from '../errors.js';
+import { md5Hash } from './fixtures.js';
 import {
   downloadReplace,
   moveLocal,
@@ -36,7 +42,7 @@ async function leftovers(): Promise<string[]> {
 describe('placeExclusive', () => {
   it('writes a new file and verifies md5', async () => {
     const out = await placeExclusive(dir, () => 'a.pdf', source('hello'), {
-      expectedMd5: md5('hello'),
+      expected: md5Hash(md5('hello')),
     });
     expect(out).toEqual({ path: path.join(dir, 'a.pdf'), md5: md5('hello'), size: 5 });
     expect(await readFile(out.path, 'utf8')).toBe('hello');
@@ -61,9 +67,32 @@ describe('placeExclusive', () => {
 
   it('removes the temp file on a checksum mismatch', async () => {
     await expect(
-      placeExclusive(dir, () => 'a.pdf', source('hello'), { expectedMd5: 'nope' }),
+      placeExclusive(dir, () => 'a.pdf', source('hello'), { expected: md5Hash('nope') }),
     ).rejects.toBeInstanceOf(ChecksumMismatchError);
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('removes the temp file on a size mismatch', async () => {
+    await expect(
+      placeExclusive(dir, () => 'a.pdf', source('hello'), { expectedSize: 4 }),
+    ).rejects.toBeInstanceOf(SizeMismatchError);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('verifies a non-md5 remote hash with the injected digester, md5 still returned', async () => {
+    const digesters = () => ({ update: () => {}, digest: () => 'QX' });
+    const out = await placeExclusive(dir, () => 'a.pdf', source('hello'), {
+      expected: { kind: 'quickXor', value: 'QX' },
+      digesters,
+    });
+    expect(out.md5).toBe(md5('hello'));
+    await expect(
+      placeExclusive(dir, () => 'b.pdf', source('hello'), {
+        expected: { kind: 'quickXor', value: 'other' },
+        digesters,
+      }),
+    ).rejects.toThrow('expected quickXor other, got QX');
+    expect(await leftovers()).toEqual([]);
   });
 
   it('falls back to exists-check + rename where hard links are unsupported', async () => {
@@ -84,7 +113,7 @@ describe('downloadReplace', () => {
     await writeFile(target, 'old');
     const res = await downloadReplace(target, source('new'), {
       expect: await statOf(target),
-      expectedMd5: md5('new'),
+      expected: md5Hash(md5('new')),
     });
     expect(res).toEqual({ md5: md5('new'), size: 3 });
     expect(await readFile(target, 'utf8')).toBe('new');
@@ -97,7 +126,7 @@ describe('downloadReplace', () => {
     const expect0 = await statOf(target);
     await writeFile(target, 'edited!');
     await expect(
-      downloadReplace(target, source('new'), { expect: expect0, expectedMd5: null }),
+      downloadReplace(target, source('new'), { expect: expect0 }),
     ).rejects.toBeInstanceOf(TargetChangedError);
     expect(await readFile(target, 'utf8')).toBe('edited!');
   });
@@ -110,10 +139,20 @@ describe('downloadReplace', () => {
       await writeFile(target, 'edited during download');
       return Readable.from([Buffer.from('new')]);
     };
-    await expect(
-      downloadReplace(target, racing, { expect: expect0, expectedMd5: null }),
-    ).rejects.toBeInstanceOf(TargetChangedError);
+    await expect(downloadReplace(target, racing, { expect: expect0 })).rejects.toBeInstanceOf(
+      TargetChangedError,
+    );
     expect(await readFile(target, 'utf8')).toBe('edited during download');
+    expect(await leftovers()).toEqual([]);
+  });
+
+  it('keeps the old file on a size mismatch', async () => {
+    const target = path.join(dir, 'a.pdf');
+    await writeFile(target, 'old');
+    await expect(
+      downloadReplace(target, source('new'), { expect: await statOf(target), expectedSize: 9 }),
+    ).rejects.toBeInstanceOf(SizeMismatchError);
+    expect(await readFile(target, 'utf8')).toBe('old');
     expect(await leftovers()).toEqual([]);
   });
 
@@ -121,7 +160,10 @@ describe('downloadReplace', () => {
     const target = path.join(dir, 'a.pdf');
     await writeFile(target, 'old');
     await expect(
-      downloadReplace(target, source('new'), { expect: await statOf(target), expectedMd5: 'x' }),
+      downloadReplace(target, source('new'), {
+        expect: await statOf(target),
+        expected: md5Hash('x'),
+      }),
     ).rejects.toBeInstanceOf(ChecksumMismatchError);
     expect(await readFile(target, 'utf8')).toBe('old');
   });

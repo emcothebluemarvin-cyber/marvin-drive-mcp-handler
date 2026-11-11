@@ -512,6 +512,19 @@ describe('Executor', () => {
     expect(saves).toEqual([]);
   });
 
+  it('fails a download whose size differs from the remote size; nothing is placed', async () => {
+    serve('R');
+    const r = remote('r1', 'a.pdf', 'R', { size: 7 });
+    const out = await executor(pairFile([], ['a.pdf'])).run([
+      action('download-new', 'a.pdf', { remote: r }),
+    ]);
+    expect(out[0]).toMatchObject({
+      status: 'failed',
+      message: expect.stringMatching(/7 bytes, got 1/),
+    });
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   it('isolates failures and aborts on run-ending errors', async () => {
     const a = await put('a.pdf', 'A');
     const b = await put('b.pdf', 'B');

@@ -63,7 +63,7 @@ export async function exportOver(
 ): Promise<{ md5: string; size: number }> {
   const current = await reread(host, remote);
   return host.remote.exportNative(current, planOf(remote), (open) =>
-    downloadReplace(abs, open, { expect, expectedMd5: null }),
+    downloadReplace(abs, open, { expect }),
   );
 }
 
