@@ -139,6 +139,45 @@ describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
   });
 });
 
+describe('OneDrive release: the item vanishes between select and apply', () => {
+  /** A service whose remote hides or removes A right before release re-reads it. */
+  function vanishing(how: 'hide' | 'remove'): SyncService {
+    return new SyncService({
+      runner: createRunner(createFakeDrive()),
+      audit: createAudit(),
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      clock: () => new Date('2026-11-12T12:00:00.000Z'),
+      trash: { trash: (abs) => trash.trash(abs) },
+      openOneDrive: async (ref) => {
+        if (ref !== 'ms') return null;
+        const remote = od.remote();
+        const get = remote.get.bind(remote);
+        remote.get = async (id, signal) => {
+          if (id === 'A' && od.items.has('A')) od[how]('A');
+          return get(id, signal);
+        };
+        return remote;
+      },
+    });
+  }
+
+  it.each(['hide', 'remove'] as const)(
+    '%s: failed, local file kept, record unchanged',
+    async (how) => {
+      await tracked();
+      const result = await vanishing(how).release({ name: 'docs', paths: ['a.txt'], apply: true });
+      expect(result.released).toEqual([]);
+      expect(result.failed).toEqual([{ path: 'a.txt', reason: 'a.txt not found on OneDrive' }]);
+      expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+      expect(await readdir(trashDir)).toEqual([]);
+      const { records } = await store.load('docs');
+      expect(records.find((r) => r.path === 'a.txt')?.remoteOnly).toBe(false);
+    },
+  );
+});
+
 describe('OneDrive deletion evidence (spec §4.1)', () => {
   it('404 with feed evidence: B10 moves the unchanged local copy to the trash', async () => {
     await tracked();
