@@ -116,6 +116,46 @@ interface DeletionFeed {
 }
 ```
 
+**As built** (accepted deviations, recorded after implementation; the plan's Chunk 1 and
+Chunk 3 decisions have the details):
+
+- The port has an extra `account` (the resolved alias, for `pair.account` and audit records)
+  and `read(id)`, which is `get` but throws the provider's `NotFoundError` /
+  `PermissionDeniedError` instead of returning null (`checkRoots` and `createPair` use it).
+- `download(id, consume)` and `exportNative(source, plan, consume)` run a `consume(open)`
+  callback inside one retried operation instead of returning a `Readable`, so a retry reopens
+  the stream.
+- `readNative(id)` returns an opaque `NativeSource`; the Google remote keeps the Drive file
+  (export links) for `exportNative`. OneDrive throws `ValidationError` from both.
+- Google `findChildren` for files reads one page of 100 exact-name results (the old
+  duplicate-upload query); folders are paged and filtered by fold key.
+- `remoteFor(pair)` is async and picks the provider from the pair's account at run time; the
+  pair file does not store the provider.
+- A null or expired cursor is restarted at feed-read time, before the scan, not at the
+  executor's first save; the new cursor is still saved together with the evidence. A 400, a
+  link that fails the page-link check, or a chain without `@odata.deltaLink` also count as
+  expired. Other feed errors fail the run and keep the old cursor.
+- `sync_scan` does not read the feed (it neither probes nor plans); `sync_release` reads it
+  and never persists. Ids a probe sees present leave `E` at once, before later probes.
+- On a case-sensitive volume a case-only folder mismatch stays an `ambiguous` note on OneDrive
+  too (U1 and B11 re-uploads), instead of reusing the remote spelling (§4.3 last bullet):
+  the recorded key would never resolve locally again. Upload folders do compare by fold key
+  on OneDrive on every volume.
+- `ReauthRequiredError` already stopped Google runs; only `OneDriveFullError` was added to the
+  aborting errors.
+- The executor's and release's re-reads use `get` on both providers; null is a skip
+  (`TargetChangedError`). A trash-remote whose item is already gone drops the record only
+  with deletion evidence (defence; unreachable in a real run).
+- A Graph 412 is mapped inside `OneDriveSyncRemote` to the engine's `TargetChangedError`.
+- `OneDriveSyncRemote` checks `signal?.throwIfAborted()` before its reads (GraphClient has no
+  cancellation). The OneDrive pair root `root` is stored as the drive root's real id.
+- `RemoteEntry` carries the OneDrive eTag (`version`), and the re-read compares it for files
+  without a hash. Conflict copies are named "(OneDrive conflict …)" on OneDrive pairs.
+- Name lengths count UTF-16 units; a pair-relative path of 400 units or more is
+  `remote-name-invalid`.
+- The cloud folder guard (§6) also stops scans, runs and releases of an existing pair inside a
+  cloud folder (listed with a warning), not only creation and `repair-marker`.
+
 The port owns transport, retries and error mapping; the engine keeps every decision and every
 audit record. `findChildren` lists the parent's children (paged) and filters by fold key, the
 same comparison `ensureRemoteFolder` and `findDuplicateUpload` make today. There is no path
