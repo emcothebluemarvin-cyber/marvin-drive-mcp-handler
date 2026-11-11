@@ -1,5 +1,5 @@
 import type { ExportFormat } from '../files/export-formats.js';
-import type { RemoteUnsupported } from './remote/sync-remote.js';
+import type { ContentHash, RemoteUnsupported } from './remote/sync-remote.js';
 
 /** Pair names: lower-case letters, digits and dashes (spec §3). */
 export const PAIR_NAME = /^[a-z0-9-]{1,40}$/;
@@ -48,7 +48,8 @@ export interface SyncRecord {
   localSize: number;
   localMtimeMs: number;
   localCtimeMs: number;
-  remoteMd5: string | null;
+  /** The remote's hash at the last sync (md5 on Google); null when it reported none. */
+  remoteHash: ContentHash | null;
   remoteSize: number | null;
   remoteModifiedTime: string;
   native: null | { mimeType: string; exportFormat: ExportFormat };
@@ -58,7 +59,7 @@ export interface SyncRecord {
 }
 
 export interface PairFile {
-  version: 1;
+  version: 2;
   pair: Pair;
   records: SyncRecord[];
 }
@@ -108,7 +109,8 @@ export interface RemoteEntry {
   /** Folder ids from the parent up to the pair root (inclusive). */
   ancestorIds: string[];
   mimeType: string;
-  md5: string | null;
+  /** Content hash of a binary file; null for natives and when the remote reports none. */
+  hash: ContentHash | null;
   size: number | null;
   modifiedTime: string;
   createdTime: string;

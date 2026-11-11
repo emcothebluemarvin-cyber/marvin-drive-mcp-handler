@@ -39,7 +39,7 @@ describe('scanRemote', () => {
     expect(scan.entries[1]).toMatchObject({
       canEdit: false,
       canTrash: false,
-      md5: 'md5-b',
+      hash: { kind: 'md5', value: 'md5-b' },
       size: 10,
     });
     expect([...scan.folders.entries()]).toEqual([
@@ -107,7 +107,7 @@ describe('scanRemote', () => {
       ),
     );
     expect(
-      scan.entries.map((e) => [e.id, e.key, e.name, e.md5, e.size, e.native?.exportFormat]),
+      scan.entries.map((e) => [e.id, e.key, e.name, e.hash, e.size, e.native?.exportFormat]),
     ).toEqual([
       ['s', 'Budget.csv', 'Budget', null, null, 'csv'],
       ['g', 'Plan.docx', 'Plan', null, null, 'docx'],

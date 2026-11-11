@@ -52,6 +52,32 @@ describe('PairStore', () => {
     expect((await store().load('docs')).pair.nativeBaselineDone).toBe(false);
   });
 
+  it('loads a version-1 file (remoteMd5) as version 2 and saves it as version 2', async () => {
+    const file = makePairFile({}, [record('r1', 'a.pdf'), record('r2', 'b.pdf')]);
+    const v1 = {
+      ...file,
+      version: 1,
+      records: file.records.map(({ remoteHash, ...r }, i) => ({
+        ...r,
+        remoteMd5: i === 0 ? (remoteHash?.value ?? null) : null,
+      })),
+    };
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
+    const s = store();
+    const loaded = await s.load('docs');
+    expect(loaded.version).toBe(2);
+    expect(loaded.records.map((r) => r.remoteHash)).toEqual([
+      { kind: 'md5', value: 'md5-r1' },
+      null,
+    ]);
+    expect(loaded.records[0]).not.toHaveProperty('remoteMd5');
+    await s.save(loaded);
+    const saved = JSON.parse(await readFile(path.join(dir, 'docs.json'), 'utf8'));
+    expect(saved.version).toBe(2);
+    expect(saved.records[0].remoteHash).toEqual({ kind: 'md5', value: 'md5-r1' });
+  });
+
   it('tightens an existing sync dir to 0700', async () => {
     await mkdir(dir, { recursive: true });
     await chmod(dir, 0o755);

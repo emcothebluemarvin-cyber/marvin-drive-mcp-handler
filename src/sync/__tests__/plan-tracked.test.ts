@@ -276,7 +276,7 @@ describe('binary tracked records (spec §6.4)', () => {
   it('warns weak-compare when Drive has no md5', () => {
     const result = run(
       { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
-      { ...K, remoteMd5: null },
+      { ...K, remoteHash: null },
     );
     expect(result.notes.map((n) => n.code)).toEqual(['weak-compare']);
   });

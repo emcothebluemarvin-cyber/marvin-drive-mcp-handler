@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
-import { md5Of, remoteUnchangedSince } from './content-compare.js';
+import { md5Of, md5Value, remoteUnchangedSince } from './content-compare.js';
 import {
   CollisionError,
   LocalEditKeptError,
@@ -290,12 +290,13 @@ export class Executor {
       uploaded = adopted;
     }
     const remote = fromRemote(uploaded, parentId);
+    const uploadedMd5 = md5Value(remote.hash);
     const warning =
-      remote.md5 !== null && remote.md5 !== planned ? 'changed-during-upload' : undefined;
+      uploadedMd5 !== null && uploadedMd5 !== planned ? 'changed-during-upload' : undefined;
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, remote.md5 ?? planned), remote),
+        makeRecord(action.key, this.localFields(local, uploadedMd5 ?? planned), remote),
         action.rebaseFrom,
       ),
     );
@@ -334,12 +335,13 @@ export class Executor {
     const abs = absInside(this.pair.localDir, local.name);
     const updated = await this.deps.remote.replaceContent(current, abs);
     const fields = fromRemote(updated, remote.parentId);
+    const updatedMd5 = md5Value(fields.hash);
     const warning =
-      fields.md5 !== null && fields.md5 !== planned ? 'changed-during-upload' : undefined;
+      updatedMd5 !== null && updatedMd5 !== planned ? 'changed-during-upload' : undefined;
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
+        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
       ),
     );
     await this.audit('sync_update', action, remote.id);
@@ -378,7 +380,7 @@ export class Executor {
     const written = remote.native
       ? await exportOver(this.host(), to, expect, remote)
       : await this.deps.remote.download(remote.id, (open) =>
-          downloadReplace(to, open, { expect, expectedMd5: remote.md5 }),
+          downloadReplace(to, open, { expect, expectedMd5: md5Value(remote.hash) }),
         );
     const after = await this.statFields(action.key, written.md5);
     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
@@ -392,7 +394,7 @@ export class Executor {
     const abs = await prepareParent(this.pair.localDir, action.key);
     const written = await this.deps.remote.download(remote.id, (open) =>
       placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
-        expectedMd5: remote.md5,
+        expectedMd5: md5Value(remote.hash),
       }),
     );
     const local = await this.statFields(action.key, written.md5);
@@ -408,7 +410,7 @@ export class Executor {
     const remote = need(action.remote, 'remote');
     const abs = absInside(this.pair.localDir, local.name);
     const written = await this.deps.remote.download(remote.id, (open) =>
-      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: remote.md5 }),
+      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: md5Value(remote.hash) }),
     );
     const after = await this.statFields(local.name, written.md5);
     await this.commit(action, () =>
@@ -428,7 +430,7 @@ export class Executor {
     const base = path.basename(abs);
     const copy = await this.deps.remote.download(remote.id, (open) =>
       placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
-        expectedMd5: remote.md5,
+        expectedMd5: md5Value(remote.hash),
         maxAttempts: MAX_CONFLICT_NAMES,
       }),
     );
@@ -439,7 +441,7 @@ export class Executor {
       await this.commit(action, () =>
         putRecord(this.file, {
           ...record,
-          remoteMd5: remote.md5,
+          remoteHash: remote.hash,
           remoteSize: remote.size,
           remoteModifiedTime: remote.modifiedTime,
           remoteName: remote.name,
@@ -451,16 +453,17 @@ export class Executor {
     const current = await this.verifyRemote(remote);
     const updated = await this.deps.remote.replaceContent(current, abs);
     const fields = fromRemote(updated, remote.parentId);
+    const updatedMd5 = md5Value(fields.hash);
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
+        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
       ),
     );
     await this.audit('sync_update', action, remote.id);
     return {
       conflictCopy,
-      ...(fields.md5 !== null && fields.md5 !== planned
+      ...(updatedMd5 !== null && updatedMd5 !== planned
         ? { warning: 'changed-during-upload' }
         : {}),
     };

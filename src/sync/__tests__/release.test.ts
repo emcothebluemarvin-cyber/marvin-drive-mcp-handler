@@ -154,7 +154,7 @@ describe('applyRelease re-reads R through the remote', () => {
     const drive = createFakeDrive();
     drive.getFile.mockResolvedValueOnce({
       ...binary('r1', 'a.pdf', 'elsewhere'),
-      md5Checksum: RA.md5 ?? undefined,
+      md5Checksum: RA.hash?.value,
       modifiedTime: RA.modifiedTime,
     });
     const saves: unknown[] = [];

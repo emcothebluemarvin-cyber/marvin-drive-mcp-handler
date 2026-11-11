@@ -40,7 +40,7 @@ describe('remoteChanged', () => {
 describe('remoteUnchangedSince', () => {
   it('binary needs md5 and modifiedTime equal', () => {
     const r = remoteEntry('r1', 'a.pdf');
-    const md5Checksum = r.md5 ?? undefined;
+    const md5Checksum = r.hash?.value;
     expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: r.modifiedTime }))).toBe(true);
     expect(remoteUnchangedSince(r, item({ md5Checksum: 'x', modifiedTime: r.modifiedTime }))).toBe(
       false,
@@ -58,7 +58,7 @@ describe('localMatchesRemote', () => {
     const r = remoteEntry('r1', 'a.pdf');
     expect(localMatchesRemote('md5-r1', null, r)).toBe(true);
     expect(localMatchesRemote('other', null, r)).toBe(false);
-    expect(localMatchesRemote('md5-r1', null, { ...r, md5: null })).toBe(false);
+    expect(localMatchesRemote('md5-r1', null, { ...r, hash: null })).toBe(false);
   });
   it('native: local md5 = md5 of the last export (record required)', () => {
     const k = nativeRecord('g1', 'Plan.docx', { localMd5: 'export-md5' });

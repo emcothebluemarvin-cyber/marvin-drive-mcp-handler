@@ -37,7 +37,7 @@ export function toRemoteEntry(
     parentId,
     ancestorIds,
     mimeType: item.mimeType,
-    md5: native || item.hash?.kind !== 'md5' ? null : item.hash.value,
+    hash: native ? null : item.hash,
     size: native ? null : item.size,
     modifiedTime: item.modifiedTime,
     createdTime: item.createdTime,

@@ -147,7 +147,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       firstAppliedRunAt: null,
       nativeBaselineDone: false,
     };
-    const file: PairFile = { version: 1, pair, records: [] };
+    const file: PairFile = { version: 2, pair, records: [] };
     await env.store.save(file);
     return summarize(file);
   });

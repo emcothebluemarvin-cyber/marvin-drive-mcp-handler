@@ -66,7 +66,11 @@ describe('remote-only records (spec §6.7)', () => {
     expect(
       run({ remote: [remoteEntry('r1', 'a.pdf', { md5: 'new', modifiedTime: NEWER })] }).actions,
     ).toMatchObject([
-      { kind: 'refresh', rule: 'O3', patch: { remoteMd5: 'new', remoteModifiedTime: NEWER } },
+      {
+        kind: 'refresh',
+        rule: 'O3',
+        patch: { remoteHash: { kind: 'md5', value: 'new' }, remoteModifiedTime: NEWER },
+      },
     ]);
   });
   it('a released Google Doc modified in Drive is never exported', () => {

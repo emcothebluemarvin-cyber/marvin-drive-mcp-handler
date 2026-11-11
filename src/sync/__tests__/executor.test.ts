@@ -239,7 +239,7 @@ describe('Executor', () => {
     expect(out[0]?.warning).toBe('changed-during-upload');
     expect(file.records[0]).toMatchObject({
       localMd5: 'other',
-      remoteMd5: 'other',
+      remoteHash: { kind: 'md5', value: 'other' },
       localSize: l.size,
     });
   });
@@ -287,7 +287,7 @@ describe('Executor', () => {
     const r = remote('r1', 'a.pdf', 'R');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
     });
     drive.updateFile.mockResolvedValueOnce({
@@ -308,7 +308,7 @@ describe('Executor', () => {
     expect(drive.updateFile.mock.calls[0]?.[0]).toMatchObject({ fileId: 'r1' });
     expect(file.records[0]).toMatchObject({
       localMd5: md5('local edit'),
-      remoteMd5: md5('local edit'),
+      remoteHash: { kind: 'md5', value: md5('local edit') },
       remoteModifiedTime: 'new',
     });
   });
@@ -369,11 +369,11 @@ describe('Executor', () => {
     expect(file.records[0]).toMatchObject({
       path: 'sub/b.pdf',
       localMd5: md5('new'),
-      remoteMd5: md5('new'),
+      remoteHash: { kind: 'md5', value: md5('new') },
       remoteParentId: 'F',
     });
     expect(saves).toHaveLength(2);
-    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteMd5: k.remoteMd5 });
+    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteHash: k.remoteHash });
   });
 
   it('places the conflict copy before uploading L (spec §6.9)', async () => {
@@ -382,7 +382,7 @@ describe('Executor', () => {
     serve('remote edit');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
     });
     drive.updateFile.mockResolvedValueOnce({
@@ -410,7 +410,7 @@ describe('Executor', () => {
     );
     expect(file.records[0]).toMatchObject({
       localMd5: md5('local edit'),
-      remoteMd5: md5('local edit'),
+      remoteHash: { kind: 'md5', value: md5('local edit') },
     });
     expect(file.pair.selection).toEqual(['a.pdf']);
   });
@@ -573,7 +573,7 @@ describe('Executor (review regressions)', () => {
     const k = record('r1', 'a.pdf');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: '2026-11-03T09:00:00.000Z',
       parents: [ROOT_ID],
     });
@@ -589,7 +589,7 @@ describe('Executor (review regressions)', () => {
     const r = remote('r2', 'moved.pdf', 'M');
     drive.getFile.mockResolvedValueOnce({
       id: 'r2',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
       parents: ['ELSEWHERE'],
     });
@@ -684,7 +684,7 @@ describe('Executor exports (Google-native)', () => {
         path: 'Plan.docx',
         remoteName: 'Plan',
         localMd5: md5('DOCX v1'),
-        remoteMd5: null,
+        remoteHash: null,
         native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx' },
       },
     ]);

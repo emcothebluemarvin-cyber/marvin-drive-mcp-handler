@@ -68,7 +68,7 @@ describe('probeRecord', () => {
     const doc = { ...binary('r', 'Plan', 'f1'), mimeType: GOOGLE_MIME.document };
     expect(await probeRecord('r', scan(), getter({ r: doc }))).toMatchObject({
       state: 'present',
-      entry: { key: 'docs/Plan.docx', md5: null, native: { exportFormat: 'docx' } },
+      entry: { key: 'docs/Plan.docx', hash: null, native: { exportFormat: 'docx' } },
     });
     const form = { ...binary('r', 'Survey', 'f1'), mimeType: 'application/vnd.google-apps.form' };
     expect(await probeRecord('r', scan(), getter({ r: form }))).toEqual({

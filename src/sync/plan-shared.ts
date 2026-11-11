@@ -1,3 +1,4 @@
+import { sameHashOrNone } from './content-compare.js';
 import { foldKey } from './paths.js';
 import { isExcluded, type PlanContext } from './resolve.js';
 import type {
@@ -76,7 +77,7 @@ export function needsRefresh(record: SyncRecord, entry: LocalEntry, remote: Remo
     entry.ctimeMs !== record.localCtimeMs ||
     remote.name !== record.remoteName ||
     remote.parentId !== record.remoteParentId ||
-    remote.md5 !== record.remoteMd5 ||
+    !sameHashOrNone(remote.hash, record.remoteHash) ||
     remote.size !== record.remoteSize ||
     remote.modifiedTime !== record.remoteModifiedTime
   );

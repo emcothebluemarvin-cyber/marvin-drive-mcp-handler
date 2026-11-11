@@ -40,7 +40,7 @@ export function brakeFor(actions: readonly Action[], tracked: number): BrakeInfo
 }
 
 /**
- * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote md5)` list of
+ * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote kind:hash)` list of
  * every non-refresh action — no generated names or timestamps (spec §5 step 5).
  */
 export function computePlanId(actions: readonly Action[]): string {
@@ -52,7 +52,7 @@ export function computePlanId(actions: readonly Action[]): string {
         a.record?.remoteId ?? a.remote?.id ?? '',
         a.key,
         a.localMd5 ?? '',
-        a.remote?.md5 ?? '',
+        a.remote?.hash ? `${a.remote.hash.kind}:${a.remote.hash.value}` : '',
       ]),
     )
     .sort();

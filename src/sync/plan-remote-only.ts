@@ -1,4 +1,4 @@
-import { localMatchesRemote, remoteChanged } from './content-compare.js';
+import { localMatchesRemote, remoteChanged, sameHashOrNone } from './content-compare.js';
 import { foldKey } from './paths.js';
 import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
 import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
@@ -13,7 +13,7 @@ function remotePatch(record: SyncRecord, remote: RemoteEntry): Partial<SyncRecor
   const patch: Partial<SyncRecord> = {};
   if (remote.name !== record.remoteName) patch.remoteName = remote.name;
   if (remote.parentId !== record.remoteParentId) patch.remoteParentId = remote.parentId;
-  if (remote.md5 !== record.remoteMd5) patch.remoteMd5 = remote.md5;
+  if (!sameHashOrNone(remote.hash, record.remoteHash)) patch.remoteHash = remote.hash;
   if (remote.size !== record.remoteSize) patch.remoteSize = remote.size;
   if (remote.native === null && remote.modifiedTime !== record.remoteModifiedTime) {
     patch.remoteModifiedTime = remote.modifiedTime;

@@ -261,7 +261,7 @@ describe('select', () => {
       localSize: 1,
       localMtimeMs: 1,
       localCtimeMs: 1,
-      remoteMd5: 'x',
+      remoteHash: { kind: 'md5', value: 'x' },
       remoteSize: 1,
       remoteModifiedTime: 't',
       native: null,

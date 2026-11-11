@@ -1,4 +1,4 @@
-import { localMatchesRemote, remoteChanged } from './content-compare.js';
+import { localMatchesRemote, md5Value, remoteChanged } from './content-compare.js';
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
 import { planRemoteOnly } from './plan-remote-only.js';
@@ -84,7 +84,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
     const others = (ctx.remoteByFold.get(foldKey(record.path)) ?? []).filter(
       (r) => !ctx.trackedIds.has(r.id),
     );
-    const reuploaded = others.find((r) => r.md5 !== null && r.md5 === lMd5);
+    const reuploaded = others.find((r) => lMd5 !== null && md5Value(r.hash) === lMd5);
     if (reuploaded)
       return act({
         ...base,

@@ -1,7 +1,6 @@
 import { ValidationError } from '../errors.js';
-import { md5Of } from './content-compare.js';
 import { foldKey } from './paths.js';
-import type { RemoteItem } from './remote/sync-remote.js';
+import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
 import type { StatExpect } from './transfer.js';
 import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
 
@@ -9,7 +8,7 @@ export interface RemoteFields {
   id: string;
   name: string;
   parentId: string;
-  md5: string | null;
+  hash: ContentHash | null;
   size: number | null;
   modifiedTime: string;
   native: SyncRecord['native'];
@@ -28,7 +27,7 @@ export function fromEntry(e: RemoteEntry): RemoteFields {
     id: e.id,
     name: e.name,
     parentId: e.parentId,
-    md5: e.md5,
+    hash: e.hash,
     size: e.size,
     modifiedTime: e.modifiedTime,
     native: e.native ? { mimeType: e.native.mimeType, exportFormat: e.native.exportFormat } : null,
@@ -41,7 +40,7 @@ export function fromRemote(item: RemoteItem, fallbackParent: string): RemoteFiel
     id: item.id,
     name: item.name,
     parentId: item.parentId ?? fallbackParent,
-    md5: md5Of(item),
+    hash: item.hash,
     size: item.size,
     modifiedTime: item.modifiedTime,
     // Uploads are binary files.
@@ -64,7 +63,7 @@ export function makeRecord(key: string, local: LocalFields, remote: RemoteFields
     localSize: local.size,
     localMtimeMs: local.mtimeMs,
     localCtimeMs: local.ctimeMs,
-    remoteMd5: remote.md5,
+    remoteHash: remote.hash,
     remoteSize: remote.size,
     remoteModifiedTime: remote.modifiedTime,
     native: remote.native,
