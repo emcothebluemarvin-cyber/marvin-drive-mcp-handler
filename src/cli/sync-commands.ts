@@ -15,7 +15,7 @@ export interface SyncCliDeps {
 export function registerSyncCommands(program: Command, deps: SyncCliDeps): void {
   const sync = program
     .command('sync')
-    .description('Selective two-way sync between local and Drive folders');
+    .description('Selective two-way sync between local and Drive / OneDrive folders');
 
   sync
     .command('list')
