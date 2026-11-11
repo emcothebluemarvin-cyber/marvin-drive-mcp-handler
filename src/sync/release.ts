@@ -5,7 +5,7 @@ import { AppError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from './content-compare.js';
 import { isAbortError, messageOf, PersistenceError, TargetChangedError } from './errors.js';
-import { md5File } from './local-scanner.js';
+import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
 import type { SyncRemote } from './remote/sync-remote.js';
@@ -158,6 +158,8 @@ export async function withoutTrash(
 export interface ReleaseDeps {
   /** The pair's remote. */
   remote: SyncRemote;
+  /** Local digests of the remote's hash kind (default: built-in digesters). */
+  digesters?: DigesterFactory;
   audit: AuditSink;
   logger: Logger;
   trash: LocalTrash;
@@ -182,15 +184,21 @@ async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<vo
   }
 }
 
-/** Present: L re-hashed must equal the record (binary: and R's md5) — never trash an edit. */
-async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
+/**
+ * Present: L re-hashed must equal the record (md5) and, for a binary file, R's hash in R's
+ * kind — never trash an edit.
+ */
+async function verifyLocal(deps: ReleaseDeps, abs: string, c: ReleaseCandidate): Promise<void> {
   const key = c.record.path;
-  const md5 = await md5File(abs).catch((err: unknown) => {
+  const digests = await hashFileDigests(
+    abs,
+    deps.remote.hashKind,
+    deps.digesters ?? defaultDigesters,
+  ).catch((err: unknown) => {
     if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
     throw err;
   });
-  const digests = { md5, remote: { kind: 'md5' as const, value: md5 } };
-  if (md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
+  if (digests.md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
     throw new TargetChangedError(`${key} changed locally since the scan`);
   }
 }
@@ -281,7 +289,7 @@ export async function applyRelease(
       if (c.kind === 'present') {
         name = c.localName ?? key;
         abs = absInside(pair.localDir, name);
-        await verifyLocal(abs, c);
+        await verifyLocal(deps, abs, c);
       } else {
         await assertStillAbsent(pair, key);
       }

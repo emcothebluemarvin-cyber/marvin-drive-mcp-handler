@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import type { SyncRemote } from '../remote/sync-remote.js';
 import { createAudit, createFakeDrive, silentLogger } from '../../files/__tests__/fakes.js';
 import { applyRelease, selectReleasable, type ReleaseSelection } from '../release.js';
 import { binary } from './drive-tree.js';
@@ -8,6 +13,7 @@ import {
   makePairFile,
   nativeEntry,
   nativeRecord,
+  dirTrash,
   record,
   refuseTrash,
   remoteEntry,
@@ -177,5 +183,59 @@ describe('applyRelease re-reads R through the remote', () => {
     ]);
     expect(saves).toEqual([]);
     expect(drive.getFile).toHaveBeenCalledWith('r1', expect.stringContaining('md5Checksum'));
+  });
+});
+
+describe('applyRelease re-hashes L with the remote hash kind (spec §3.1)', () => {
+  const md5 = (t: string): string => createHash('md5').update(t).digest('hex');
+  const qx = (t: string): string => `QX-${md5(t)}`;
+  const digesters = () => {
+    const h = createHash('md5');
+    return { update: (c: Buffer) => void h.update(c), digest: () => `QX-${h.digest('hex')}` };
+  };
+
+  async function releaseOnQuickXor(localContent: string) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-'));
+    const trashDir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-trash-'));
+    try {
+      await writeFile(path.join(dir, 'a.pdf'), localContent);
+      const remote = remoteEntry('r1', 'a.pdf', { hash: { kind: 'quickXor', value: qx('hello') } });
+      const rec = record('r1', 'a.pdf', { localMd5: md5('hello'), remoteHash: remote.hash });
+      const drive = createFakeDrive();
+      drive.getFile.mockResolvedValueOnce(binary('r1', 'a.pdf', remote.parentId));
+      const inner = googleRemoteOver(drive);
+      const fake = Object.assign(Object.create(inner) as SyncRemote, {
+        hashKind: 'quickXor' as const,
+        read: async () => ({ ...(await inner.read('r1')), hash: remote.hash }),
+      });
+      const out = await applyRelease(
+        {
+          remote: fake,
+          digesters,
+          audit: createAudit(),
+          logger: silentLogger(),
+          trash: dirTrash(trashDir),
+          save: async () => {},
+        },
+        makePairFile({ localDir: dir }, [rec]),
+        [{ record: rec, remote, kind: 'present', localName: 'a.pdf' }],
+      );
+      return { out, left: await readdir(dir) };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(trashDir, { recursive: true, force: true });
+    }
+  }
+
+  it('releases when the local quickXor digest equals the remote hash', async () => {
+    const { out, left } = await releaseOnQuickXor('hello');
+    expect(out.released).toEqual([{ path: 'a.pdf', status: 'released' }]);
+    expect(left).toEqual([]);
+  });
+
+  it('refuses when the local content changed', async () => {
+    const { out, left } = await releaseOnQuickXor('edited');
+    expect(out.failed).toEqual([{ path: 'a.pdf', reason: 'a.pdf changed locally since the scan' }]);
+    expect(left).toEqual(['a.pdf']);
   });
 });

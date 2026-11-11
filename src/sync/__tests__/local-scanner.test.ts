@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
-import { hashFileDigests, hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
+import { hashFileDigests, hashLocal, probeOnDisk, scanLocal } from '../local-scanner.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 const isRoot = process.getuid?.() === 0;
@@ -115,7 +115,6 @@ describe('hashing', () => {
   it('computes md5 and reports failures', async () => {
     await writeFile(path.join(root, 'a.txt'), 'hello');
     const expected = createHash('md5').update('hello').digest('hex');
-    expect(await md5File(path.join(root, 'a.txt'))).toBe(expected);
     const { digests, failed } = await hashLocal(root, ['a.txt', 'gone.txt'], 'md5');
     expect(digests.get('a.txt')).toEqual({
       md5: expected,

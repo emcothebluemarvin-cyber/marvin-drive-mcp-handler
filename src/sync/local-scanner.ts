@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { createReadStream, type Stats } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { ValidationError, hasErrorCode } from '../errors.js';
 import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
 import type { HashKind } from './remote/sync-remote.js';
@@ -178,12 +177,6 @@ async function blockedByNonDirectory(
     }
   }
   return false;
-}
-
-export async function md5File(abs: string): Promise<string> {
-  const hash = createHash('md5');
-  await pipeline(createReadStream(abs), hash);
-  return hash.digest('hex');
 }
 
 /** Digests of the given on-disk relative names; failures are returned, not thrown. */

@@ -209,6 +209,7 @@ export class SyncService {
       const executor = new Executor(
         {
           remote: this.env.remoteFor(file.pair),
+          digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,
           clock: this.clock,
@@ -286,6 +287,7 @@ export class SyncService {
       const done = await applyRelease(
         {
           remote: this.env.remoteFor(file.pair),
+          digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,
           trash: this.deps.trash,
