@@ -237,11 +237,46 @@ describe('Executor', () => {
       action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
     ]);
     expect(out[0]?.warning).toBe('changed-during-upload');
+    // localMd5 is always the local md5, never the remote's value (OneDrive sync spec §3.1).
     expect(file.records[0]).toMatchObject({
-      localMd5: 'other',
+      localMd5: md5('hello'),
       remoteHash: { kind: 'md5', value: 'other' },
       localSize: l.size,
     });
+  });
+
+  it('is quiet when the remote reports no hash for the upload', async () => {
+    const l = await put('a.pdf', 'hello');
+    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf' });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]).toEqual({ kind: 'upload-new', path: 'a.pdf', status: 'done' });
+    expect(file.records[0]).toMatchObject({ localMd5: md5('hello'), remoteHash: null });
+  });
+
+  it('does not adopt a same-hash duplicate whose size differs', async () => {
+    const l = await put('a.pdf', 'hello');
+    drive.createFile.mockRejectedValueOnce(httpError(500));
+    drive.listFiles.mockResolvedValueOnce({
+      files: [
+        {
+          id: 'n1',
+          name: 'a.pdf',
+          md5Checksum: md5('hello'),
+          size: '6',
+          createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
+          parents: [ROOT_ID],
+        },
+      ],
+    });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]?.status).toBe('failed');
+    expect(file.records).toEqual([]);
   });
 
   it('adopts its own upload after an ambiguous upload error (duplicate-safe)', async () => {
@@ -253,6 +288,7 @@ describe('Executor', () => {
           id: 'n1',
           name: 'a.pdf',
           md5Checksum: md5('hello'),
+          size: '5',
           createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
           parents: [ROOT_ID],
         },

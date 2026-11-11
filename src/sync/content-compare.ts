@@ -2,11 +2,6 @@ import { ValidationError } from '../errors.js';
 import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
 import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
 
-/** The item's md5, or null when it reports none (or another hash kind). */
-export function md5Of(item: RemoteItem): string | null {
-  return md5Value(item.hash);
-}
-
 /** The value of an md5 hash; null for none or another kind. */
 export function md5Value(hash: ContentHash | null): string | null {
   return hash?.kind === 'md5' ? hash.value : null;

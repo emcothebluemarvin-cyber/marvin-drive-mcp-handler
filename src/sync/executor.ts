@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
-import { md5Of, md5Value, remoteUnchangedSince } from './content-compare.js';
+import { md5Value, remoteUnchangedSince, sameContent } from './content-compare.js';
 import {
   CollisionError,
   LocalEditKeptError,
@@ -23,9 +23,10 @@ import {
   putRecord,
   statOf,
   type LocalFields,
+  type RemoteFields,
 } from './exec-records.js';
 import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-export.js';
-import { md5File } from './local-scanner.js';
+import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
 import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
@@ -35,6 +36,7 @@ import {
   type Action,
   type ActionKind,
   type ActionOutcome,
+  type LocalDigests,
   type LocalEntry,
   type PairFile,
   type RemoteEntry,
@@ -65,6 +67,8 @@ export interface ExecutorDeps {
   save: (file: PairFile) => Promise<void>;
   /** Moves local files to the OS trash (tests pass a fake). */
   trash: LocalTrash;
+  /** Local digests of the remote's hash kind (default: built-in digesters). */
+  digesters?: DigesterFactory;
 }
 
 /** Executes a plan in spec §7 order, persisting the pair file after every success. */
@@ -77,6 +81,10 @@ export class Executor {
     folders: ReadonlyMap<string, string>,
   ) {
     this.folders = new RemoteFolders(deps, file.pair, folders);
+  }
+
+  private get digesters(): DigesterFactory {
+    return this.deps.digesters ?? defaultDigesters;
   }
 
   private get pair(): PairFile['pair'] {
@@ -274,9 +282,24 @@ export class Executor {
 
   // ---- uploads ----------------------------------------------------------------------
 
+  /** The planned local content; actions built without digests carry the md5 alone. */
+  private plannedDigests(action: Action): LocalDigests {
+    if (action.localDigests) return action.localDigests;
+    const md5 = need(action.localMd5, 'local md5');
+    return {
+      md5,
+      remote: this.deps.remote.hashKind === 'md5' ? { kind: 'md5', value: md5 } : null,
+    };
+  }
+
+  /** Only a hash that differs warns; a missing or other-kind hash is not a warning (§3.2). */
+  private changedDuringUpload(planned: LocalDigests, fields: RemoteFields): string | undefined {
+    return sameContent(planned, fields.hash) === false ? 'changed-during-upload' : undefined;
+  }
+
   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const parentId = await this.folders.folderFor(parentKey(action.key));
     const abs = absInside(this.pair.localDir, local.name);
     const name = baseName(action.key);
@@ -285,18 +308,16 @@ export class Executor {
       uploaded = await this.deps.remote.uploadNew(parentId, name, abs);
     } catch (err) {
       if (isAbortError(err)) throw err;
-      const adopted = await this.findDuplicateUpload(parentId, name, planned);
+      const adopted = await this.findDuplicateUpload(parentId, name, planned, local.size);
       if (!adopted) throw err;
       uploaded = adopted;
     }
     const remote = fromRemote(uploaded, parentId);
-    const uploadedMd5 = md5Value(remote.hash);
-    const warning =
-      uploadedMd5 !== null && uploadedMd5 !== planned ? 'changed-during-upload' : undefined;
+    const warning = this.changedDuringUpload(planned, remote);
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, uploadedMd5 ?? planned), remote),
+        makeRecord(action.key, this.localFields(local, planned.md5), remote),
         action.rebaseFrom,
       ),
     );
@@ -304,11 +325,15 @@ export class Executor {
     return warning ? { warning } : {};
   }
 
-  /** After an upload error: a same-name, same-md5 file created within 10 minutes is ours (spec §7). */
+  /**
+   * After an upload error: a same-name file with the planned size and content, created
+   * within 10 minutes, is ours (spec §7; OneDrive sync spec §3.2).
+   */
   private async findDuplicateUpload(
     parentId: string,
     name: string,
-    md5: string,
+    planned: LocalDigests,
+    size: number,
   ): Promise<RemoteItem | null> {
     try {
       const list = await this.deps.remote.findChildren(parentId, name);
@@ -316,7 +341,8 @@ export class Executor {
       return (
         list.find(
           (f) =>
-            md5Of(f) === md5 &&
+            f.size === size &&
+            sameContent(planned, f.hash) === true &&
             f.name === name &&
             Math.abs(now - Date.parse(f.createdTime)) <= DUPLICATE_WINDOW_MS,
         ) ?? null
@@ -329,20 +355,15 @@ export class Executor {
 
   private async updateRemote(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const remote = need(action.remote, 'remote');
     const current = await this.verifyRemote(remote);
     const abs = absInside(this.pair.localDir, local.name);
     const updated = await this.deps.remote.replaceContent(current, abs);
     const fields = fromRemote(updated, remote.parentId);
-    const updatedMd5 = md5Value(fields.hash);
-    const warning =
-      updatedMd5 !== null && updatedMd5 !== planned ? 'changed-during-upload' : undefined;
+    const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
-      putRecord(
-        this.file,
-        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
-      ),
+      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
     );
     await this.audit('sync_update', action, remote.id);
     return warning ? { warning } : {};
@@ -424,7 +445,7 @@ export class Executor {
   private async conflict(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
     const remote = need(action.remote, 'remote');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const abs = absInside(this.pair.localDir, local.name);
     const at = this.deps.clock();
     const base = path.basename(abs);
@@ -453,20 +474,12 @@ export class Executor {
     const current = await this.verifyRemote(remote);
     const updated = await this.deps.remote.replaceContent(current, abs);
     const fields = fromRemote(updated, remote.parentId);
-    const updatedMd5 = md5Value(fields.hash);
+    const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
-      putRecord(
-        this.file,
-        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
-      ),
+      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
     );
     await this.audit('sync_update', action, remote.id);
-    return {
-      conflictCopy,
-      ...(updatedMd5 !== null && updatedMd5 !== planned
-        ? { warning: 'changed-during-upload' }
-        : {}),
-    };
+    return { conflictCopy, ...(warning ? { warning } : {}) };
   }
 
   // ---- deletions --------------------------------------------------------------------
@@ -500,7 +513,7 @@ export class Executor {
     const abs = absInside(this.pair.localDir, local.name);
     let md5: string;
     try {
-      md5 = await md5File(abs);
+      md5 = (await hashFileDigests(abs, 'md5', this.digesters)).md5;
     } catch (err) {
       if (hasErrorCode(err, 'ENOENT'))
         throw new TargetChangedError(`${action.key} is already gone`);
