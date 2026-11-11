@@ -1,8 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { OperationRunner } from '../../core/operation.js';
 import { NotFoundError, QuotaExceededError, ValidationError } from '../../errors.js';
-import { createFakeDrive, httpError } from '../../files/__tests__/fakes.js';
+import {
+  createAudit,
+  createFakeDrive,
+  createRunner,
+  httpError,
+  noSleep,
+} from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { classifyRemote, toRemoteItem, validateGoogleExport } from '../remote/google-remote.js';
+import {
+  GoogleSyncRemote,
+  classifyRemote,
+  toRemoteItem,
+  validateGoogleExport,
+} from '../remote/google-remote.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder } from './drive-tree.js';
 import { googleRemoteOver } from './fake-remote.js';
@@ -90,7 +106,7 @@ describe('GoogleSyncRemote reads (pinned to the Drive calls sync made before the
     });
   });
 
-  it('is the Google remote with md5 hashes', () => {
+  it('is the Google remote with md5 hashes and no deletion feed', () => {
     const remote = googleRemoteOver(createFakeDrive());
     expect([remote.provider, remote.hashKind, remote.rootId, remote.account]).toEqual([
       'google',
@@ -98,6 +114,113 @@ describe('GoogleSyncRemote reads (pinned to the Drive calls sync made before the
       'root',
       'emco',
     ]);
+    expect(remote.deletionFeed()).toBeNull();
+  });
+
+  it('open resolves the account alias through the runner without a Drive call', async () => {
+    const drive = createFakeDrive();
+    const runner = createRunner(drive);
+    const ops = new OperationRunner({ runner, audit: createAudit(), retry: noSleep });
+    const remote = await GoogleSyncRemote.open(ops, undefined, DEFAULT_GOOGLE_EXPORT);
+    expect(remote.account).toBe('emco');
+    expect(runner.refs).toEqual([undefined]);
+  });
+});
+
+describe('GoogleSyncRemote writes and content (pinned)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'sync-gremote-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('createFolder: folder MIME type, the parent, id and name fields', async () => {
+    const drive = createFakeDrive();
+    drive.createFile.mockResolvedValueOnce({ id: 'f9', name: 'docs' });
+    const created = await googleRemoteOver(drive).createFolder('P', 'docs');
+    expect(created).toMatchObject({ id: 'f9', name: 'docs', kind: 'folder', parentId: 'P' });
+    expect(drive.createFile).toHaveBeenCalledWith({
+      requestBody: { name: 'docs', mimeType: GOOGLE_MIME.folder, parents: ['P'] },
+      fields: 'id, name',
+    });
+  });
+
+  it('uploadNew creates the file with media and sync fields', async () => {
+    const drive = createFakeDrive();
+    drive.createFile.mockResolvedValueOnce({ id: 'n1', md5Checksum: 'm' });
+    const abs = path.join(dir, 'a.pdf');
+    await writeFile(abs, 'x');
+    const item = await googleRemoteOver(drive).uploadNew('P', 'a.pdf', abs);
+    expect(item).toMatchObject({ id: 'n1', hash: { kind: 'md5', value: 'm' }, parentId: null });
+    const call = drive.createFile.mock.calls[0]?.[0];
+    expect(call?.requestBody).toEqual({ name: 'a.pdf', parents: ['P'] });
+    expect(call?.media?.mimeType).toBe('application/pdf');
+    expect(call?.fields).toBe(FILE_FIELDS);
+  });
+
+  it('replaceContent sends new media for the same fileId', async () => {
+    const drive = createFakeDrive();
+    drive.updateFile.mockResolvedValueOnce({ id: 'r1' });
+    const abs = path.join(dir, 'a.txt');
+    await writeFile(abs, 'x');
+    const remote = googleRemoteOver(drive);
+    await remote.replaceContent(toRemoteItem({ id: 'r1' }, DEFAULT_GOOGLE_EXPORT), abs);
+    const call = drive.updateFile.mock.calls[0]?.[0];
+    expect(call).toMatchObject({ fileId: 'r1', fields: FILE_FIELDS });
+    expect(call?.media?.mimeType).toBe('text/plain');
+  });
+
+  it('trash sets trashed=true with id and trashed fields', async () => {
+    const drive = createFakeDrive();
+    drive.updateFile.mockResolvedValueOnce({ id: 'r1', trashed: true });
+    await googleRemoteOver(drive).trash(toRemoteItem({ id: 'r1' }, DEFAULT_GOOGLE_EXPORT));
+    expect(drive.updateFile).toHaveBeenCalledWith({
+      fileId: 'r1',
+      requestBody: { trashed: true },
+      fields: 'id, trashed',
+    });
+  });
+
+  it('download reruns the consumer, which opens the media stream, on a retryable error', async () => {
+    const drive = createFakeDrive();
+    drive.downloadMedia.mockImplementation(async () => Readable.from([Buffer.from('abc')]));
+    let attempts = 0;
+    const text = await googleRemoteOver(drive).download('r1', async (open) => {
+      const stream = await open();
+      if (++attempts === 1) throw httpError(503, 'backendError');
+      let out = '';
+      for await (const chunk of stream) out += String(chunk);
+      return out;
+    });
+    expect(text).toBe('abc');
+    expect(attempts).toBe(2);
+    expect(drive.downloadMedia.mock.calls).toEqual([['r1'], ['r1']]);
+  });
+
+  it('readNative reads the export fields; exportNative exports with them', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockResolvedValueOnce({
+      id: 'g1',
+      name: 'Plan',
+      mimeType: GOOGLE_MIME.document,
+      exportLinks: { [DOCX_MIME]: 'https://docs.google.com/x' },
+      webViewLink: 'https://docs.google.com/view',
+    });
+    drive.exportMedia.mockRejectedValueOnce(httpError(403, 'exportSizeLimitExceeded'));
+    drive.fetchExportLink.mockResolvedValueOnce(Readable.from([Buffer.from('big')]));
+    const remote = googleRemoteOver(drive);
+    const source = await remote.readNative('g1');
+    expect(source.item).toMatchObject({ id: 'g1', native: { exportFormat: 'docx' } });
+    expect(drive.getFile).toHaveBeenCalledWith('g1', `${FILE_FIELDS}, exportLinks, webViewLink`);
+    const plan = { format: 'docx' as const, extension: 'docx', mimeType: DOCX_MIME };
+    const stream = await remote.exportNative(source, plan, (open) => open());
+    let out = '';
+    for await (const chunk of stream) out += String(chunk);
+    expect(out).toBe('big');
+    expect(drive.exportMedia).toHaveBeenCalledWith('g1', DOCX_MIME);
+    expect(drive.fetchExportLink).toHaveBeenCalledWith('https://docs.google.com/x');
   });
 });
 

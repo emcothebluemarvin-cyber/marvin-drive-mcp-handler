@@ -1,21 +1,33 @@
+import { createReadStream } from 'node:fs';
 import type { OperationRunner } from '../../core/operation.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
-import { NotFoundError, PermissionDeniedError } from '../../errors.js';
+import { NotFoundError, PermissionDeniedError, ValidationError } from '../../errors.js';
 import {
   GOOGLE_MIME,
   isGoogleNative,
   resolveExport,
   type ExportFormat,
+  type ExportPlan,
 } from '../../files/export-formats.js';
+import { openExport } from '../../files/export-stream.js';
 import { escapeQueryValue } from '../../files/query.js';
+import { uploadMimeType } from '../../files/upload-mime.js';
 import { foldKey } from '../paths.js';
 import { DEFAULT_GOOGLE_EXPORT, type GoogleExportPrefs } from '../types.js';
-import type { RemoteItem } from './sync-remote.js';
+import type {
+  DeletionFeed,
+  NativeSource,
+  OpenStream,
+  RemoteItem,
+  SyncRemote,
+} from './sync-remote.js';
 
 /** Drive fields every sync read requests (spec §4). */
 export const SYNC_FILE_FIELDS =
   'id, name, mimeType, md5Checksum, size, modifiedTime, createdTime, parents, trashed, capabilities(canEdit, canTrash, canAddChildren)';
 export const SYNC_LIST_FIELDS = `nextPageToken, files(${SYNC_FILE_FIELDS})`;
+/** The export re-read also needs the 10 MB fallback link and the web link (addendum §4.3). */
+export const SYNC_EXPORT_FIELDS = `${SYNC_FILE_FIELDS}, exportLinks, webViewLink`;
 export const SYNC_PAGE_SIZE = 1000;
 const FOLDER_LIST_FIELDS = 'nextPageToken, files(id, name)';
 const NAME_PAGE_SIZE = 100;
@@ -121,16 +133,29 @@ export function toRemoteItem(file: DriveFile, prefs: GoogleExportPrefs): RemoteI
  * SyncRemote over the Drive adapter (OneDrive sync spec §2.2). Every call goes through the
  * OperationRunner with the operation kind and target the engine used before the port.
  */
-export class GoogleSyncRemote {
+export class GoogleSyncRemote implements SyncRemote {
   readonly provider = 'google';
   readonly hashKind = 'md5';
   readonly rootId = 'root';
+  private readonly nativeFiles = new WeakMap<NativeSource, DriveFile>();
 
   constructor(
     private readonly ops: OperationRunner,
     readonly account: string,
     private readonly prefs: GoogleExportPrefs,
   ) {}
+
+  /** For an account reference (alias, email or default): resolves the alias, no Drive call. */
+  static async open(
+    ops: OperationRunner,
+    accountRef: string | undefined,
+    prefs: GoogleExportPrefs,
+  ): Promise<GoogleSyncRemote> {
+    const alias = await ops.exec(accountRef, 'idempotent', undefined, async (ctx) => {
+      return ctx.account.alias;
+    });
+    return new GoogleSyncRemote(ops, alias, prefs);
+  }
 
   private item(file: DriveFile): RemoteItem {
     return toRemoteItem(file, this.prefs);
@@ -201,5 +226,92 @@ export class GoogleSyncRemote {
       } while (pageToken);
     }
     return found.filter((f) => foldKey(f.name) === fold);
+  }
+
+  async createFolder(parentId: string, name: string): Promise<RemoteItem> {
+    const created = await this.ops.exec(this.account, 'create', parentId, (ctx) =>
+      ctx.drive.createFile({
+        requestBody: { name, mimeType: GOOGLE_MIME.folder, parents: [parentId] },
+        fields: 'id, name',
+      }),
+    );
+    return this.item({ mimeType: GOOGLE_MIME.folder, parents: [parentId], ...created });
+  }
+
+  async uploadNew(parentId: string, name: string, localPath: string): Promise<RemoteItem> {
+    const file = await this.ops.exec(this.account, 'create', parentId, async (ctx) => {
+      const body = createReadStream(localPath);
+      try {
+        return await ctx.drive.createFile({
+          requestBody: { name, parents: [parentId] },
+          media: { mimeType: uploadMimeType(localPath), body },
+          fields: SYNC_FILE_FIELDS,
+        });
+      } catch (err) {
+        body.destroy();
+        throw err;
+      }
+    });
+    return this.item(file);
+  }
+
+  /** New content for the same fileId (Drive keeps a revision). */
+  async replaceContent(item: RemoteItem, localPath: string): Promise<RemoteItem> {
+    const file = await this.ops.exec(this.account, 'mutate', item.id, async (ctx) => {
+      const body = createReadStream(localPath);
+      try {
+        return await ctx.drive.updateFile({
+          fileId: item.id,
+          media: { mimeType: uploadMimeType(localPath), body },
+          fields: SYNC_FILE_FIELDS,
+        });
+      } catch (err) {
+        body.destroy();
+        throw err;
+      }
+    });
+    return this.item(file);
+  }
+
+  download<T>(id: string, consume: (open: OpenStream) => Promise<T>): Promise<T> {
+    return this.ops.exec(this.account, 'idempotent', id, (ctx) =>
+      consume(() => ctx.drive.downloadMedia(id)),
+    );
+  }
+
+  /** Re-reads a native file with the 10 MB fallback link and the web link (addendum §4.3). */
+  async readNative(id: string): Promise<NativeSource> {
+    const file = await this.ops.exec(this.account, 'idempotent', id, (ctx) =>
+      ctx.drive.getFile(id, SYNC_EXPORT_FIELDS),
+    );
+    const source: NativeSource = { item: this.item(file) };
+    this.nativeFiles.set(source, file);
+    return source;
+  }
+
+  exportNative<T>(
+    source: NativeSource,
+    plan: ExportPlan,
+    consume: (open: OpenStream) => Promise<T>,
+  ): Promise<T> {
+    const file = this.nativeFiles.get(source);
+    if (!file) throw new ValidationError('Internal: export source was not read by this remote');
+    return this.ops.exec(this.account, 'idempotent', source.item.id, (ctx) =>
+      consume(() => openExport(ctx.drive, file, plan, this.ops.log)),
+    );
+  }
+
+  async trash(item: RemoteItem): Promise<void> {
+    await this.ops.exec(this.account, 'idempotent', item.id, (ctx) =>
+      ctx.drive.updateFile({
+        fileId: item.id,
+        requestBody: { trashed: true },
+        fields: 'id, trashed',
+      }),
+    );
+  }
+
+  deletionFeed(): DeletionFeed | null {
+    return null;
   }
 }
