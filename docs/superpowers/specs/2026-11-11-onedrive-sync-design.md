@@ -1,6 +1,6 @@
 # OneDrive sub-project 2: selective two-way sync — design
 
-Status: approved in brainstorming on 2026-11-11; revision 2 after spec review round 1.
+Status: approved in brainstorming on 2026-11-11; revision 3 after spec review round 2.
 Builds on: sync spec `2026-11-02-selective-sync-design.md` (Phase A), addendum
 `2026-11-07-sync-phase-b-addendum.md` (Phase B), OneDrive files spec `2026-11-08-onedrive-files-design.md`
 (sub-project 1).
@@ -108,8 +108,8 @@ interface SyncRemote {
 }
 
 interface DeletionFeed {
-  /** Cursor for "from now on", without enumerating: GET items/{root}/delta?token=latest. */
-  start(folderId: string): Promise<string>;
+  /** Cursor for "from now on", without enumerating: GET /me/drive/root/delta?token=latest. */
+  start(): Promise<string>;
   /** Ids reported with the `deleted` facet since `cursor`, and the next cursor.
    *  Expired cursor (410 resyncRequired) → { expired: true }. */
   read(cursor: string): Promise<{ deletedIds: string[]; cursor: string } | { expired: true }>;
@@ -167,7 +167,7 @@ Changed, every place that touches Drive shapes today:
 - `transfer.ts`: `uploadNew`, `updateContent`, `writeTemp` verification
 - `exec-records.ts`: `fromDrive` becomes `fromRemote`
 - `exec-export.ts`
-- `release.ts`: `verifyLocal`, `releaseProblem`, its re-read
+- `release.ts`: `check()`, `verifyLocal`, `verifyRemote`
 - `pair-admin.ts`: `remoteRootProblem`, folder creation
 - `content-compare.ts`: `remoteChanged`, `remoteUnchangedSince` (now on `RemoteItem`),
   `localMatchesRemote`
@@ -175,7 +175,8 @@ Changed, every place that touches Drive shapes today:
 - `plan-shared.ts`, `plan-remote-only.ts`, `plan-tracked.ts`, `plan-untracked.ts`: md5
   comparisons go through `content-compare`
 - `local-scanner.ts`: digests (§3.1)
-- `types.ts`, `pair-store.ts` (schema v2), `paths.ts` (`isRepresentable` per provider)
+- `types.ts`, `pair-store.ts` (schema v2)
+- `plan-untracked.ts`: `uploadKey` folding and the name check (§4.3)
 - `sync-service.ts`, `app.ts`, the MCP/CLI account checks
 
 ## 3. Content comparison
@@ -187,9 +188,20 @@ Changed, every place that touches Drive shapes today:
   `digests: Map<name, LocalDigests>` with `LocalDigests = { md5: string; remote: ContentHash }`
   (`remote` equals `{ kind: 'md5', value: md5 }` on Google).
 - `Action` carries `localDigests` next to today's `localMd5`. The executor's re-hash before an
-  upload, and release's `verifyLocal`/`releaseProblem` re-hash, compute both digests through one
+  upload and release's `verifyLocal` re-hash compute both digests through one
   `hashFileDigests(path, kind)` helper. `md5File` alone is no longer used where a remote hash is
   compared.
+- **Stat-unchanged files.** Today `hashTargets` (`resolve.ts`) skips tracked files whose stat
+  matches the record, and `localState` then returns `record.localMd5` without hashing. On a
+  remote whose `hashKind` is not md5, the planner needs a remote-kind digest only to adopt or
+  release, never to detect a local change (md5 + stat does that). So `hashTargets` additionally
+  returns, on such remotes:
+  - release candidates (the names `sync_release` was given, or all eligible records for a
+    release without names), so release's `check()` gets a quickXor digest;
+  - untracked local files that have a same-key remote file (U2/B4 adopt).
+
+  Stat-unchanged tracked files are not re-hashed on an ordinary run. Their `localMatchesRemote`
+  is not needed there.
 - `SyncRecord.localMd5` stays the **local md5, always**. It is never filled from a remote value.
   `exec-records.localFields` takes the local digests: where it uses `remote.md5 ?? planned`
   today, it uses `planned.md5`. The remote hash is only used for the check in §3.2.
@@ -218,8 +230,10 @@ Changed, every place that touches Drive shapes today:
 `transfer.writeTemp` gets `expected: ContentHash | null` instead of `expectedMd5`. While
 streaming, it computes md5 (for `localMd5`) and, when `expected` is quickXor, QuickXorHash too.
 It then compares the digest of `expected.kind`. A mismatch keeps today's behaviour: the temp
-file is removed and the action fails. Null expected keeps today's behaviour for unhashed files
-(size check only).
+file is removed and the action fails. `writeTemp` also gets `expectedSize: number | null` from
+`RemoteItem.size`; when it is known and differs from the bytes written, the action fails the same
+way. This size check is new and applies to both providers. With a null hash it is the only
+check.
 
 ### 3.4 Re-verification and preconditions
 
@@ -236,37 +250,64 @@ file is removed and the action fails. Null expected keeps today's behaviour for 
 
 ### 4.1 Deleted items: `delta` evidence
 
+(Revision 3: the feed is the drive-wide root feed, not a folder feed. A folder feed reports items
+that leave its scope with the `deleted` facet, so it cannot tell a move from a deletion.)
+
 OneDrive returns 404 for a deleted item. It also returns 404 for items that only became
 unreachable (for example, moved into a locked Personal Vault). A 404 alone therefore never
 leads to `trashed`.
 
 - `Pair` gains `remoteCursor: string | null` and `remoteDeletedIds: string[]`. Both are null or
   empty on Google pairs, and Google never reads them.
-- **Pair creation** (Microsoft): `remoteCursor = feed.start(remoteFolderId)`, which uses
-  `?token=latest`, so nothing is enumerated.
-- **Every scan** (`sync_scan`, dry run, apply) reads the feed from the stored cursor. The
-  evidence set for planning is `remoteDeletedIds ∪ deletedIds`.
-- **Applied run, only**: it persists the new cursor and
-  `remoteDeletedIds := (remoteDeletedIds ∪ deletedIds) ∩ ids of records still in the pair file
-  after the run`. This happens in the same pair-file write as the records. A scan or dry run
-  never moves the cursor, so evidence cannot be lost between a dry run and its apply.
+- **Feed scope.** The feed is `GET /me/drive/root/delta` (the whole drive). Moves inside the drive,
+  including out of the pair folder, appear there as updates with a new `parentReference`, not as
+  `deleted`. Only ids that match a record of the pair are kept, so the feed's size does not grow
+  the pair file.
+- **Pair creation** (Microsoft): `remoteCursor = feed.start()` with `?token=latest`, so nothing is
+  enumerated. If that call fails, `sync_create_pair` fails with the Graph error and creates
+  nothing (no marker, no pair file). The user simply retries.
+- **Every scan** (`sync_scan`, dry run, apply) reads the feed from the stored cursor. A read only
+  plans; it never writes the pair file. Evidence for planning:
+  `E = (remoteDeletedIds ∪ deletedIds) − ids seen present in this scan or probe`. A record also
+  counts as evidenced when its `remoteParentId` is in `E`, because the children of a deleted
+  folder may not be listed one by one.
+- **Persisting.** Only an apply that reaches the executor persists the feed: not a dry run, and
+  not the early `plan-changed` or `mass-delete` returns (`sync-service.ts`).
+  - The executor's first pair-file save of the run writes the new cursor and `remoteDeletedIds
+    := E ∩ record ids`, always together, in one write.
+  - A run with no actions still does that one save.
+  - Every save that drops a record also drops its id from `remoteDeletedIds`.
+  - If the run stops after the first save, the next run replays nothing it needs: the stored
+    evidence already carries the deletions seen so far.
+- **Pruning.** An id leaves `remoteDeletedIds` when the scan or a probe sees the item present
+  (for example, restored from the recycle bin with the same id), or when its record is dropped.
+  Old evidence therefore cannot act on an item that came back and later became unreachable.
 - **Probe mapping** (`remote-probe.ts`, by provider):
   - Google: unchanged.
-  - OneDrive, `get` returns null and the id is in the evidence set → `trashed` (rules B10/B12
-    and the remote-only rules, as for a Drive trash).
+  - OneDrive, `get` returns null and the record is evidenced → `trashed` (rules B10/B12 and the
+    remote-only rules, as for a Drive trash).
   - OneDrive, `get` returns null without evidence → `unavailable` (B14: report only, nothing
     touched).
-  - OneDrive, `get` returns an item outside the pair root → `moved-out` (today's walk). This
-    also covers items that the feed reports as `deleted` only because they left the folder.
-- **Expired cursor** (`{ expired: true }`, HTTP 410): the run warns "OneDrive change history
-  expired; deletions since the last run are reported, not applied". It plans with the stored
-  `remoteDeletedIds` only. An applied run restarts the cursor with `feed.start`. Records that
-  went missing in that gap stay `unavailable` until the user acts.
+  - OneDrive, `get` returns an item outside the pair root → `moved-out` (today's walk).
+  - During the parent walk, `get` returning null for a folder → `unknown` ("a parent folder cannot
+    be read"), as today.
+- **Null or expired cursor** (a null cursor, or `{ expired: true }` from HTTP 410): the run warns
+  "OneDrive change history unavailable; deletions since the last run are reported, not applied".
+  It plans with the stored `remoteDeletedIds` only, minus the ids seen present. The executor's
+  first save restarts the cursor with `feed.start()`. Records that went missing in that gap stay
+  `unavailable` until the user acts. The README notes that pairs scanned but never applied for a
+  long time can reach this state.
+- **Residual risk.** Personal Vault behaviour in the root feed is a live-test point (§10): an item
+  moved into a locked Vault might be reported as `deleted`. If it is, the outcome is B10: the
+  unchanged local copy goes to the OS trash, where it can be restored. The README documents this.
+  No file is deleted permanently on either side.
 - The feed only provides evidence. Content changes still come from the folder scan, so the feed
   cannot cause a write by itself.
 - Sync never deletes permanently on OneDrive. `restorePending` keeps meaning "download the
   remote copy again"; sync never restores from a recycle bin, so the business-account restore
   limit does not apply.
+- Remote-only note texts that name Drive (`plan-remote-only.ts`: "Drive trash", "purged after 30
+  days") take a provider word: "OneDrive recycle bin" and "removed by OneDrive after 30 days".
 
 ### 4.2 Items that are not synced
 
@@ -295,15 +336,25 @@ the same path Google uses for `native-unsupported` (`resolve.ts`).
     - names that start with `~$`
     - names that contain `_vti_`
     - names longer than 255 characters
-- The planner checks it wherever an action would create a remote name: local-only uploads and
-  folder creation (`plan-untracked`), and the remote side of renames and moves, if the engine
-  propagates them. A failing name becomes a note `remote-name-invalid` with the rule's text
-  ("cannot be uploaded to OneDrive: <reason>"). The file stays local and untouched. A folder
-  that fails blocks its subtree, and the subtree is reported once.
+    - a full path inside the drive longer than 400 characters (pair root path + key)
+- The engine never propagates local renames or moves to the remote. A local rename is B5
+  (pending confirmation) plus a new untracked file. Remote names are therefore created in only
+  three places, and each one is checked:
+  - **U1 / B11 `upload-new`** (`plan-untracked.ts`, `plan-tracked.ts`): the planner checks the file
+    name and every segment of `uploadKey` that has no existing remote folder. Those folders are
+    created lazily by the executor's `folders.folderFor`. A failing name becomes a note
+    `remote-name-invalid` with the rule's text ("cannot be uploaded to OneDrive: <reason>"). The
+    file stays local and untouched. A failing folder segment reports its subtree once.
+  - **The pair root** (`remoteFolderName` in `pair-admin.ts`): `sync_create_pair` refuses an
+    invalid name.
 - `isRepresentable` (`paths.ts`) keeps checking remote names against the local file system. It
   is unchanged.
-- OneDrive names are case-insensitive. For OneDrive pairs, remote fold-collision checks always
-  use the fold key, whatever the local volume is.
+- OneDrive names are case-insensitive. For OneDrive pairs, `uploadKey` reuses the spelling of an
+  existing remote folder by fold key whatever the local volume is (today it does so only on
+  case-insensitive volumes). Without this, on Linux a local `docs/` next to a remote `Docs/`
+  would record `docs/x`, `findChildren` would put the file into `Docs`, and the next scan would
+  see a moved file (B7). Remote fold-collision checks for OneDrive pairs also always use the fold
+  key.
 
 ### 4.4 Pair settings
 
@@ -335,9 +386,24 @@ check. The message is improved to "this pair was saved by a newer marvin-drive; 
 | 409 on `createFolder` | `NameConflictError` | re-run `findChildren`, then reuse exactly one folder or refuse several (today's `ensureRemoteFolder` rule) |
 | 412 | `TargetChangedError` | skip, "changed on OneDrive since the scan" |
 | 423 | `FileLockedError` | skip, "open in an Office app on OneDrive; try again later" |
-| 401 after refresh | auth error | stop the run, hint `auth login <alias>` |
+| 401 after refresh | auth error | stop the run (`aborted`), hint `auth login <alias>` |
 | 429 / 503 / 5xx | throttled / API error | `GraphClient` retries (Retry-After honoured), then a per-file failure |
-| 507 | `OneDriveFullError` | stop the run, report storage full |
+| 507 | `OneDriveFullError` | stop the run (`aborted`), report storage full |
+
+**Executor outcome mapping** (`executor.ts`, the catch around each action; both providers):
+
+- `TargetChangedError`, `NameConflictError` and `FileLockedError` → `skipped` with the message.
+  Today only the first one is skipped; a rethrown `NameConflictError` would be `failed`.
+- The auth-required error and `OneDriveFullError` → `failed`, and the run stops (`aborted =
+  true`), like an abort today. Google's auth-required error gets the same treatment. That is a
+  small behaviour change on Google (today each remaining action fails one by one), and it is
+  intended and noted in the CHANGELOG. Google's quota errors keep today's per-file handling.
+- Everything else stays as today.
+
+**Null from `get` at the other call sites:**
+- executor `readRemote` → `TargetChangedError` ("gone from OneDrive since planning")
+- release `verifyRemote` → refuse ("not found on OneDrive")
+- `checkRoots` / `remoteRootProblem` → "folder not found"
 
 A per-file failure does not stop the run, as on Google. Completed actions are committed per file,
 so an interrupted run continues next time. A lost upload session restarts once (sub-project 1).
@@ -396,12 +462,20 @@ The README gets:
   - evidence survives an apply that skipped the record
   - an expired cursor warns and does not apply deletions
   - moved-out stays moved-out
+  - an id seen present again is pruned; old evidence does not act later
+  - a child of an evidenced folder (`remoteParentId`) is evidenced
+  - `plan-changed` / `mass-delete` early returns and `feed.start` failure persist nothing
+  - cursor and evidence are written in one save, also on a run with no actions
 - §3 tests:
   - U2/B4 adopt by quickXor
   - no adopt or release without a hash
   - `localMd5` is never taken from a remote value
   - a download quickXor mismatch fails the action
   - `changed-during-upload` with a null hash is quiet
+  - release of a stat-unchanged file gets a quickXor digest (`hashTargets`)
+  - a download size mismatch fails the action
+  - executor mapping: `NameConflictError` / `FileLockedError` skipped, auth-required aborts
+  - `uploadKey` reuses a remote folder's spelling by fold key on a case-sensitive volume
 - `quickxor.ts`: vectors published by rclone's implementation, empty input, inputs that wrap
   the 160-bit state, chunk-boundary independence. Also a live cross-check against OneDrive's own
   value.
@@ -426,8 +500,11 @@ The README gets:
 | Point | If it does not hold |
 |---|---|
 | `children` returns `file.hashes.quickXorHash` for every file on personal drives | Missing hash → null; such files compare weakly and cannot be released (§3.2); document it |
-| `delta?token=latest` on a non-root folder returns a usable cursor on personal drives | Use the root `delta` and filter by ancestry; document the cost |
-| A deleted file appears in the folder `delta` with the `deleted` facet | Without evidence, deletions stay report-only (B14); document it |
+| `root/delta?token=latest` returns a usable cursor on personal drives | Start with a full root `delta` enumeration once at pair creation (slow on large drives; document it) |
+| A deleted file appears in the root `delta` with the `deleted` facet | Without evidence, deletions stay report-only (B14); document it |
+| A move out of the pair folder appears in the root `delta` as an update, not `deleted` | Ignore feed entries for ids whose `get` succeeds (already the rule); no change |
+| A move into a locked Personal Vault, as seen by the root `delta` | If it shows as `deleted`: keep the §4.1 residual-risk note (B10 goes to the OS trash); if it shows as an update or not at all: no change |
+| The children of a deleted folder appear individually as `deleted` | If not: the `remoteParentId` rule of §4.1 covers direct children; deeper descendants stay `unavailable` (safe) |
 | `If-Match` on `DELETE` returns 412 on a stale eTag | Re-read immediately before the delete; document the small race |
 | `lastModifiedDateTime` changes on every content change | Compare by hash only on OneDrive |
 | Office web autosave changes the hash without a user-visible edit | Document that opening a file in Office web can mark it changed |
