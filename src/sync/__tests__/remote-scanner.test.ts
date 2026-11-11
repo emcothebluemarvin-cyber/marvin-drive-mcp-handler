@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { NotFoundError, ReauthRequiredError } from '../../errors.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import { childrenQuery } from '../remote/google-remote.js';
-import { exportKey, scanRemote } from '../remote-scanner.js';
+import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
+import { exportKey, scanRemote, toRemoteEntry } from '../remote-scanner.js';
+import { graphFile } from './fake-onedrive.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder, treeLister } from './drive-tree.js';
 
@@ -12,6 +14,20 @@ const NFD = 'şartname.pdf'.normalize('NFD');
 describe('childrenQuery', () => {
   it('escapes the folder id', () => {
     expect(childrenQuery("a'b")).toBe("'a\\'b' in parents and trashed = false");
+  });
+});
+
+describe('toRemoteEntry', () => {
+  it('carries the OneDrive eTag as version; Google entries have none', () => {
+    const od = toRemoteEntry(toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), '', 'P', ['P']);
+    expect(od.version).toBe('"{f1},1"');
+    const google = toRemoteEntry(
+      { ...toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), version: null },
+      '',
+      'P',
+      ['P'],
+    );
+    expect('version' in google).toBe(false);
   });
 });
 

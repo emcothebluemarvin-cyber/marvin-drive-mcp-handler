@@ -44,6 +44,7 @@ export function toRemoteEntry(
     canEdit: item.canEdit,
     canTrash: item.canTrash,
     native,
+    ...(item.version !== null ? { version: item.version } : {}),
   };
 }
 

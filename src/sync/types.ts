@@ -132,6 +132,11 @@ export interface RemoteEntry {
   canTrash: boolean;
   /** Google-native file synced as a read-only export; null for binary files. */
   native: NativeInfo | null;
+  /**
+   * OneDrive eTag at scan time, compared at the executor's re-read for files without a hash
+   * (a remote edit can keep modifiedTime). Absent on Google.
+   */
+  version?: string;
 }
 
 export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';

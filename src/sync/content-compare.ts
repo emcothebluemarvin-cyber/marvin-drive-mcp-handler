@@ -30,11 +30,18 @@ export function remoteChanged(
   };
 }
 
-/** Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal. */
+/**
+ * Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal.
+ * Without a hash, a planned OneDrive eTag must also be unchanged, so an edit that keeps
+ * modifiedTime is still caught (Google entries carry no version: unchanged rule).
+ */
 export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem): boolean {
   if (current.modifiedTime !== planned.modifiedTime) return false;
   if (planned.native !== null) return true;
-  if (planned.hash === null || current.hash === null) return planned.hash === current.hash;
+  if (planned.hash === null || current.hash === null) {
+    if (planned.hash !== current.hash) return false;
+    return planned.version === undefined || planned.version === current.version;
+  }
   return sameHash(planned.hash, current.hash) === true;
 }
 

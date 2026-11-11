@@ -61,6 +61,18 @@ describe('remoteUnchangedSince', () => {
     expect(remoteUnchangedSince(r, { ...current, hash: { ...hash, value: 'other' } })).toBe(false);
     expect(remoteUnchangedSince(r, { ...current, hash: { kind: 'md5', value: 'QX' } })).toBe(false);
   });
+  it('without a hash, a OneDrive eTag change counts even when modifiedTime is kept', () => {
+    const r = remoteEntry('r1', 'a.pdf', { hash: null, version: '"{r1},1"' });
+    const current = { ...item({ modifiedTime: r.modifiedTime }), hash: null, version: '"{r1},1"' };
+    expect(remoteUnchangedSince(r, current)).toBe(true);
+    expect(remoteUnchangedSince(r, { ...current, version: '"{r1},2"' })).toBe(false);
+    expect(remoteUnchangedSince(r, { ...current, version: null })).toBe(false);
+  });
+  it('Google entries carry no version; a missing hash still compares as before', () => {
+    const r = remoteEntry('r1', 'a.pdf', { md5: null });
+    expect(r.version).toBeUndefined();
+    expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
+  });
   it('native needs modifiedTime equal', () => {
     const r = nativeEntry('g1', 'Plan.docx');
     expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
