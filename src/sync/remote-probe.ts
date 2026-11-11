@@ -55,6 +55,8 @@ export async function probeRecord(
     }
     return { state: 'present', entry };
   }
+  // The parent walk reads each folder through `get`, so Google requests the full sync
+  // fields here (before the port: 'id, parents'); only `parentId` is used.
   let current = parent;
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
     let folder: RemoteItem | null;

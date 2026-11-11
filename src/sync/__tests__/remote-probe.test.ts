@@ -8,6 +8,7 @@ import {
 } from '../../errors.js';
 import { createFakeDrive } from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
+import { SYNC_FILE_FIELDS } from '../remote/google-remote.js';
 import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
 import type { RemoteScan } from '../types.js';
 import { binary } from './drive-tree.js';
@@ -89,6 +90,25 @@ describe('probeRecord', () => {
       state: 'unknown',
       reason: 'inside a Drive folder that was not scanned',
     });
+  });
+
+  it('reads each parent in the walk with the full sync fields (not just id, parents)', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockImplementation(async (id) =>
+      id === 'r'
+        ? binary('r', 'a.pdf', 'elsewhere')
+        : id === 'elsewhere'
+          ? { id: 'elsewhere', parents: ['my-drive'] }
+          : { id: 'my-drive' },
+    );
+    expect(await probeRecord('r', scan(), googleRemoteOver(drive))).toEqual({
+      state: 'moved-out',
+    });
+    expect(drive.getFile.mock.calls).toEqual([
+      ['r', SYNC_FILE_FIELDS],
+      ['elsewhere', SYNC_FILE_FIELDS],
+      ['my-drive', SYNC_FILE_FIELDS],
+    ]);
   });
 
   it('reports moved-out when the ancestry leaves the pair', async () => {

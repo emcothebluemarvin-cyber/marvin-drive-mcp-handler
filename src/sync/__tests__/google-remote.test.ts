@@ -136,6 +136,27 @@ describe('GoogleSyncRemote writes and content (pinned)', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it('creates are never retried blindly; replaceContent runs as a mutate', async () => {
+    const abs = path.join(dir, 'a.pdf');
+    await writeFile(abs, 'x');
+    const drive = createFakeDrive();
+    const remote = googleRemoteOver(drive);
+    drive.createFile.mockRejectedValue(httpError(503, 'backendError'));
+    await expect(remote.createFolder('P', 'docs')).rejects.toThrow(
+      'The item may have been created anyway',
+    );
+    expect(drive.createFile).toHaveBeenCalledTimes(1);
+    await expect(remote.uploadNew('P', 'a.pdf', abs)).rejects.toThrow(
+      'The item may have been created anyway',
+    );
+    expect(drive.createFile).toHaveBeenCalledTimes(2);
+    drive.updateFile.mockRejectedValue(httpError(503, 'backendError'));
+    await expect(
+      remote.replaceContent(toRemoteItem({ id: 'r1' }, DEFAULT_GOOGLE_EXPORT), abs),
+    ).rejects.toThrow('The change may have been applied anyway');
+    expect(drive.updateFile).toHaveBeenCalledTimes(1);
+  });
+
   it('createFolder: folder MIME type, the parent, id and name fields', async () => {
     const drive = createFakeDrive();
     drive.createFile.mockResolvedValueOnce({ id: 'f9', name: 'docs' });
