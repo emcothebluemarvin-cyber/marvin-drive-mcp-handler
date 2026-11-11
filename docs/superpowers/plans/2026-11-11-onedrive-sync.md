@@ -13270,6 +13270,2468 @@ MSG
 
 - [ ] Run the live OneDrive sync E2E (the user runs it): `MARVIN_E2E_MS_PERSONAL=ms-personal MARVIN_E2E_MS_SECOND=ms-work npm run test:e2e -- tests/e2e/onedrive-sync.e2e.test.ts`, and rerun the Google live sync E2E (`MARVIN_E2E_ACCOUNT=<alias> npm run test:e2e -- tests/e2e/sync.e2e.test.ts`).
 
-## Chunk 4: Cloud folder guard and docs
+## Chunk 4: Review fixes for chunk 3, cloud folder guard and docs
 
-To be written: `cloud-folders.ts` in `sync_create_pair` and `sync repair-marker`, the list warning, README and CHANGELOG (spec §6, §7, §8 item 4).
+Spec §8 item 4 (§6 cloud desktop folder guard, §7 README), preceded by the stage-3 review fixes (Tasks 40–47; review item M6, "provider not stored", is documented as a known limitation instead). Starting point: Chunk 3 done, **1503 passed, 6 skipped (1509)**, 134 files, at `f5d615d`.
+
+Decisions (keep consistent):
+
+1. **Unusable cursors.** Besides 410, a `ValidationError` (the stored or a next link fails `checkPageToken`, or a 400 whose message names a name), a `GraphApiError` 400, and a page chain without `@odata.deltaLink` read as `{ expired: true }`: warn, plan with the stored evidence, restart the cursor. Throttling, 5xx and auth errors still throw and keep the old cursor.
+2. **Evidence during probing.** `ProbeOptions.seen` is a `SeenSink` (`add(id)`); `gatherInput` passes one that deletes from `E`, so later probes see the pruned set.
+3. **B11 re-upload key.** B11 `upload-new` goes through `uploadKey`: null → `ambiguous` note, otherwise the key may take the remote folder spelling (case-insensitive volume) and the selection is renamed like U1.
+4. **eTag re-verify.** `RemoteEntry.version?: string` is set only when the item has one (OneDrive), so Google entries are byte-identical; `remoteUnchangedSince` requires it unchanged when neither side has a hash.
+5. **Provider words.** `providerIn(provider)` gives "in Drive" / "on OneDrive"; `conflictName` takes the provider (default Google). This replaces Chunk 3 decision 11.
+6. **Lengths.** Microsoft does not state the unit of its 255 / 400 limits, so `name.length` (UTF-16, the stricter count) is used. The path check uses the pair-relative key (the root's own path is unknown to the planner), so it is a lower bound.
+7. **Cloud guard.** `SyncEnv.cloudFolders()` (default `findCloudFolders()` on this machine; tests inject). `createPair` checks before the lock with the platform's default case rule (macOS/Windows fold); `repairMarker` and `checkRoots` use `pair.caseInsensitive`. `checkRoots` refuses with `SyncRootError`, so scans, runs and releases of an existing pair inside a cloud folder stop (the spec only asks for the list warning; the stop was requested in review). `listPairs` adds `warning`.
+
+## Task map (Chunk 4)
+
+| Task | What it adds |
+|---|---|
+| 40–47 | Review fixes for Chunk 3 (I1, I2, M2, M1, M3, M5, M7, M8) |
+| 48 | `cloud-folders.ts`, guard in create / repair-marker / root check, list warning |
+| 49 | README, CHANGELOG, FEATURES |
+| 50 | Spec §2.1 as-built note |
+| 51 | This chunk of the plan |
+
+
+### Task 40: Review fixes for chunk 3 (a): an unusable delta cursor reads as expired
+
+**Spec:** stage-3 review I1 (§4.1 null or expired cursor). Commit `96bec89` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/onedrive-remote.test.ts`
+- Test: `src/sync/__tests__/sync-service.onedrive.test.ts`
+- Modify: `src/sync/remote/onedrive-remote.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/onedrive-remote.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/onedrive-remote.test.ts b/src/sync/__tests__/onedrive-remote.test.ts
+index c2b1775..d76ff2c 100644
+--- a/src/sync/__tests__/onedrive-remote.test.ts
++++ b/src/sync/__tests__/onedrive-remote.test.ts
+@@ -286,11 +286,31 @@ describe('OneDriveSyncRemote deletion feed', () => {
+     expect(calls.map((c) => c.url)).toEqual([`${GRAPH}/me/drive?$select=id`, LATEST, PAGE2]);
+   });
+ 
+-  it('a 410 means the cursor expired; a foreign cursor is refused', async () => {
++  it('a 410 means the cursor expired', async () => {
+     const { remote } = remoteOver(() => graphError(410, 'resyncRequired'));
+     expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
+-    await expect(
+-      remote.deletionFeed().read('https://evil.example/v1.0/me/drive/root/delta'),
+-    ).rejects.toBeInstanceOf(ValidationError);
++  });
++
++  it('a stored cursor that fails the page-link check is expired, never followed', async () => {
++    const { remote, calls } = remoteOver(() => json({ value: [], '@odata.deltaLink': AFTER }));
++    expect(
++      await remote.deletionFeed().read('https://evil.example/v1.0/me/drive/root/delta'),
++    ).toEqual({ expired: true });
++    expect(calls.map((c) => c.url)).toEqual([`${GRAPH}/me/drive?$select=id`]);
++  });
++
++  it('a 400 on the delta request is expired (a cursor Graph no longer accepts)', async () => {
++    const { remote } = remoteOver(() => graphError(400, 'invalidRequest', 'bad token'));
++    expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
++  });
++
++  it('a page chain that ends without a delta link is expired', async () => {
++    const { remote } = remoteOver(() => json({ value: [{ id: 'gone', deleted: {} }] }));
++    expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
++  });
++
++  it('other errors still throw (the stored cursor is kept)', async () => {
++    const { remote } = remoteOver(() => graphError(500, 'generalException'));
++    await expect(remote.deletionFeed().read(LATEST)).rejects.toThrow();
+   });
+ });
+```
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.onedrive.test.ts b/src/sync/__tests__/sync-service.onedrive.test.ts
+index e8625dc..f8c4e69 100644
+--- a/src/sync/__tests__/sync-service.onedrive.test.ts
++++ b/src/sync/__tests__/sync-service.onedrive.test.ts
+@@ -243,6 +243,19 @@ describe('OneDrive deletion evidence (spec §4.1)', () => {
+     expect(next.warnings.map((w) => w.code)).not.toContain('deletion-history-unavailable');
+   });
+ 
++  it('a stored cursor that is not a Graph link does not block runs; it restarts', async () => {
++    await tracked();
++    const file = await store.load('docs');
++    file.pair.remoteCursor = 'https://evil.example/v1.0/me/drive/root/delta?token=x';
++    await store.save(file);
++    od.remove('A');
++    const report = await service().run({ name: 'docs', apply: true });
++    expect(report.warnings.map((w) => w.code)).toContain('deletion-history-unavailable');
++    expect(report.actions).toEqual({});
++    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
++    expect((await pair()).remoteCursor).toMatch(/^https:\/\/graph\.microsoft\.com\/.*token=g0-/);
++  });
++
+   it('an expired cursor still plans with the stored evidence', async () => {
+     await tracked();
+     od.remove('A');
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: FAIL. 3 failed: `a stored cursor that fails the page-link check is expired, never followed` (`ValidationError`), `a 400 on the delta request is expired` (`GraphApiError (400)`), `a page chain that ends without a delta link is expired` (`GraphApiError`); the sync-service test fails with the same ValidationError.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote/onedrive-remote.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote/onedrive-remote.ts b/src/sync/remote/onedrive-remote.ts
+index 5d8debd..bdf7c8e 100644
+--- a/src/sync/remote/onedrive-remote.ts
++++ b/src/sync/remote/onedrive-remote.ts
+@@ -75,6 +75,17 @@ function changedSinceScan(err: unknown, name: string): unknown {
+   return err;
+ }
+ 
++/**
++ * Feed errors that would repeat on every run with the same cursor, so they count as an
++ * expired cursor (warn, report deletions only, restart): 410 resyncRequired, a 400 on the
++ * delta request, and a stored or next link that fails the page-link check (ValidationError).
++ * Transient errors (throttling, 5xx, auth) still throw and keep the stored cursor.
++ */
++function cursorUnusable(err: unknown): boolean {
++  if (err instanceof ValidationError) return true;
++  return err instanceof GraphApiError && (err.status === 410 || err.status === 400);
++}
++
+ /**
+  * SyncRemote over sub-project 1's GraphClient (OneDrive sync spec §2.2). Personal drives
+  * only: the user's own items; shared items (`remoteItem`) are reported, never followed.
+@@ -276,11 +287,12 @@ export class OneDriveSyncRemote implements SyncRemote {
+               continue;
+             }
+             const delta = page['@odata.deltaLink'];
+-            if (!delta) throw new GraphApiError(undefined);
++            // A chain without a delta link cannot be resumed: start again "from now on".
++            if (!delta) return { expired: true };
+             return { deletedIds, cursor: delta };
+           }
+         } catch (err) {
+-          if (err instanceof GraphApiError && err.status === 410) return { expired: true };
++          if (cursorUnusable(err)) return { expired: true };
+           throw err;
+         }
+       },
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/remote/onedrive-remote.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1508 passed | 6 skipped (1514)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/remote/onedrive-remote.ts
+git commit -F - <<'MSG'
+fix(sync): an unusable delta cursor no longer blocks every OneDrive run
+
+Besides a 410, a 400 on the delta request, a stored or next link that fails
+the page-link check, and a page chain without a delta link now read as an
+expired cursor: the run warns deletion-history-unavailable, plans with the
+stored evidence only and restarts the feed. Transient errors still throw and
+keep the stored cursor.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 41: Review fixes for chunk 3 (b): release of an item that vanishes before the apply re-read
+
+**Spec:** stage-3 review I2 (§5 release `verifyRemote` → "not found on OneDrive"). Commit `d703fb8` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/sync-service.onedrive.test.ts`
+- Test: `src/sync/__tests__/sync-service.release.test.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.onedrive.test.ts b/src/sync/__tests__/sync-service.onedrive.test.ts
+index f8c4e69..4e663cd 100644
+--- a/src/sync/__tests__/sync-service.onedrive.test.ts
++++ b/src/sync/__tests__/sync-service.onedrive.test.ts
+@@ -139,6 +139,45 @@ describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
+   });
+ });
+ 
++describe('OneDrive release: the item vanishes between select and apply', () => {
++  /** A service whose remote hides or removes A right before release re-reads it. */
++  function vanishing(how: 'hide' | 'remove'): SyncService {
++    return new SyncService({
++      runner: createRunner(createFakeDrive()),
++      audit: createAudit(),
++      retry: noSleep,
++      logger: silentLogger(),
++      store,
++      clock: () => new Date('2026-11-12T12:00:00.000Z'),
++      trash: { trash: (abs) => trash.trash(abs) },
++      openOneDrive: async (ref) => {
++        if (ref !== 'ms') return null;
++        const remote = od.remote();
++        const get = remote.get.bind(remote);
++        remote.get = async (id, signal) => {
++          if (id === 'A' && od.items.has('A')) od[how]('A');
++          return get(id, signal);
++        };
++        return remote;
++      },
++    });
++  }
++
++  it.each(['hide', 'remove'] as const)(
++    '%s: failed, local file kept, record unchanged',
++    async (how) => {
++      await tracked();
++      const result = await vanishing(how).release({ name: 'docs', paths: ['a.txt'], apply: true });
++      expect(result.released).toEqual([]);
++      expect(result.failed).toEqual([{ path: 'a.txt', reason: 'a.txt not found on OneDrive' }]);
++      expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
++      expect(await readdir(trashDir)).toEqual([]);
++      const { records } = await store.load('docs');
++      expect(records.find((r) => r.path === 'a.txt')?.remoteOnly).toBe(false);
++    },
++  );
++});
++
+ describe('OneDrive deletion evidence (spec §4.1)', () => {
+   it('404 with feed evidence: B10 moves the unchanged local copy to the trash', async () => {
+     await tracked();
+```
+
+`src/sync/__tests__/sync-service.release.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.release.test.ts b/src/sync/__tests__/sync-service.release.test.ts
+index bb67c6b..56d94be 100644
+--- a/src/sync/__tests__/sync-service.release.test.ts
++++ b/src/sync/__tests__/sync-service.release.test.ts
+@@ -98,6 +98,23 @@ describe('sync_release', () => {
+     expect((await apply()).actions).toEqual({ 'download-new': ['a.pdf'] });
+     expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+   });
++  it('a file gone from Drive between select and apply fails; nothing is trashed', async () => {
++    const id = await idOf('a.pdf');
++    const get = mem.drive.getFile.getMockImplementation();
++    mem.drive.getFile.mockImplementation(async (fileId, ...rest) => {
++      if (fileId === id) mem.files.delete(id);
++      if (!get) throw new Error('memory drive has no getFile');
++      return get(fileId, ...rest);
++    });
++    const res = await sync.release({ name: 'docs', paths: ['a.pdf'], apply: true });
++    expect(res.released).toEqual([]);
++    expect(res.failed).toEqual([{ path: 'a.pdf', reason: 'a.pdf not found on Drive' }]);
++    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
++    expect(await readdir(trashDir)).toEqual([]);
++    expect((await store.load('docs')).records.find((r) => r.path === 'a.pdf')?.remoteOnly).toBe(
++      false,
++    );
++  });
+   it('a failing trash keeps the file and the record', async () => {
+     const failing = new SyncService({
+       runner: createRunner(mem.drive),
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts src/sync/__tests__/sync-service.release.test.ts`
+
+Expected: PASS already (Task 34 maps a null `get` to `TargetChangedError`); the tests pin it on both fakes.
+
+- [ ] **Step 3: Implement.**
+
+Nothing beyond Step 1.
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts src/sync/__tests__/sync-service.release.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/sync-service.onedrive.test.ts src/sync/__tests__/sync-service.release.test.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1511 passed | 6 skipped (1517)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/sync-service.onedrive.test.ts src/sync/__tests__/sync-service.release.test.ts
+git commit -F - <<'MSG'
+test(sync): release of an item that vanishes before the apply re-read
+
+On the in-memory OneDrive (hidden and removed) and on the memory Drive, an item
+gone between select and apply is failed with "not found on OneDrive/Drive"; the
+local copy stays, nothing goes to the trash and the record is not remoteOnly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 42: Review fixes for chunk 3 (c): ids a probe sees present leave the evidence at once
+
+**Spec:** stage-3 review M2 (§4.1 "E − ids seen present"). Commit `9ea0f38` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/sync-service.onedrive.test.ts`
+- Modify: `src/sync/remote-probe.ts`
+- Modify: `src/sync/scan-select.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.onedrive.test.ts b/src/sync/__tests__/sync-service.onedrive.test.ts
+index 4e663cd..0b38c49 100644
+--- a/src/sync/__tests__/sync-service.onedrive.test.ts
++++ b/src/sync/__tests__/sync-service.onedrive.test.ts
+@@ -337,6 +337,27 @@ describe('OneDrive deletion evidence (spec §4.1)', () => {
+     expect((await pair()).remoteDeletedIds).toEqual([]);
+   });
+ 
++  it('a parent seen present by an earlier probe is not evidence for a later one', async () => {
++    const sub = od.addFolder(docs.id, 'sub', 'SUB');
++    od.addFile(sub.id, 'a.txt', 'one', 'SA');
++    od.addFile(sub.id, 'b.txt', 'two', 'SB');
++    await service().select({ name: 'docs', add: ['sub/a.txt', 'sub/b.txt'] });
++    await apply();
++    // Stale evidence for SUB (e.g. deleted and restored in a gap of the feed history).
++    const file = await store.load('docs');
++    file.pair.remoteDeletedIds = ['SUB'];
++    await store.save(file);
++    od.move('SUB', od.rootId); // SUB leaves the scan: its records are probed
++    od.hide('SB');
++    const report = await service().run({ name: 'docs', apply: true });
++    expect(report.actions['trash-local']).toBeUndefined();
++    expect(report.warnings).toContainEqual(
++      expect.objectContaining({ path: 'sub/b.txt', code: 'remote-unavailable' }),
++    );
++    expect(await readFile(at('sub', 'b.txt'), 'utf8')).toBe('two');
++    expect((await pair()).remoteDeletedIds).toEqual([]);
++  });
++
+   it('sync_release reads the feed but does not persist it', async () => {
+     await tracked();
+     const before = await pair();
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: FAIL. 1 failed: `a parent seen present by an earlier probe is not evidence for a later one` (`expected [ 'sub/b.txt' ] to be undefined`: B10 trashed the local copy).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote-probe.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-probe.ts b/src/sync/remote-probe.ts
+index 6afa7a1..b1305b3 100644
+--- a/src/sync/remote-probe.ts
++++ b/src/sync/remote-probe.ts
+@@ -20,11 +20,16 @@ function failure(err: unknown): Probe {
+   return unknown(err instanceof AppError ? err.message : 'probe failed');
+ }
+ 
++/** Receives the ids a probe found present; a Set works, so does a deleting sink. */
++export interface SeenSink {
++  add(id: string): unknown;
++}
++
+ export interface ProbeOptions {
+   /** OneDrive (spec §4.1): the feed reported this record (or its parent) deleted. */
+   evidenced?: boolean;
+-  /** Collects the ids `get` found present (they leave the deletion evidence). */
+-  seen?: Set<string>;
++  /** Told each id `get` found present (it leaves the deletion evidence at once). */
++  seen?: SeenSink;
+ }
+ 
+ /**
+@@ -95,7 +100,7 @@ export async function probeRecords(
+   remoteIds: readonly string[],
+   scan: RemoteScan,
+   remote: ItemGetter,
+-  options: { evidenced?: (id: string) => boolean; seen?: Set<string> } = {},
++  options: { evidenced?: (id: string) => boolean; seen?: SeenSink } = {},
+ ): Promise<Map<string, Probe>> {
+   const probes = new Map<string, Probe>();
+   for (const id of remoteIds) {
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 5d58c39..171d11c 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -131,12 +131,12 @@ export async function gatherInput(
+   const evidence = feed?.evidence ?? new Set<string>();
+   for (const id of present) evidence.delete(id);
+   const parentOf = new Map(records.map((r) => [r.remoteId, r.remoteParentId]));
+-  const probed = new Set<string>();
++  // Ids a probe sees present leave E at once, so a later probe never counts a parent an
++  // earlier probe's walk-up found present as evidence.
+   const probes = await probeRecords(missing, remote, syncRemote, {
+     evidenced: (id) => evidence.has(id) || evidence.has(parentOf.get(id) ?? ''),
+-    seen: probed,
++    seen: { add: (id) => evidence.delete(id) },
+   });
+-  for (const id of probed) evidence.delete(id);
+   return { input: { ...base, probes, digests }, local, remote, feed };
+ }
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/sync-service.onedrive.test.ts src/sync/remote-probe.ts src/sync/scan-select.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1512 passed | 6 skipped (1518)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/sync-service.onedrive.test.ts src/sync/remote-probe.ts src/sync/scan-select.ts
+git commit -F - <<'MSG'
+fix(sync): ids a probe sees present leave the evidence at once
+
+Spec §4.1 "E − ids seen present" now applies during probing: the scan passes a
+sink that deletes each id a probe's get or parent walk finds present, so a
+later record under that parent with a null get is unavailable, not trashed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 43: Review fixes for chunk 3 (d): the gone trash-remote evidence branch is defence only
+
+**Spec:** stage-3 review M1 (§4.1, §5). Commit `8bbc7a0` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/executor.onedrive.test.ts`
+- Modify: `src/sync/executor.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.onedrive.test.ts b/src/sync/__tests__/executor.onedrive.test.ts
+index a4d9505..9c6ef37 100644
+--- a/src/sync/__tests__/executor.onedrive.test.ts
++++ b/src/sync/__tests__/executor.onedrive.test.ts
+@@ -176,6 +176,8 @@ describe('Executor re-reads that find nothing (OneDrive sync spec §5)', () => {
+     selection: { remove: ['a.txt'] },
+   });
+ 
++  // Pins the executor's defensive branch with hand-made evidence. A real run never gets here:
++  // E has lost every id the scan saw present, and trash-remote is planned only for those.
+   it('trash-remote of an item already gone: evidence drops the record', async () => {
+     const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
+       record('gone', 'a.txt'),
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/executor.onedrive.test.ts`
+
+Expected: Comments only; nothing to fail.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index a528733..d9d028c 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -552,6 +552,10 @@ export class Executor {
+     if (current === null) {
+       // Already gone: with deletion evidence it is deleted (drop the record); without, it
+       // may only be unreachable, so nothing is touched (OneDrive sync spec §4.1, §5).
++      // Defence only: in a real run this branch cannot drop a record. trash-remote is planned
++      // only for an item the scan saw present, and E (read before the scan) loses every id
++      // the scan saw present, the item's and its parent folder's alike; the feed is not
++      // re-read during the apply. So a deletion after the scan always lands in the skip.
+       const evidence = this.deps.evidence;
+       if (!evidence?.has(remote.id) && !evidence?.has(record.remoteParentId)) {
+         throw new TargetChangedError(`${action.key} is gone from ${this.label} since planning`);
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/executor.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/executor.onedrive.test.ts src/sync/executor.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1512 passed | 6 skipped (1518)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/executor.onedrive.test.ts src/sync/executor.ts
+git commit -F - <<'MSG'
+docs(sync): the executor's evidence branch for a gone trash-remote is defence only
+
+trash-remote is planned only for items the scan saw present, and E loses every
+id seen present, so the drop-with-evidence branch never runs in a real run.
+Kept as a guard; the code and the pinning test now say so.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 44: Review fixes for chunk 3 (e): B11 re-uploads follow the uploadKey folder-case rule
+
+**Spec:** stage-3 review M3 (§4.3 uploadKey; Chunk 3 decision 4). Commit `c102f31` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/plan-tracked.test.ts`
+- Test: `src/sync/__tests__/plan-untracked.test.ts`
+- Modify: `src/sync/plan-shared.ts`
+- Modify: `src/sync/plan-tracked.ts`
+- Modify: `src/sync/plan-untracked.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/plan-tracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-tracked.test.ts b/src/sync/__tests__/plan-tracked.test.ts
+index d02d660..afb0988 100644
+--- a/src/sync/__tests__/plan-tracked.test.ts
++++ b/src/sync/__tests__/plan-tracked.test.ts
+@@ -263,6 +263,43 @@ describe('binary tracked records (spec §6.4)', () => {
+     ]);
+   });
+ 
++  describe('B11 re-upload follows the uploadKey case rule', () => {
++    const KD = record('r1', 'docs/a.pdf');
++    const opts = (o: InputOptions = {}): InputOptions => ({
++      local: [localEntry('docs/a.pdf', { mtimeMs: 2000, size: 12 })],
++      probes: [['r1', { state: 'trashed' }]],
++      md5s: [['docs/a.pdf', 'edit']],
++      folders: [['F-Docs', 'Docs']],
++      ...o,
++    });
++
++    it('case-sensitive volume: a case-only folder mismatch is ambiguous, nothing uploads', () => {
++      const result = run(opts({ pair: { caseInsensitive: false } }), KD);
++      expect(result.actions).toEqual([]);
++      expect(result.notes).toEqual([
++        {
++          code: 'ambiguous',
++          path: 'docs/a.pdf',
++          rule: 'B11',
++          remoteId: 'r1',
++          message: 'a Drive folder name differs only in case',
++        },
++      ]);
++      const od = run(opts({ pair: { caseInsensitive: false }, remoteProvider: 'microsoft' }), KD);
++      expect(od.notes[0]?.message).toBe('a OneDrive folder name differs only in case');
++    });
++
++    it('case-insensitive volume: the remote folder spelling is reused', () => {
++      expect(only(opts(), KD)).toMatchObject({
++        kind: 'upload-new',
++        rule: 'B11',
++        key: 'Docs/a.pdf',
++        rebaseFrom: 'r1',
++        selection: { remove: ['docs/a.pdf'], add: ['Docs/a.pdf'] },
++      });
++    });
++  });
++
+   it('B11 after a crash adopts the identical re-upload instead of uploading twice', () => {
+     const a = only({
+       local: [L_EDITED],
+```
+
+`src/sync/__tests__/plan-untracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-untracked.test.ts b/src/sync/__tests__/plan-untracked.test.ts
+index d78f835..0ad35d2 100644
+--- a/src/sync/__tests__/plan-untracked.test.ts
++++ b/src/sync/__tests__/plan-untracked.test.ts
+@@ -277,7 +277,11 @@ describe('review regressions', () => {
+       md5s: [['docs/a.pdf', 'm']],
+     });
+     expect(result.actions).toEqual([]);
+-    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
++    expect(result.notes[0]).toMatchObject({
++      code: 'ambiguous',
++      rule: 'U1',
++      message: 'a Drive folder name differs only in case',
++    });
+   });
+ 
+   it('U8 counts ctime: a copied file with an old mtime is still a candidate', () => {
+@@ -402,7 +406,11 @@ describe('remote names (OneDrive sync spec §4.3)', () => {
+       remoteProvider: 'microsoft',
+     });
+     expect(result.actions).toEqual([]);
+-    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
++    expect(result.notes[0]).toMatchObject({
++      code: 'ambiguous',
++      rule: 'U1',
++      message: 'a OneDrive folder name differs only in case',
++    });
+   });
+ 
+   it('on a case-insensitive volume the remote spelling is reused on OneDrive', () => {
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts`
+
+Expected: FAIL. 3 failed: both B11 case tests (an `upload-new` with key `docs/a.pdf` instead of the ambiguous note / the `Docs/a.pdf` key) and the OneDrive U1 message (`a Drive folder name differs only in case`).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/plan-shared.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-shared.ts b/src/sync/plan-shared.ts
+index ada09a9..1006ecf 100644
+--- a/src/sync/plan-shared.ts
++++ b/src/sync/plan-shared.ts
+@@ -43,6 +43,11 @@ export interface ActionBase {
+   selection: SelectionChange;
+ }
+ 
++/** The note when a parent folder matches a remote folder only by case (uploadKey null). */
++export function caseOnlyFolderMessage(ctx: PlanContext): string {
++  return `a ${providerLabel(ctx.input.remoteProvider ?? 'google')} folder name differs only in case`;
++}
++
+ /**
+  * Why `key` cannot be uploaded to the pair's remote (OneDrive sync spec §4.3): the file
+  * name, or a parent folder the executor would create (one with no scanned remote folder).
+```
+
+`src/sync/plan-tracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-tracked.ts b/src/sync/plan-tracked.ts
+index 14f24f8..ad7cae8 100644
+--- a/src/sync/plan-tracked.ts
++++ b/src/sync/plan-tracked.ts
+@@ -2,7 +2,9 @@ import { localMatchesRemote, remoteChanged, sameContent } from './content-compar
+ import { foldKey } from './paths.js';
+ import { planNative } from './plan-native.js';
+ import { planRemoteOnly } from './plan-remote-only.js';
++import { uploadKey } from './plan-untracked.js';
+ import {
++  caseOnlyFolderMessage,
+   makeScope,
+   needsRefresh,
+   planMoved,
+@@ -112,7 +114,11 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+         'trashed in Drive, and a different Drive file now uses this name',
+       );
+     }
+-    const bad = uploadNameProblem(ctx, record.path);
++    // The same folder-spelling rule as a U1 upload: reuse a remote folder that differs only
++    // in case on a case-insensitive volume, refuse it on a case-sensitive one.
++    const target = uploadKey(ctx, record.path);
++    if (target === null) return note('ambiguous', 'B11', caseOnlyFolderMessage(ctx));
++    const bad = uploadNameProblem(ctx, target);
+     if (bad) {
+       out.notes.push({
+         code: 'remote-name-invalid',
+@@ -126,8 +132,10 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+       ...base,
+       kind: 'upload-new',
+       rule: 'B11',
++      key: target,
+       remote: null,
+       rebaseFrom: record.remoteId,
++      selection: target === record.path ? {} : { remove: [record.path], add: [target] },
+     });
+   }
+   if (R.kind === 'moved-out') {
+```
+
+`src/sync/plan-untracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-untracked.ts b/src/sync/plan-untracked.ts
+index 0516c23..5533bd8 100644
+--- a/src/sync/plan-untracked.ts
++++ b/src/sync/plan-untracked.ts
+@@ -1,6 +1,6 @@
+ import { localMatchesRemote } from './content-compare.js';
+ import { baseName, foldKey, parentKey } from './paths.js';
+-import { uploadNameProblem } from './plan-shared.js';
++import { caseOnlyFolderMessage, uploadNameProblem } from './plan-shared.js';
+ import {
+   isBlocked,
+   isExcluded,
+@@ -157,7 +157,7 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
+       if (L && !R) {
+         const target = uploadKey(ctx, L.key);
+         if (target === null) {
+-          note('ambiguous', 'U1', 'a Drive folder name differs only in case');
++          note('ambiguous', 'U1', caseOnlyFolderMessage(ctx));
+           continue;
+         }
+         const bad = uploadNameProblem(ctx, target);
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1514 passed | 6 skipped (1520)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts
+git commit -F - <<'MSG'
+fix(sync): B11 re-uploads follow the uploadKey folder-case rule
+
+A B11 re-upload now goes through uploadKey like a U1 upload: on a
+case-sensitive volume a parent that matches a remote folder only by case is
+an ambiguous note instead of a silent upload into the other spelling; on a
+case-insensitive one the remote spelling is reused (selection renamed). The
+case-only note names the provider ("a OneDrive folder name ..."); the Google
+text is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 45: Review fixes for chunk 3 (f): re-verify a OneDrive file without a hash by its eTag
+
+**Spec:** stage-3 review M5 (§3.4 re-verification). Commit `0b20556` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/content-compare.test.ts`
+- Test: `src/sync/__tests__/remote-scanner.test.ts`
+- Modify: `src/sync/content-compare.ts`
+- Modify: `src/sync/remote-scanner.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/content-compare.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/content-compare.test.ts b/src/sync/__tests__/content-compare.test.ts
+index fed5c7d..96474fc 100644
+--- a/src/sync/__tests__/content-compare.test.ts
++++ b/src/sync/__tests__/content-compare.test.ts
+@@ -61,6 +61,18 @@ describe('remoteUnchangedSince', () => {
+     expect(remoteUnchangedSince(r, { ...current, hash: { ...hash, value: 'other' } })).toBe(false);
+     expect(remoteUnchangedSince(r, { ...current, hash: { kind: 'md5', value: 'QX' } })).toBe(false);
+   });
++  it('without a hash, a OneDrive eTag change counts even when modifiedTime is kept', () => {
++    const r = remoteEntry('r1', 'a.pdf', { hash: null, version: '"{r1},1"' });
++    const current = { ...item({ modifiedTime: r.modifiedTime }), hash: null, version: '"{r1},1"' };
++    expect(remoteUnchangedSince(r, current)).toBe(true);
++    expect(remoteUnchangedSince(r, { ...current, version: '"{r1},2"' })).toBe(false);
++    expect(remoteUnchangedSince(r, { ...current, version: null })).toBe(false);
++  });
++  it('Google entries carry no version; a missing hash still compares as before', () => {
++    const r = remoteEntry('r1', 'a.pdf', { md5: null });
++    expect(r.version).toBeUndefined();
++    expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
++  });
+   it('native needs modifiedTime equal', () => {
+     const r = nativeEntry('g1', 'Plan.docx');
+     expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
+```
+
+`src/sync/__tests__/remote-scanner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-scanner.test.ts b/src/sync/__tests__/remote-scanner.test.ts
+index d9ad0af..c777aca 100644
+--- a/src/sync/__tests__/remote-scanner.test.ts
++++ b/src/sync/__tests__/remote-scanner.test.ts
+@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
+ import { NotFoundError, ReauthRequiredError } from '../../errors.js';
+ import { GOOGLE_MIME } from '../../files/export-formats.js';
+ import { childrenQuery } from '../remote/google-remote.js';
+-import { exportKey, scanRemote } from '../remote-scanner.js';
++import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
++import { exportKey, scanRemote, toRemoteEntry } from '../remote-scanner.js';
++import { graphFile } from './fake-onedrive.js';
+ import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
+ import { binary, folder, treeLister } from './drive-tree.js';
+ 
+@@ -15,6 +17,20 @@ describe('childrenQuery', () => {
+   });
+ });
+ 
++describe('toRemoteEntry', () => {
++  it('carries the OneDrive eTag as version; Google entries have none', () => {
++    const od = toRemoteEntry(toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), '', 'P', ['P']);
++    expect(od.version).toBe('"{f1},1"');
++    const google = toRemoteEntry(
++      { ...toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), version: null },
++      '',
++      'P',
++      ['P'],
++    );
++    expect('version' in google).toBe(false);
++  });
++});
++
+ describe('exportKey', () => {
+   it('adds the extension unless present, NFC, under the parent key', () => {
+     expect(exportKey('', 'Plan', 'docx')).toBe('Plan.docx');
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/content-compare.test.ts src/sync/__tests__/remote-scanner.test.ts`
+
+Expected: FAIL. 2 failed: `without a hash, a OneDrive eTag change counts even when modifiedTime is kept` (`expected true to be false`) and `carries the OneDrive eTag as version` (`expected undefined to be '"{f1},1"'`).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/content-compare.ts` (modify):
+
+```diff
+diff --git a/src/sync/content-compare.ts b/src/sync/content-compare.ts
+index 97b8eed..cdad2be 100644
+--- a/src/sync/content-compare.ts
++++ b/src/sync/content-compare.ts
+@@ -30,11 +30,18 @@ export function remoteChanged(
+   };
+ }
+ 
+-/** Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal. */
++/**
++ * Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal.
++ * Without a hash, a planned OneDrive eTag must also be unchanged, so an edit that keeps
++ * modifiedTime is still caught (Google entries carry no version: unchanged rule).
++ */
+ export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem): boolean {
+   if (current.modifiedTime !== planned.modifiedTime) return false;
+   if (planned.native !== null) return true;
+-  if (planned.hash === null || current.hash === null) return planned.hash === current.hash;
++  if (planned.hash === null || current.hash === null) {
++    if (planned.hash !== current.hash) return false;
++    return planned.version === undefined || planned.version === current.version;
++  }
+   return sameHash(planned.hash, current.hash) === true;
+ }
+```
+
+`src/sync/remote-scanner.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-scanner.ts b/src/sync/remote-scanner.ts
+index 4f29719..680d707 100644
+--- a/src/sync/remote-scanner.ts
++++ b/src/sync/remote-scanner.ts
+@@ -44,6 +44,7 @@ export function toRemoteEntry(
+     canEdit: item.canEdit,
+     canTrash: item.canTrash,
+     native,
++    ...(item.version !== null ? { version: item.version } : {}),
+   };
+ }
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index c7aac96..02682d8 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -132,6 +132,11 @@ export interface RemoteEntry {
+   canTrash: boolean;
+   /** Google-native file synced as a read-only export; null for binary files. */
+   native: NativeInfo | null;
++  /**
++   * OneDrive eTag at scan time, compared at the executor's re-read for files without a hash
++   * (a remote edit can keep modifiedTime). Absent on Google.
++   */
++  version?: string;
+ }
+ 
+ export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/content-compare.test.ts src/sync/__tests__/remote-scanner.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/content-compare.test.ts src/sync/__tests__/remote-scanner.test.ts src/sync/content-compare.ts src/sync/remote-scanner.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1517 passed | 6 skipped (1523)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/content-compare.test.ts src/sync/__tests__/remote-scanner.test.ts src/sync/content-compare.ts src/sync/remote-scanner.ts src/sync/types.ts
+git commit -F - <<'MSG'
+fix(sync): re-verify a OneDrive file without a hash by its eTag
+
+RemoteEntry carries the scanned OneDrive eTag (version; absent on Google) and
+remoteUnchangedSince also requires it unchanged when neither side has a hash,
+so a remote edit that keeps lastModifiedDateTime is skipped instead of
+overwritten. Google entries and their comparison are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 46: Review fixes for chunk 3 (g): provider words in the remaining OneDrive texts
+
+**Spec:** stage-3 review M7 (§4.1 provider words; Chunk 3 decision 11 is replaced). Commit `3e58795` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/executor.test.ts`
+- Test: `src/sync/__tests__/plan-tracked.test.ts`
+- Test: `src/sync/__tests__/release.test.ts`
+- Test: `src/sync/__tests__/sync-service.onedrive.test.ts`
+- Modify: `src/sync/exec-records.ts`
+- Modify: `src/sync/executor.ts`
+- Modify: `src/sync/plan-tracked.ts`
+- Modify: `src/sync/release.ts`
+- Modify: `src/sync/remote/remote-names.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.test.ts b/src/sync/__tests__/executor.test.ts
+index cc694f4..52a6f54 100644
+--- a/src/sync/__tests__/executor.test.ts
++++ b/src/sync/__tests__/executor.test.ts
+@@ -471,6 +471,9 @@ describe('Executor', () => {
+   it('numbers conflict copies and skips the upload when the copy fails', async () => {
+     expect(conflictName('a.pdf', NOW, 1)).toBe('a (Drive conflict 2026-11-03 10.15) 2.pdf');
+     expect(conflictName('README', NOW, 0)).toBe('README (Drive conflict 2026-11-03 10.15)');
++    expect(conflictName('a.pdf', NOW, 0, 'microsoft')).toBe(
++      'a (OneDrive conflict 2026-11-03 10.15).pdf',
++    );
+     const l = await put('a.pdf', 'local edit');
+     serve('something else');
+     const out = await executor(pairFile([record('r1', 'a.pdf')])).run([
+```
+
+`src/sync/__tests__/plan-tracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-tracked.test.ts b/src/sync/__tests__/plan-tracked.test.ts
+index afb0988..4b48604 100644
+--- a/src/sync/__tests__/plan-tracked.test.ts
++++ b/src/sync/__tests__/plan-tracked.test.ts
+@@ -403,6 +403,45 @@ describe('review regressions', () => {
+     expect(result.notes[0]).toMatchObject({ code: 'collision', rule: 'B11' });
+   });
+ 
++  it('B11 collision and weak-compare texts name OneDrive on a OneDrive pair', () => {
++    const collision = run({
++      local: [L_EDITED],
++      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
++      probes: [['r1', { state: 'trashed' }]],
++      md5s: [['a.pdf', 'edit']],
++      remoteProvider: 'microsoft',
++    });
++    expect(collision.notes[0]?.message).toBe(
++      'deleted on OneDrive, and a different OneDrive file now uses this name',
++    );
++    const google = run({
++      local: [L_EDITED],
++      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
++      probes: [['r1', { state: 'trashed' }]],
++      md5s: [['a.pdf', 'edit']],
++    });
++    expect(google.notes[0]?.message).toBe(
++      'trashed in Drive, and a different Drive file now uses this name',
++    );
++    const weak = run(
++      {
++        local: [L],
++        remote: [remoteEntry('r1', 'a.pdf', { md5: null })],
++        remoteProvider: 'microsoft',
++      },
++      { ...K, remoteHash: null },
++    );
++    expect(weak.notes[0]).toMatchObject({
++      code: 'weak-compare',
++      message: 'OneDrive reports no hash; compared size and modifiedTime',
++    });
++    const weakGoogle = run(
++      { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
++      { ...K, remoteHash: null },
++    );
++    expect(weakGoogle.notes[0]?.message).toBe('Drive has no md5; compared size and modifiedTime');
++  });
++
+   it('resumes a move that crashed after unlink: adopts the file already at the target', () => {
+     const result = run({
+       local: [localEntry('b.pdf', { ino: 7, ctimeMs: 5 })],
+```
+
+`src/sync/__tests__/release.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/release.test.ts b/src/sync/__tests__/release.test.ts
+index 863a7f8..9844136 100644
+--- a/src/sync/__tests__/release.test.ts
++++ b/src/sync/__tests__/release.test.ts
+@@ -60,6 +60,40 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
+       },
+     ]);
+   });
++  it('refusal texts name OneDrive on a OneDrive pair (Google texts unchanged)', () => {
++    const od = { remoteHashKind: 'quickXor' as const, remoteProvider: 'microsoft' as const };
++    const hash = { kind: 'quickXor' as const, value: 'QX-remote' };
++    const notInSync = sel(
++      {
++        records: [record('r1', 'a.pdf', { remoteHash: hash })],
++        local: [localEntry('a.pdf')],
++        remote: [remoteEntry('r1', 'a.pdf', { hash })],
++        digests: [['a.pdf', { md5: 'md5-r1', remote: { kind: 'quickXor', value: 'QX-local' } }]],
++        ...od,
++      },
++      { paths: ['a.pdf'] },
++    );
++    expect(notInSync.skipped[0]?.reason).toBe(
++      'not in sync (changed locally or on OneDrive); run sync_run first',
++    );
++    const remoteOnly = sel(
++      { records: [record('r1', 'a.pdf', { remoteOnly: true })], ...od },
++      { paths: ['a.pdf'] },
++    );
++    expect(remoteOnly.skipped[0]?.reason).toBe('already in OneDrive only');
++    const moved = sel(
++      { records: [A], local: [localEntry('a.pdf')], remote: [remoteEntry('r1', 'b.pdf')], ...od },
++      { paths: ['a.pdf'] },
++    );
++    expect(moved.skipped[0]?.reason).toBe(
++      'moved or renamed on OneDrive since the last sync; run sync_run first',
++    );
++    const google = sel(
++      { records: [record('r1', 'a.pdf', { remoteOnly: true })] },
++      { paths: ['a.pdf'] },
++    );
++    expect(google.skipped[0]?.reason).toBe('already in Drive only');
++  });
+   it('binary needs L = record = Drive md5; native needs L = last export', () => {
+     const r = sel(
+       {
+```
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.onedrive.test.ts b/src/sync/__tests__/sync-service.onedrive.test.ts
+index 0b38c49..a99c738 100644
+--- a/src/sync/__tests__/sync-service.onedrive.test.ts
++++ b/src/sync/__tests__/sync-service.onedrive.test.ts
+@@ -128,7 +128,9 @@ describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
+     od.addFile(docs.id, 'diff.txt', 'remote bytes', 'D');
+     await writeFile(at('diff.txt'), 'local bytes');
+     await service().select({ name: 'docs', add: ['diff.txt'] });
+-    expect((await apply()).actions.conflict).toEqual(['diff.txt']);
++    const report = await apply();
++    expect(report.actions.conflict).toEqual(['diff.txt']);
++    expect(report.conflicts[0]?.conflictCopy).toMatch(/^diff \(OneDrive conflict .+\)\.txt$/);
+   });
+ 
+   it('a stat-unchanged tracked file is released with a quickXor digest', async () => {
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: FAIL. 4 failed: the release refusal texts, the B11 collision / weak-compare texts, `conflictName(…, 'microsoft')` and the conflict copy name on a OneDrive pair still say Drive.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/exec-records.ts` (modify):
+
+```diff
+diff --git a/src/sync/exec-records.ts b/src/sync/exec-records.ts
+index 0149744..6791e04 100644
+--- a/src/sync/exec-records.ts
++++ b/src/sync/exec-records.ts
+@@ -1,6 +1,7 @@
+ import { ValidationError } from '../errors.js';
+ import { foldKey } from './paths.js';
+-import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
++import { providerLabel } from './remote/remote-names.js';
++import type { ContentHash, RemoteItem, SyncRemote } from './remote/sync-remote.js';
+ import type { StatExpect } from './transfer.js';
+ import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
+ 
+@@ -85,9 +86,17 @@ function stamped(base: string, label: string, at: Date, attempt: number): string
+   return `${stem} (${label} ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
+ }
+ 
+-/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
+-export function conflictName(base: string, at: Date, attempt: number): string {
+-  return stamped(base, 'Drive conflict', at, attempt);
++/**
++ * `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time);
++ * "OneDrive conflict" on a OneDrive pair.
++ */
++export function conflictName(
++  base: string,
++  at: Date,
++  attempt: number,
++  provider: SyncRemote['provider'] = 'google',
++): string {
++  return stamped(base, `${providerLabel(provider)} conflict`, at, attempt);
+ }
+ 
+ /** `<stem> (local edit YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.6 N5). */
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index d9d028c..c052109 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -500,10 +500,15 @@ export class Executor {
+     const at = this.deps.clock();
+     const base = path.basename(abs);
+     const copy = await this.deps.remote.download(remote.id, (open) =>
+-      placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
+-        ...this.check(remote),
+-        maxAttempts: MAX_CONFLICT_NAMES,
+-      }),
++      placeExclusive(
++        path.dirname(abs),
++        (i) => conflictName(base, at, i, this.deps.remote.provider),
++        open,
++        {
++          ...this.check(remote),
++          maxAttempts: MAX_CONFLICT_NAMES,
++        },
++      ),
+     );
+     const conflictCopy = path.relative(this.pair.localDir, copy.path).split(path.sep).join('/');
+     await this.audit('sync_conflict', action, remote.id);
+```
+
+`src/sync/plan-tracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-tracked.ts b/src/sync/plan-tracked.ts
+index ad7cae8..93a5e33 100644
+--- a/src/sync/plan-tracked.ts
++++ b/src/sync/plan-tracked.ts
+@@ -18,6 +18,7 @@ import {
+   resolveRemote,
+   type PlanContext,
+ } from './resolve.js';
++import { providerLabel } from './remote/remote-names.js';
+ import type { LocalDigests, SyncRecord } from './types.js';
+ 
+ export type { TrackedResult } from './plan-shared.js';
+@@ -111,7 +112,9 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+       return note(
+         'collision',
+         'B11',
+-        'trashed in Drive, and a different Drive file now uses this name',
++        ctx.input.remoteProvider === 'microsoft'
++          ? 'deleted on OneDrive, and a different OneDrive file now uses this name'
++          : 'trashed in Drive, and a different Drive file now uses this name',
+       );
+     }
+     // The same folder-spelling rule as a U1 upload: reuse a remote folder that differs only
+@@ -154,7 +157,13 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+ 
+   const remote = R.entry;
+   const rs = remoteChanged(record, remote);
+-  if (rs.weak) note('weak-compare', 'R', 'Drive has no md5; compared size and modifiedTime');
++  if (rs.weak) {
++    const why =
++      ctx.input.remoteProvider === 'microsoft'
++        ? `${providerLabel('microsoft')} reports no hash`
++        : 'Drive has no md5';
++    note('weak-compare', 'R', `${why}; compared size and modifiedTime`);
++  }
+ 
+   if (!R.moved) {
+     if (entry) {
+```
+
+`src/sync/release.ts` (modify):
+
+```diff
+diff --git a/src/sync/release.ts b/src/sync/release.ts
+index 3fa3456..75bd00e 100644
+--- a/src/sync/release.ts
++++ b/src/sync/release.ts
+@@ -8,7 +8,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
+ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
+ import { TYPE_CHANGED } from './plan-tracked.js';
+-import { providerLabel } from './remote/remote-names.js';
++import { providerIn, providerLabel } from './remote/remote-names.js';
+ import type { SyncRemote } from './remote/sync-remote.js';
+ import {
+   buildContext,
+@@ -64,13 +64,16 @@ export function releaseStatus(kind: ReleaseCandidate['kind'], dryRun: boolean):
+ 
+ /** Spec §10 eligibility, or R0 (addendum §3.2) for an explicitly named, deleted file. */
+ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): ReleaseCandidate | string {
+-  if (record.remoteOnly) return 'already in Drive only';
++  const provider = ctx.input.remoteProvider ?? 'google';
++  const label = providerLabel(provider);
++  const where = providerIn(provider);
++  if (record.remoteOnly) return `already in ${label} only`;
+   if (isUnknownKey(ctx, record.path)) return 'inside a folder that could not be read';
+   if (ctx.ambiguousFolds.has(foldKey(record.path))) return 'several files share this name';
+   const R = resolveRemote(ctx, record);
+   if (R.kind === 'unknown') return R.reason;
+-  if (R.kind !== 'present') return `the Drive file is ${R.kind}`;
+-  if (R.moved) return 'moved or renamed in Drive since the last sync; run sync_run first';
++  if (R.kind !== 'present') return `the ${label} file is ${R.kind}`;
++  if (R.moved) return `moved or renamed ${where} since the last sync; run sync_run first`;
+   if ((record.native !== null) !== (R.entry.native !== null)) return TYPE_CHANGED;
+   const L = resolveLocal(ctx, record.path);
+   // Native: a Drive change since the last export does not block release. This is intentional
+@@ -79,10 +82,10 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
+     const st = localState(ctx, record, L.entry);
+     if (!st) return 'local file could not be hashed';
+     if (!st.changed && R.entry.native === null && R.entry.hash === null) {
+-      return `${providerLabel(ctx.input.remoteProvider ?? 'google')} reports no hash for this file; it cannot be released safely`;
++      return `${label} reports no hash for this file; it cannot be released safely`;
+     }
+     if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
+-      return 'not in sync (changed locally or in Drive); run sync_run first';
++      return `not in sync (changed locally or ${where}); run sync_run first`;
+     }
+     return { record, remote: R.entry, kind: 'present', localName: L.entry.name };
+   }
+@@ -90,9 +93,9 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
+   // matches resolve to `unknown` / `ambiguous` and are refused here.
+   if (L.kind === 'unknown') return L.reason;
+   if (L.kind === 'ambiguous') return 'a local file with a similar name exists';
+-  if (!explicit) return 'deleted locally; name it in paths to keep it in Drive only';
++  if (!explicit) return `deleted locally; name it in paths to keep it in ${label} only`;
+   if (remoteChanged(record, R.entry).changed) {
+-    return 'changed in Drive since the last sync; run sync_run first';
++    return `changed ${where} since the last sync; run sync_run first`;
+   }
+   return { record, remote: R.entry, kind: 'deleted', localName: null };
+ }
+```
+
+`src/sync/remote/remote-names.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote/remote-names.ts b/src/sync/remote/remote-names.ts
+index a766f0c..d5259f1 100644
+--- a/src/sync/remote/remote-names.ts
++++ b/src/sync/remote/remote-names.ts
+@@ -36,3 +36,8 @@ export function remoteNameProblem(provider: SyncRemote['provider'], name: string
+ export function providerLabel(provider: SyncRemote['provider']): string {
+   return provider === 'microsoft' ? 'OneDrive' : 'Drive';
+ }
++
++/** "in Drive" / "on OneDrive", for "changed <where> since …" texts. */
++export function providerIn(provider: SyncRemote['provider']): string {
++  return provider === 'microsoft' ? 'on OneDrive' : 'in Drive';
++}
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/executor.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/exec-records.ts src/sync/executor.ts src/sync/plan-tracked.ts src/sync/release.ts src/sync/remote/remote-names.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1519 passed | 6 skipped (1525)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/executor.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/exec-records.ts src/sync/executor.ts src/sync/plan-tracked.ts src/sync/release.ts src/sync/remote/remote-names.ts
+git commit -F - <<'MSG'
+fix(sync): name OneDrive in the remaining texts of OneDrive pairs
+
+Release refusals, the B11 collision note, the weak-compare note and the
+conflict-copy name ("(OneDrive conflict …)") use the provider word on OneDrive
+pairs. Google texts and names are byte-identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 47: Review fixes for chunk 3 (h): OneDrive length limits in UTF-16 units and the 400-character path
+
+**Spec:** stage-3 review M8 (§4.3 names). Commit `c4da287` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/plan-untracked.test.ts`
+- Test: `src/sync/__tests__/remote-names.test.ts`
+- Modify: `src/sync/plan-shared.ts`
+- Modify: `src/sync/remote/remote-names.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/plan-untracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-untracked.test.ts b/src/sync/__tests__/plan-untracked.test.ts
+index 0ad35d2..499c34e 100644
+--- a/src/sync/__tests__/plan-untracked.test.ts
++++ b/src/sync/__tests__/plan-untracked.test.ts
+@@ -371,6 +371,25 @@ describe('remote names (OneDrive sync spec §4.3)', () => {
+     ]);
+   });
+ 
++  it('U1 on OneDrive: a path of 400 characters or more is a remote-name-invalid note', () => {
++    const key = `${'d'.repeat(200)}/${'f'.repeat(199)}`;
++    const result = run({
++      selection: [key],
++      local: [localEntry(key)],
++      remoteProvider: 'microsoft',
++    });
++    expect(result.actions).toEqual([]);
++    expect(result.notes).toEqual([
++      {
++        code: 'remote-name-invalid',
++        path: key,
++        rule: 'U1',
++        message:
++          'cannot be uploaded to OneDrive: the path is 400 characters or longer (OneDrive allows fewer than 400)',
++      },
++    ]);
++  });
++
+   it('a refused folder segment is reported once for its subtree', () => {
+     const p = plan(
+       planInput({
+```
+
+`src/sync/__tests__/remote-names.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-names.test.ts b/src/sync/__tests__/remote-names.test.ts
+index b281c7b..5fb2006 100644
+--- a/src/sync/__tests__/remote-names.test.ts
++++ b/src/sync/__tests__/remote-names.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest';
+-import { providerLabel, remoteNameProblem } from '../remote/remote-names.js';
++import { providerLabel, remoteNameProblem, remotePathProblem } from '../remote/remote-names.js';
+ 
+ describe('remoteNameProblem', () => {
+   it('Google accepts every name', () => {
+@@ -49,8 +49,23 @@ describe('remoteNameProblem', () => {
+     expect(remoteNameProblem('microsoft', 'é'.repeat(256))).toContain('255');
+   });
+ 
++  it('the 255 limit counts UTF-16 units (the stricter count; Microsoft does not say)', () => {
++    const emoji = '\u{1F600}'; // one code point, two UTF-16 units
++    expect(remoteNameProblem('microsoft', emoji.repeat(127))).toBeNull();
++    expect(remoteNameProblem('microsoft', emoji.repeat(128))).toContain('255');
++  });
++
+   it('labels the providers', () => {
+     expect(providerLabel('google')).toBe('Drive');
+     expect(providerLabel('microsoft')).toBe('OneDrive');
+   });
+ });
++
++describe('remotePathProblem', () => {
++  it('OneDrive refuses a path of 400 characters or more; Google accepts any', () => {
++    const long = `${'d'.repeat(200)}/${'f'.repeat(199)}`; // 400
++    expect(remotePathProblem('microsoft', long.slice(1))).toBeNull();
++    expect(remotePathProblem('microsoft', long)).toContain('400');
++    expect(remotePathProblem('google', long)).toBeNull();
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-names.test.ts`
+
+Expected: FAIL. 3 failed: `TypeError: remotePathProblem is not a function`, the U1 400-character note (an `upload-new` was planned) and the UTF-16 count (128 astral characters were accepted).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/plan-shared.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-shared.ts b/src/sync/plan-shared.ts
+index 1006ecf..6c878ea 100644
+--- a/src/sync/plan-shared.ts
++++ b/src/sync/plan-shared.ts
+@@ -1,6 +1,6 @@
+ import { sameHashOrNone } from './content-compare.js';
+ import { foldKey } from './paths.js';
+-import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
++import { providerLabel, remoteNameProblem, remotePathProblem } from './remote/remote-names.js';
+ import { isExcluded, type PlanContext } from './resolve.js';
+ import type {
+   Action,
+@@ -68,6 +68,10 @@ export function uploadNameProblem(
+       return { path, message: `cannot be uploaded to ${providerLabel(provider)}: ${problem}` };
+     }
+   }
++  const tooLong = remotePathProblem(provider, key);
++  if (tooLong) {
++    return { path: key, message: `cannot be uploaded to ${providerLabel(provider)}: ${tooLong}` };
++  }
+   return null;
+ }
+```
+
+`src/sync/remote/remote-names.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote/remote-names.ts b/src/sync/remote/remote-names.ts
+index d5259f1..fd9e6bd 100644
+--- a/src/sync/remote/remote-names.ts
++++ b/src/sync/remote/remote-names.ts
+@@ -7,7 +7,13 @@ import type { SyncRemote } from './sync-remote.js';
+ 
+ const ONEDRIVE_FORBIDDEN = /["*:<>?/\\|]/;
+ const ONEDRIVE_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
++/*
++ * Microsoft documents 255 characters per name and fewer than 400 for the whole path without
++ * saying how characters are counted; JavaScript's UTF-16 length is the stricter count (an
++ * astral character is two units, never fewer than one code point), so it is used.
++ */
+ const ONEDRIVE_MAX_LENGTH = 255;
++const ONEDRIVE_MAX_PATH = 400;
+ 
+ function oneDriveProblem(name: string): string | null {
+   if (name === '') return 'the name is empty';
+@@ -23,7 +29,7 @@ function oneDriveProblem(name: string): string | null {
+   }
+   if (name.startsWith('~$')) return 'names starting with ~$ are not allowed';
+   if (lower.includes('_vti_')) return 'names containing _vti_ are not allowed';
+-  if ([...name].length > ONEDRIVE_MAX_LENGTH) return 'the name is longer than 255 characters';
++  if (name.length > ONEDRIVE_MAX_LENGTH) return 'the name is longer than 255 characters';
+   return null;
+ }
+ 
+@@ -32,6 +38,16 @@ export function remoteNameProblem(provider: SyncRemote['provider'], name: string
+   return provider === 'microsoft' ? oneDriveProblem(name) : null;
+ }
+ 
++/**
++ * Why `provider` cannot store an item at `key` (a pair-relative path): OneDrive needs the
++ * whole path under 400 characters. The pair root's own path is not known to the planner, so
++ * this is a lower bound; a longer root can still make Graph refuse the upload.
++ */
++export function remotePathProblem(provider: SyncRemote['provider'], key: string): string | null {
++  if (provider !== 'microsoft' || key.length < ONEDRIVE_MAX_PATH) return null;
++  return `the path is ${ONEDRIVE_MAX_PATH} characters or longer (OneDrive allows fewer than ${ONEDRIVE_MAX_PATH})`;
++}
++
+ /** The provider's name in user-facing texts. */
+ export function providerLabel(provider: SyncRemote['provider']): string {
+   return provider === 'microsoft' ? 'OneDrive' : 'Drive';
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-names.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-names.test.ts src/sync/plan-shared.ts src/sync/remote/remote-names.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1522 passed | 6 skipped (1528)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-names.test.ts src/sync/plan-shared.ts src/sync/remote/remote-names.ts
+git commit -F - <<'MSG'
+fix(sync): OneDrive name limits count UTF-16 units; 400-character path check
+
+Microsoft's docs give 255 characters per name and fewer than 400 per path but
+not the unit, so the stricter UTF-16 length is used. An upload whose
+pair-relative path reaches 400 characters is a remote-name-invalid note (a
+lower bound: the pair root's own path is not known to the planner).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 48: Cloud desktop folder guard
+
+**Spec:** §6 (all providers); stopping runs of an existing pair is a requested addition. Commit `71d466d` on the reference branch.
+
+**Files:**
+- Test: `src/cli/__tests__/sync-commands.test.ts`
+- Modify: `src/cli/sync-format.ts`
+- Modify: `src/mcp/sync-tools.ts`
+- Test (create): `src/sync/__tests__/cloud-folders.test.ts`
+- Test: `src/sync/__tests__/gather-digests.test.ts`
+- Test: `src/sync/__tests__/sync-service.pairs.test.ts`
+- Create: `src/sync/cloud-folders.ts`
+- Modify: `src/sync/pair-admin.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/cli/__tests__/sync-commands.test.ts` (modify):
+
+```diff
+diff --git a/src/cli/__tests__/sync-commands.test.ts b/src/cli/__tests__/sync-commands.test.ts
+index f60f37c..cef68c8 100644
+--- a/src/cli/__tests__/sync-commands.test.ts
++++ b/src/cli/__tests__/sync-commands.test.ts
+@@ -74,6 +74,15 @@ describe('sync CLI', () => {
+     expect(lines[0]).toContain('docs');
+     expect(lines[0]).toContain('/Users/x/Docs ⇄ F1 (emco)');
+     expect(lines[0]).toContain('baseline 3');
++    expect(lines[0]).not.toContain('warning');
++  });
++
++  it('lists a pair inside a cloud desktop folder with its warning', async () => {
++    const { lines, run, service } = setup();
++    const warning = '/Users/x/Docs is synced by the OneDrive desktop app; pick a folder outside it';
++    service.listPairs.mockResolvedValueOnce([{ ...SUMMARY, warning }]);
++    await run('list');
++    expect(lines[0]).toContain(`\n  warning: ${warning}`);
+   });
+ 
+   it('runs a dry run by default and applies with flags', async () => {
+```
+
+`src/sync/__tests__/cloud-folders.test.ts` (create):
+
+```diff
+diff --git a/src/sync/__tests__/cloud-folders.test.ts b/src/sync/__tests__/cloud-folders.test.ts
+new file mode 100644
+index 0000000..bc2d9cf
+--- /dev/null
++++ b/src/sync/__tests__/cloud-folders.test.ts
+@@ -0,0 +1,147 @@
++import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
++import os from 'node:os';
++import path from 'node:path';
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import {
++  cloudFolderConflict,
++  cloudFolderProblem,
++  findCloudFolders,
++  systemHost,
++  type CloudHost,
++} from '../cloud-folders.js';
++
++/** A host whose file system is a set of existing paths (realpath is the identity). */
++function fakeHost(
++  platform: NodeJS.Platform,
++  home: string,
++  existing: string[],
++  env: NodeJS.ProcessEnv = {},
++): CloudHost {
++  const api = platform === 'win32' ? path.win32 : path.posix;
++  const set = new Set(existing.map((p) => api.normalize(p)));
++  return {
++    platform,
++    home,
++    env,
++    realpath: async (p) => (set.has(api.normalize(p)) ? api.normalize(p) : null),
++    readdir: async (dir) => {
++      const prefix = api.normalize(dir) + api.sep;
++      return [...set]
++        .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes(api.sep))
++        .map((p) => p.slice(prefix.length));
++    },
++  };
++}
++
++describe('findCloudFolders (OneDrive sync spec §6)', () => {
++  it('macOS: CloudStorage OneDrive-* and GoogleDrive-*, /Volumes/GoogleDrive*, ~/OneDrive', async () => {
++    const host = fakeHost('darwin', '/Users/u', [
++      '/Users/u/Library/CloudStorage/OneDrive-Personal',
++      '/Users/u/Library/CloudStorage/GoogleDrive-u@example.com',
++      '/Users/u/Library/CloudStorage/Dropbox',
++      '/Volumes/GoogleDrive',
++      '/Volumes/Backup',
++      '/Users/u/OneDrive',
++      '/Users/u/OneDrive old',
++    ]);
++    expect(await findCloudFolders(host)).toEqual([
++      { path: '/Users/u/Library/CloudStorage/OneDrive-Personal', client: 'OneDrive' },
++      { path: '/Users/u/Library/CloudStorage/GoogleDrive-u@example.com', client: 'Google Drive' },
++      { path: '/Volumes/GoogleDrive', client: 'Google Drive' },
++      { path: '/Users/u/OneDrive', client: 'OneDrive' },
++    ]);
++  });
++
++  it('Windows: the OneDrive variables, %USERPROFILE%\\My Drive and <letter>:\\My Drive', async () => {
++    const host = fakeHost(
++      'win32',
++      'C:\\Users\\u',
++      ['C:\\Users\\u\\OneDrive', 'D:\\Work OneDrive', 'C:\\Users\\u\\My Drive', 'G:\\My Drive'],
++      {
++        OneDrive: 'C:\\Users\\u\\OneDrive',
++        OneDriveConsumer: 'C:\\Users\\u\\OneDrive',
++        OneDriveCommercial: 'D:\\Work OneDrive',
++        USERPROFILE: 'C:\\Users\\u',
++      },
++    );
++    expect(await findCloudFolders(host)).toEqual([
++      { path: 'C:\\Users\\u\\OneDrive', client: 'OneDrive' },
++      { path: 'D:\\Work OneDrive', client: 'OneDrive' },
++      { path: 'C:\\Users\\u\\My Drive', client: 'Google Drive' },
++      { path: 'G:\\My Drive', client: 'Google Drive' },
++    ]);
++  });
++
++  it('Linux: none', async () => {
++    const host = fakeHost('linux', '/home/u', ['/home/u/OneDrive', '/home/u/Google Drive']);
++    expect(await findCloudFolders(host)).toEqual([]);
++  });
++});
++
++describe('cloudFolderConflict', () => {
++  const folders = [
++    { path: '/Users/u/Library/CloudStorage/OneDrive-Personal', client: 'OneDrive' as const },
++  ];
++  const mac = { platform: 'darwin' as const, caseInsensitive: true };
++
++  it('the folder itself, a folder inside it, and a folder containing it', () => {
++    for (const dir of [
++      '/Users/u/Library/CloudStorage/OneDrive-Personal',
++      '/Users/u/Library/CloudStorage/OneDrive-Personal/Docs',
++      '/Users/u',
++    ]) {
++      expect(cloudFolderConflict(dir, folders, mac)).toEqual(folders[0]);
++    }
++    expect(cloudFolderConflict('/Users/u/Documents', folders, mac)).toBeNull();
++    expect(
++      cloudFolderConflict('/Users/u/Library/CloudStorage/OneDrive-Personal2', folders, mac),
++    ).toBeNull();
++  });
++
++  it('case-folded on a case-insensitive volume only', () => {
++    const upper = '/USERS/U/Library/CloudStorage/onedrive-personal/Docs';
++    expect(cloudFolderConflict(upper, folders, mac)).toEqual(folders[0]);
++    expect(
++      cloudFolderConflict(upper, folders, { platform: 'darwin', caseInsensitive: false }),
++    ).toBeNull();
++  });
++
++  it('Windows paths compare with Windows rules', () => {
++    const win = [{ path: 'C:\\Users\\u\\OneDrive', client: 'OneDrive' as const }];
++    const opts = { platform: 'win32' as const, caseInsensitive: true };
++    expect(cloudFolderConflict('c:\\users\\u\\onedrive\\Docs', win, opts)).toEqual(win[0]);
++    expect(cloudFolderConflict('C:\\Users\\u\\Documents', win, opts)).toBeNull();
++  });
++
++  it('the refusal text names the client', () => {
++    expect(cloudFolderProblem('/x/OneDrive-P', 'OneDrive')).toBe(
++      '/x/OneDrive-P is synced by the OneDrive desktop app; pick a folder outside it so the two do not sync the same files',
++    );
++  });
++});
++
++describe('systemHost realpath', () => {
++  let tmp: string;
++  beforeEach(async () => {
++    tmp = await mkdtemp(path.join(os.tmpdir(), 'cloud-folders-'));
++  });
++  afterEach(async () => {
++    await rm(tmp, { recursive: true, force: true });
++  });
++
++  it('resolves a symlinked cloud folder to its target; a missing one is null', async () => {
++    const target = path.join(tmp, 'CloudStorage', 'OneDrive-Personal');
++    await mkdir(target, { recursive: true });
++    await symlink(target, path.join(tmp, 'OneDrive'));
++    const system = systemHost();
++    const host: CloudHost = {
++      ...system,
++      platform: 'darwin',
++      home: tmp,
++      readdir: async (dir) => (dir === '/Volumes' ? [] : system.readdir(dir)),
++    };
++    const found = await findCloudFolders(host);
++    expect(found).toEqual([{ path: await host.realpath(target), client: 'OneDrive' }]);
++    expect(await host.realpath(path.join(tmp, 'missing'))).toBeNull();
++  });
++});
+```
+
+`src/sync/__tests__/gather-digests.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/gather-digests.test.ts b/src/sync/__tests__/gather-digests.test.ts
+index 6ee23fc..9ffb9bc 100644
+--- a/src/sync/__tests__/gather-digests.test.ts
++++ b/src/sync/__tests__/gather-digests.test.ts
+@@ -72,6 +72,7 @@ describe('gatherInput on a non-md5 remote (spec §3.1 stat-unchanged files)', ()
+       remoteFor: async () => remote,
+       openRemote: async () => remote,
+       digesters: stubDigester,
++      cloudFolders: async () => [],
+     };
+     const plain = await gatherInput(env, file);
+     expect(plain.input.digests.size).toBe(0);
+```
+
+`src/sync/__tests__/sync-service.pairs.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.pairs.test.ts b/src/sync/__tests__/sync-service.pairs.test.ts
+index 200b235..a9d9970 100644
+--- a/src/sync/__tests__/sync-service.pairs.test.ts
++++ b/src/sync/__tests__/sync-service.pairs.test.ts
+@@ -1,9 +1,11 @@
+-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
++import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+ import os from 'node:os';
+ import path from 'node:path';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { ValidationError } from '../../errors.js';
+ import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
++import type { CloudFolder } from '../cloud-folders.js';
++import { SyncRootError } from '../errors.js';
+ import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
+ import { SyncService } from '../sync-service.js';
+ import { record, refuseTrash } from './fixtures.js';
+@@ -451,3 +453,55 @@ describe('Microsoft pairs (OneDrive sync spec §4.1, §4.4)', () => {
+     expect(await readdir(local)).toEqual([]);
+   });
+ });
++
++describe('cloud desktop folder guard (OneDrive sync spec §6)', () => {
++  const withCloud = (folders: () => Promise<CloudFolder[]>): SyncService =>
++    new SyncService({
++      runner: createRunner(mem.drive),
++      audit,
++      retry: noSleep,
++      logger: silentLogger(),
++      store,
++      trash: refuseTrash,
++      clock: () => new Date('2026-11-03T12:00:00.000Z'),
++      cloudFolders: folders,
++    });
++  const message = (dir: string, client: string): string =>
++    `${dir} is synced by the ${client} desktop app; pick a folder outside it so the two do not sync the same files`;
++
++  it('refuses a localDir inside a OneDrive folder; nothing is written', async () => {
++    const real = await realpath(local);
++    const guarded = withCloud(async () => [{ path: path.dirname(real), client: 'OneDrive' }]);
++    await expect(
++      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
++    ).rejects.toThrow(new ValidationError(message(real, 'OneDrive')));
++    expect(await readdir(local)).toEqual([]);
++    expect(await store.exists('docs')).toBe(false);
++  });
++
++  it('refuses a localDir that contains a Google Drive folder', async () => {
++    const real = await realpath(local);
++    const guarded = withCloud(async () => [
++      { path: path.join(real, 'My Drive'), client: 'Google Drive' },
++    ]);
++    await expect(
++      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
++    ).rejects.toThrow(message(real, 'Google Drive'));
++  });
++
++  it('an existing pair inside one: listed with a warning; run and repair-marker refuse', async () => {
++    await createDocs();
++    const real = await realpath(local);
++    const guarded = withCloud(async () => [{ path: real, client: 'OneDrive' }]);
++    expect(await guarded.listPairs()).toEqual([
++      expect.objectContaining({ name: 'docs', warning: message(real, 'OneDrive') }),
++    ]);
++    expect((await sync.listPairs())[0]).not.toHaveProperty('warning');
++    await expect(guarded.run({ name: 'docs' })).rejects.toThrow(
++      new SyncRootError(message(real, 'OneDrive')),
++    );
++    await expect(guarded.repairMarker('docs', async () => true)).rejects.toThrow(
++      message(real, 'OneDrive'),
++    );
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/cli/__tests__/sync-commands.test.ts src/sync/__tests__/cloud-folders.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/sync-service.pairs.test.ts`
+
+Expected: FAIL. `Error: Cannot find module '../cloud-folders.js'` for the new file; in `sync-service.pairs.test.ts` 3 failed (the pair is created, `warning` is missing, the run is not refused); the CLI list test lacks the warning line.
+
+- [ ] **Step 3: Implement.**
+
+`src/cli/sync-format.ts` (modify):
+
+```diff
+diff --git a/src/cli/sync-format.ts b/src/cli/sync-format.ts
+index c7776ae..2286471 100644
+--- a/src/cli/sync-format.ts
++++ b/src/cli/sync-format.ts
+@@ -8,7 +8,8 @@ export function formatPairs(pairs: readonly PairSummary[]): string {
+     .map((p) => {
+       const c = p.counts;
+       const last = p.lastAppliedRunAt ?? 'never';
+-      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
++      const warning = p.warning ? `\n  warning: ${p.warning}` : '';
++      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}${warning}`;
+     })
+     .join('\n');
+ }
+```
+
+`src/mcp/sync-tools.ts` (modify):
+
+```diff
+diff --git a/src/mcp/sync-tools.ts b/src/mcp/sync-tools.ts
+index bbd4be2..ba9deda 100644
+--- a/src/mcp/sync-tools.ts
++++ b/src/mcp/sync-tools.ts
+@@ -29,7 +29,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_create_pair',
+     {
+       description:
+-        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. Next step: sync_scan.',
++        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. A localDir inside (or containing) a OneDrive or Google Drive desktop app folder is refused. Next step: sync_scan.',
+       inputSchema: {
+         name,
+         localDir: z
+@@ -68,7 +68,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_list_pairs',
+     {
+       description:
+-        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run.',
++        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run. A pair whose folder is inside (or contains) a OneDrive or Google Drive desktop app folder has a warning and cannot be synced; remove it and pick a folder outside.',
+       inputSchema: {},
+     },
+     async () => respond(log, () => sync.listPairs()),
+```
+
+`src/sync/cloud-folders.ts` (create):
+
+```diff
+diff --git a/src/sync/cloud-folders.ts b/src/sync/cloud-folders.ts
+new file mode 100644
+index 0000000..b620859
+--- /dev/null
++++ b/src/sync/cloud-folders.ts
+@@ -0,0 +1,127 @@
++import { readdir, realpath } from 'node:fs/promises';
++import os from 'node:os';
++import path from 'node:path';
++
++/*
++ * Cloud desktop folder guard (OneDrive sync spec §6, all providers). A pair inside a folder
++ * the OneDrive or Google Drive desktop app syncs would have two engines syncing the same
++ * files, so such a localDir is refused: the folder itself, anything inside it, and anything
++ * that contains it.
++ */
++
++export type CloudClient = 'OneDrive' | 'Google Drive';
++
++export interface CloudFolder {
++  /** Real path (symlinks resolved). */
++  path: string;
++  client: CloudClient;
++}
++
++/** What detection reads from the machine (tests pass a fake). */
++export interface CloudHost {
++  platform: NodeJS.Platform;
++  home: string;
++  env: NodeJS.ProcessEnv;
++  /** realpath, or null when the path does not exist or cannot be resolved. */
++  realpath(p: string): Promise<string | null>;
++  /** Entry names, or [] when the folder cannot be read. */
++  readdir(dir: string): Promise<string[]>;
++}
++
++export function systemHost(): CloudHost {
++  return {
++    platform: process.platform,
++    home: os.homedir(),
++    env: process.env,
++    realpath: (p) => realpath(p).catch(() => null),
++    readdir: (dir) => readdir(dir).catch(() => []),
++  };
++}
++
++const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
++
++/** Candidate folders per platform, before realpath (spec §6 lists exactly these). */
++async function candidates(host: CloudHost): Promise<Array<{ path: string; client: CloudClient }>> {
++  if (host.platform === 'darwin') {
++    const storage = path.posix.join(host.home, 'Library', 'CloudStorage');
++    const inStorage = (await host.readdir(storage)).sort();
++    const volumes = (await host.readdir('/Volumes')).sort();
++    return [
++      ...inStorage
++        .filter((n) => n.startsWith('OneDrive-'))
++        .map((n) => ({ path: path.posix.join(storage, n), client: 'OneDrive' as const })),
++      ...inStorage
++        .filter((n) => n.startsWith('GoogleDrive-'))
++        .map((n) => ({ path: path.posix.join(storage, n), client: 'Google Drive' as const })),
++      ...volumes
++        .filter((n) => n.startsWith('GoogleDrive'))
++        .map((n) => ({ path: path.posix.join('/Volumes', n), client: 'Google Drive' as const })),
++      { path: path.posix.join(host.home, 'OneDrive'), client: 'OneDrive' },
++    ];
++  }
++  if (host.platform === 'win32') {
++    const vars = ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial']
++      .map((v) => host.env[v])
++      .filter((v): v is string => typeof v === 'string' && v !== '');
++    const profile = host.env['USERPROFILE'] || host.home;
++    return [
++      ...vars.map((p) => ({ path: p, client: 'OneDrive' as const })),
++      { path: path.win32.join(profile, 'My Drive'), client: 'Google Drive' },
++      ...LETTERS.map((l) => ({ path: `${l}:\\My Drive`, client: 'Google Drive' as const })),
++    ];
++  }
++  return [];
++}
++
++/** The cloud desktop folders present on this machine, by real path, without duplicates. */
++export async function findCloudFolders(host: CloudHost = systemHost()): Promise<CloudFolder[]> {
++  const found: CloudFolder[] = [];
++  const seen = new Set<string>();
++  for (const c of await candidates(host)) {
++    const real = await host.realpath(c.path);
++    if (real === null || seen.has(real)) continue;
++    seen.add(real);
++    found.push({ path: real, client: c.client });
++  }
++  return found;
++}
++
++function isInside(api: path.PlatformPath, parent: string, child: string): boolean {
++  const rel = api.relative(parent, child);
++  return rel === '' || (rel !== '..' && !rel.startsWith(`..${api.sep}`) && !api.isAbsolute(rel));
++}
++
++/**
++ * The cloud folder `dir` (a real path) is, is inside, or contains; null when none. Paths
++ * are case-folded on a case-insensitive volume.
++ */
++export function cloudFolderConflict(
++  dir: string,
++  folders: readonly CloudFolder[],
++  options: { platform: NodeJS.Platform; caseInsensitive: boolean },
++): CloudFolder | null {
++  const api = options.platform === 'win32' ? path.win32 : path.posix;
++  const norm = (p: string): string => {
++    const n = api.normalize(p).normalize('NFC');
++    return options.caseInsensitive ? n.toLowerCase() : n;
++  };
++  const d = norm(dir);
++  return (
++    folders.find((f) => isInside(api, norm(f.path), d) || isInside(api, d, norm(f.path))) ?? null
++  );
++}
++
++export function cloudFolderProblem(dir: string, client: CloudClient): string {
++  return `${dir} is synced by the ${client} desktop app; pick a folder outside it so the two do not sync the same files`;
++}
++
++/** A refusal text for `dir`, or null when it is clear of every cloud desktop folder. */
++export async function cloudFolderCheck(
++  dir: string,
++  caseInsensitive: boolean,
++  find: () => Promise<CloudFolder[]>,
++  platform: NodeJS.Platform = process.platform,
++): Promise<string | null> {
++  const hit = cloudFolderConflict(dir, await find(), { platform, caseInsensitive });
++  return hit ? cloudFolderProblem(dir, hit.client) : null;
++}
+```
+
+`src/sync/pair-admin.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-admin.ts b/src/sync/pair-admin.ts
+index 9e901ef..a5b2e5f 100644
+--- a/src/sync/pair-admin.ts
++++ b/src/sync/pair-admin.ts
+@@ -7,6 +7,7 @@ import { NotFoundError, ValidationError } from '../errors.js';
+ import { expandHome } from '../files/destination.js';
+ import type { Logger } from '../logger.js';
+ import type { DigesterFactory } from './local-scanner.js';
++import { cloudFolderCheck, type CloudFolder } from './cloud-folders.js';
+ import { SyncRootError } from './errors.js';
+ import {
+   checkOverlap,
+@@ -36,8 +37,13 @@ export interface SyncEnv {
+   openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
+   /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
+   digesters: DigesterFactory;
++  /** Cloud desktop client folders on this machine (OneDrive sync spec §6). */
++  cloudFolders: () => Promise<CloudFolder[]>;
+ }
+ 
++/** Volumes of a new folder fold case by default here (the marker probe comes later). */
++const DEFAULT_CI = process.platform === 'darwin' || process.platform === 'win32';
++
+ export interface CreatePairInput {
+   name: string;
+   localDir: string;
+@@ -63,6 +69,8 @@ export interface PairSummary {
+   };
+   createdAt: string;
+   lastAppliedRunAt: string | null;
++  /** Set when localDir is inside (or contains) a cloud desktop client's folder (spec §6). */
++  warning?: string;
+ }
+ 
+ export function summarize(file: PairFile): PairSummary {
+@@ -117,6 +125,8 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+   }
+   const googleExport = validateGoogleExport(input.googleExport ?? {});
+   const localDir = await resolveLocalDir(input.localDir);
++  const inCloud = await cloudFolderCheck(localDir, DEFAULT_CI, env.cloudFolders);
++  if (inCloud) throw new ValidationError(inCloud);
+   return env.store.withLock(input.name, async () => {
+     const existing = (await env.store.list()).map((f) => f.pair);
+     checkOverlap(existing, {
+@@ -225,7 +235,15 @@ async function resolveRemoteRoot(
+ }
+ 
+ export async function listPairs(env: SyncEnv): Promise<PairSummary[]> {
+-  return (await env.store.list()).map(summarize);
++  const folders = await env.cloudFolders();
++  const out: PairSummary[] = [];
++  for (const file of await env.store.list()) {
++    const summary = summarize(file);
++    const { localDir, caseInsensitive } = file.pair;
++    const warning = await cloudFolderCheck(localDir, caseInsensitive, async () => folders);
++    out.push(warning ? { ...summary, warning } : summary);
++  }
++  return out;
+ }
+ 
+ export async function removePair(
+@@ -262,6 +280,8 @@ export async function repairMarker(
+     const info = await stat(pair.localDir).catch(() => null);
+     if (!info?.isDirectory())
+       throw new ValidationError(`${pair.localDir} is not an available folder`);
++    const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
++    if (inCloud) throw new ValidationError(inCloud);
+     if (!(await confirm(pair))) {
+       return { repaired: false, localDir: pair.localDir, caseInsensitive: pair.caseInsensitive };
+     }
+@@ -275,6 +295,9 @@ export async function repairMarker(
+ /** Spec §5 step 2: any failure aborts the whole run. */
+ export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
+   const hint = `run: marvin-drive sync repair-marker ${pair.name}`;
++  // Spec §6: a pair inside a cloud desktop folder is never synced (it is left untouched).
++  const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
++  if (inCloud) throw new SyncRootError(inCloud);
+   const info = await stat(pair.localDir).catch(() => null);
+   if (!info?.isDirectory()) {
+     throw new SyncRootError(`${pair.localDir} is not available (unmounted, moved or deleted?)`);
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index 92c3337..5b846b6 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -8,6 +8,7 @@ import {
+   storeFeed,
+   type FeedRead,
+ } from './deletion-evidence.js';
++import { findCloudFolders, type CloudFolder } from './cloud-folders.js';
+ import { Executor } from './executor.js';
+ import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
+ import {
+@@ -70,6 +71,8 @@ export interface SyncServiceDeps extends OperationDeps {
+   openOneDrive?: (accountRef: string | undefined) => Promise<SyncRemote | null>;
+   /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
+   digesters?: DigesterFactory;
++  /** Cloud desktop client folders (default: detected on this machine, spec §6). */
++  cloudFolders?: () => Promise<CloudFolder[]>;
+ }
+ 
+ export interface RunInput {
+@@ -112,6 +115,7 @@ export class SyncService {
+       openRemote: async (ref, prefs): Promise<SyncRemote> =>
+         (await deps.openOneDrive?.(ref)) ?? GoogleSyncRemote.open(this.ops, ref, prefs),
+       digesters: deps.digesters ?? defaultDigesters,
++      cloudFolders: deps.cloudFolders ?? ((): Promise<CloudFolder[]> => findCloudFolders()),
+     };
+   }
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/cli/__tests__/sync-commands.test.ts src/sync/__tests__/cloud-folders.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/sync-service.pairs.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/cli/__tests__/sync-commands.test.ts src/cli/sync-format.ts src/mcp/sync-tools.ts src/sync/__tests__/cloud-folders.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/cloud-folders.ts src/sync/pair-admin.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  135 passed (135); Tests  1534 passed | 6 skipped (1540)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/cli/__tests__/sync-commands.test.ts src/cli/sync-format.ts src/mcp/sync-tools.ts src/sync/__tests__/cloud-folders.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/cloud-folders.ts src/sync/pair-admin.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): refuse pairs inside OneDrive or Google Drive desktop folders
+
+cloud-folders.ts detects the desktop client folders of spec §6 (macOS
+CloudStorage OneDrive-*/GoogleDrive-*, /Volumes/GoogleDrive*, ~/OneDrive;
+Windows %OneDrive%, %OneDriveConsumer%, %OneDriveCommercial%,
+%USERPROFILE%\My Drive and <letter>:\My Drive; none on Linux) by real path,
+case-folded on case-insensitive volumes. sync_create_pair and repair-marker
+refuse a localDir that is, is inside or contains one; an existing such pair
+is listed with a warning (sync list, sync_list_pairs) and every scan, run and
+release of it stops at the root check without touching anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 49: Docs: README, CHANGELOG and FEATURES
+
+**Spec:** §7 README items, §4.1 residual risk, §3.4 race. Commit `1b590c9` on the reference branch.
+
+**Files:**
+- Modify: `README.md`
+- Modify: `docs/CHANGELOG.md`
+- Modify: `docs/FEATURES.md`
+
+- [ ] **Step 1: Write the change.**
+
+`README.md` (modify):
+
+````diff
+diff --git a/README.md b/README.md
+index 4ca55c0..b4fa3ea 100644
+--- a/README.md
++++ b/README.md
+@@ -23,7 +23,7 @@ Error messages refer to `marvin-drive …`; without `npm link`, run the same com
+ 
+ ## OneDrive accounts
+ 
+-A Microsoft account (personal or work/school) can be registered next to Google accounts. The `drive_*` tools then work on that account's own OneDrive; the account decides the provider, the tool names stay the same. Files shared with you, SharePoint and Teams libraries are not reachable, and sync, watch and the Docs/Sheets/Slides tools are Google-only for now (they return a clear error).
++A Microsoft account (personal or work/school) can be registered next to Google accounts. The `drive_*` tools then work on that account's own OneDrive; the account decides the provider, the tool names stay the same. Files shared with you, SharePoint and Teams libraries are not reachable. The `sync_*` tools work on OneDrive too (see [Sync on OneDrive](#sync-on-onedrive)); watch and the Docs/Sheets/Slides tools are Google-only for now (they return a clear error).
+ 
+ Register an app once. Microsoft Entra admin center → App registrations → New registration:
+ 
+@@ -167,15 +167,15 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
+ 
+ ### Sync (selective two-way, on demand)
+ 
+-| Tool               | Purpose                                                                                                                                                                                  |
+-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+-| `sync_create_pair` | Pair a local folder with an existing or new Drive folder; writes a hidden `.marvin-sync-<name>` marker; `googleExport` picks the local format of Google Docs/Sheets/Slides/Drawings      |
+-| `sync_list_pairs`  | Pairs with selected / tracked / remote-only / excluded / baseline counts and the last applied run                                                                                        |
+-| `sync_scan`        | Local files (with short text previews) and Drive-only candidates, so Claude can propose a selection                                                                                      |
+-| `sync_select`      | Add or remove relative paths; removing excludes the path and touches no file                                                                                                             |
+-| `sync_run`         | Dry run by default (plan + `planId`); `apply: true` with the approved `planId` executes it; locally deleted files wait in `pendingConfirmation` until you confirm (`confirmRemoteTrash`) |
+-| `sync_release`     | "Move to Drive": remove local copies (to the system trash) of files that are in sync; they stay in Drive and selected; `sync_select add` restores them                                   |
+-| `sync_remove_pair` | Forget a pair and remove its marker; no files are touched                                                                                                                                |
++| Tool               | Purpose                                                                                                                                                                                                       |
++| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
++| `sync_create_pair` | Pair a local folder with an existing or new Drive or OneDrive folder (the account decides); writes a hidden `.marvin-sync-<name>` marker; `googleExport` (Google only) picks the local format of Google files |
++| `sync_list_pairs`  | Pairs with selected / tracked / remote-only / excluded / baseline counts and the last applied run                                                                                                             |
++| `sync_scan`        | Local files (with short text previews) and Drive-only candidates, so Claude can propose a selection                                                                                                           |
++| `sync_select`      | Add or remove relative paths; removing excludes the path and touches no file                                                                                                                                  |
++| `sync_run`         | Dry run by default (plan + `planId`); `apply: true` with the approved `planId` executes it; locally deleted files wait in `pendingConfirmation` until you confirm (`confirmRemoteTrash`)                      |
++| `sync_release`     | "Move to Drive": remove local copies (to the system trash) of files that are in sync; they stay in Drive and selected; `sync_select add` restores them                                                        |
++| `sync_remove_pair` | Forget a pair and remove its marker; no files are touched                                                                                                                                                     |
+ 
+ Typical conversation: "sync the seafaring files in Downloads to my Drive folder _Denizcilik_" → Claude creates the pair, runs `sync_scan`, opens unclear files with its own reader, proposes a list, asks you to confirm, calls `sync_select`, shows the `sync_run` dry run, and applies it with the `planId` once you agree.
+ 
+@@ -186,6 +186,7 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder
+ - Deletions are propagated but never permanent: Drive files go to the Drive trash, local files to the system trash: the macOS Trash via `/usr/bin/trash`, the Windows Recycle Bin, or the freedesktop.org trash on Linux (`~/.local/share/Trash`, or `.Trash-<uid>` at the top of another disk), restorable from Files/Dolphin/`gio trash --restore`. If no trash can be used with certainty — network drives, Linux FAT/exFAT USB disks, some SMB volumes — the action fails and the file stays; nothing is ever deleted permanently. A safety brake stops runs that would delete more than max(10, 20 %) of tracked files, or every tracked file of one side.
+ - A local file is only ever overwritten when it is the tracked file itself and unchanged since the scan; every new local file is created exclusively (never replaces anything). Anything the planner cannot classify — unreadable folders, duplicate names, case-only clashes on case-sensitive disks — is reported and left alone.
+ - Each run checks that the local folder still has its marker (catches unmounted or replaced disks) and that the Drive folder still exists; if the marker is missing, run `marvin-drive sync repair-marker <name>`.
++- **Not inside a cloud desktop folder.** A pair whose local folder is, is inside or contains a folder that the OneDrive or Google Drive desktop app syncs is refused, for both providers, so two sync engines never work on the same files: on macOS `~/Library/CloudStorage/OneDrive-*`, `~/Library/CloudStorage/GoogleDrive-*`, `/Volumes/GoogleDrive*` and `~/OneDrive`; on Windows the folders in `%OneDrive%`, `%OneDriveConsumer%` and `%OneDriveCommercial%`, `%USERPROFILE%\My Drive` and `<letter>:\My Drive`. Paths are compared after resolving symlinks. An existing pair in such a folder is left untouched: `sync list` / `sync_list_pairs` show a warning and every scan, run and release of it stops with that message; remove it and pick a folder outside.
+ - Hashing a file that iCloud has evicted makes macOS download it first (slow but correct).
+ - **Google Docs, Sheets, Slides and Drawings** sync one way, as read-only exports (default `.docx`, `.xlsx`, `.pptx`, `.pdf`; set `googleExport` when creating the pair, e.g. `{ "document": "pdf", "spreadsheet": "csv" }`). A changed Drive original is exported again; local edits are never uploaded — they are reported, and if the original also changed your copy is kept as `<name> (local edit YYYY-MM-DD HH.mm).<ext>`. Forms, Sites and Apps Script files are listed as `native-unsupported`. Exports over Drive's 10 MB limit use the export link; if that fails too they are reported `native-too-large`.
+ - **Deleting a synced file locally does not delete it in Drive by itself.** The run lists it under `pendingConfirmation`; Claude asks whether to delete the Drive copy too (`confirmRemoteTrash` with the dry run's `planId`, Drive trash for 30 days) or to keep it in Drive only (`sync_release`). From the terminal: `marvin-drive sync run <name> --apply --plan-id <id> --confirm-remote-trash`, or `marvin-drive sync release <name> <path> --apply`.
+@@ -195,6 +196,22 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder
+ 
+ After an applied run Claude can offer to free disk space: `sync_release` (or `marvin-drive sync release <name> --all`) re-checks every file, moves the local copy to the system trash and keeps the Drive file; released files are never downloaded again unless you `sync_select add` them. A file you already deleted locally can be released by name, so it stays in Drive. Where no system trash can be used (Windows network drives, a drive without a Recycle Bin), release cannot move the local copy: the dry run lists such files under `skipped`. To keep one in Drive only there, delete the local copy yourself, then release it by name.
+ 
++#### Sync on OneDrive
++
++A Microsoft account syncs its own OneDrive with the same tools, rules and safety checks; only the Google-file exports do not exist there (`googleExport` is rejected). What differs:
++
++- **Content comparison** uses OneDrive's QuickXorHash (computed locally in the same read as MD5). A file OneDrive reports no hash for is compared by size and modification time (`weak-compare`), is never adopted by content and cannot be released ("OneDrive reports no hash for this file"). Conflict copies are named `<name> (OneDrive conflict YYYY-MM-DD HH.mm).<ext>`.
++- **Deletions need evidence.** OneDrive answers "not found" both for a deleted item and for one that only became unreachable (for example moved into a locked Personal Vault). A tracked file counts as deleted only when OneDrive's drive-wide change history (Graph `root/delta`) reports it deleted; the run keeps that history's cursor and the evidence in the pair file. Without evidence the file is only reported (`remote-unavailable`), nothing is touched. A move out of the pair folder is an update in that history, not a deletion (`moved-out`). Deleted files go to the OneDrive recycle bin; sync never deletes permanently and never restores from the recycle bin.
++- **`deletion-history-unavailable`.** When the stored cursor is missing, expired (HTTP 410), rejected by Graph, or not a link marvin-drive can follow safely, the run warns "OneDrive change history unavailable; deletions since the last run are reported, not applied", plans with the evidence it already stored and starts a new cursor. Files deleted during that gap stay `remote-unavailable` until you remove them with `sync_select remove`. Pairs that are scanned but not run for a long time can reach this state.
++- **Personal Vault (residual risk).** If OneDrive reports an item moved into a locked Personal Vault as deleted, the run treats it like a deletion: an unchanged local copy goes to the system trash, where it can be restored. No file is deleted permanently on either side.
++- **Overwrites are conditional.** Updates and deletions send `If-Match` with the eTag of the re-read right before the write; a file changed on OneDrive in between is skipped ("changed on OneDrive since the scan"). Files up to 4 MiB are uploaded with one request, so OneDrive checks the condition when the write happens. Larger files use an upload session, which OneDrive checks only when the session is created: an edit on OneDrive during a long upload can still be overwritten (the older version stays in OneDrive's version history). On Google the same re-read happens just before the write, without a server-side condition. A file without a hash is also re-checked by its eTag, so an edit that kept the modification time is caught.
++- **Names.** OneDrive refuses `" * : < > ? / \ |`, leading or trailing spaces, a trailing dot, `.lock`, `desktop.ini`, `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`, names starting with `~$` or containing `_vti_`, names over 255 characters and paths of 400 characters or more (counted in UTF-16 units). Such a local file stays local and is reported `remote-name-invalid`.
++- **Case.** OneDrive names are case-insensitive. On a case-insensitive disk (macOS, Windows) a local `docs/` reuses an existing OneDrive `Docs/`. On a case-sensitive disk (Linux) a local folder that differs from the OneDrive folder only in case is reported as ambiguous ("a OneDrive folder name differs only in case") instead of uploading into the other spelling; rename one of them.
++- **Not synced:** OneNote notebooks, the Personal Vault and other special items, and items shared with you are listed as ignored with a reason.
++- Office for the web can save a file without a visible edit; the new hash then makes it look changed.
++- Work/school accounts are supported by the code but not live-tested yet.
++- **Known limitation:** the pair file does not store the provider. A pair belongs to whichever provider its account alias resolves to now; if you remove an account and add an account of the other provider under the same alias, remove and re-create its pairs.
++
+ ### Watch
+ 
+ | Tool            | Purpose                                                                                                                                  |
+````
+
+`docs/CHANGELOG.md` (modify):
+
+````diff
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 9204a80..d2fecf4 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -3,6 +3,8 @@
+ ## Unreleased
+ 
+ ### Added
++- OneDrive sync (sub-project 2): the `sync_*` tools and `sync` CLI commands work for Microsoft accounts with the Google sync rules (except Google-file exports): QuickXorHash content comparison, `If-Match` on updates and deletions, deletions applied only with evidence from OneDrive's drive-wide change history (`deletion-history-unavailable` warns when it cannot be read), OneDrive name rules (`remote-name-invalid`), OneNote / Personal Vault / shared items reported as ignored, and "(OneDrive conflict …)" copies. `googleExport` is rejected on Microsoft accounts. No new dependencies.
++- Sync (both providers): a pair whose local folder is, is inside or contains a OneDrive or Google Drive desktop app folder is refused at `sync_create_pair` and `sync repair-marker`; existing such pairs show a warning in `sync list` / `sync_list_pairs` and are not synced.
+ - OneDrive accounts (sub-project 1): `auth add --provider microsoft` registers a personal or work/school Microsoft account, and the `drive_*` tools work on its own OneDrive. Provider shown in `auth list` and `drive_list_accounts`. Upload name conflicts ask Overwrite / Cancel through MCP elicitation. No new dependencies.
+ - Drive watch: `drive_watch` / `drive_changes` MCP tools (34 tools in total) and CLI `marvin-drive watch add|remove|list|delivery` and `marvin-drive changes`. Watched files and folders are polled through the Drive Changes API; Claude learns who changed what and when (diffs for Docs, Sheets and Slides, and new comments when the file also changed; comment-only changes are not detected yet) and only informs. Delivery by a `UserPromptSubmit` hook (`changes --hook`, default) or by Claude Code channel push (`--dangerously-load-development-channels server:marvin-drive`).
+ - New dependency: `diff` (jsdiff, BSD-3) for line diffs. `MARVIN_WATCH_POLL_SECONDS` sets the poll interval (default 30, between 15 and 3600).
+````
+
+`docs/FEATURES.md` (modify):
+
+````diff
+diff --git a/docs/FEATURES.md b/docs/FEATURES.md
+index 5759442..bdc8d5d 100644
+--- a/docs/FEATURES.md
++++ b/docs/FEATURES.md
+@@ -63,7 +63,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
+ - ✅ `FileRouter` picks Google or OneDrive from the account; the `drive_*` tools are unchanged
+ - ✅ GraphClient: token only to graph.microsoft.com, retry rules, resumable upload sessions, copy monitor
+ - ✅ `drive_upload` name conflicts ask Overwrite / Cancel through MCP elicitation; rename, move and copy conflicts are errors
+-- ✅ Microsoft accounts are rejected on the Google-only tools (content, sync, watch)
++- ✅ Microsoft accounts are rejected on the Google-only tools (content, watch); sync supports them since sub-project 2 (section 9)
+ - ✅ Live E2E (`MARVIN_E2E_MS_PERSONAL`, `MARVIN_E2E_MS_WORK`), 2026-11-11: personal passed on two personal accounts. Work/school: not live-tested (no work account signed in yet)
+ - ✅ Overwrite / Cancel dialog in Claude Code, 2026-11-11: Overwrite answered after about 5 min succeeded with the new content; Cancel returned `cancelled: true`, reason `user`, file unchanged
+ - Search: new items on personal OneDrive stayed out of the search index for over 30 minutes; the E2E checks search with an item that existed before the run
+@@ -81,8 +81,19 @@ Spec §10 results:
+ | A work account in another tenant can consent to an unverified app | n/a | not live-tested |
+ | `elicitInput` works on the protocol revision Claude Code negotiates | confirmed | n/a (same client) |
+ 
++### 9. OneDrive selective sync (spec: `docs/superpowers/specs/2026-11-11-onedrive-sync-design.md`)
++- ✅ `SyncRemote` port with Google and OneDrive implementations; the engine has no Drive or Graph shapes
++- ✅ QuickXorHash digests, pair file v2 (`remoteHash`, deletion cursor and evidence) with v1 migration
++- ✅ Deletions only with root `delta` evidence; `remote-unavailable` without it; `deletion-history-unavailable` for an expired or unusable cursor
++- ✅ `If-Match` on replace and delete; 409 / 412 / 423 skipped, 507 stops the run
++- ✅ OneDrive name rules (`remote-name-invalid`, 255 units per name, 400 per path), ignored OneNote / special / shared items, provider words in reports
++- ✅ Cloud desktop folder guard for both providers (create, repair-marker, list warning, runs refused)
++- ⬜ Live OneDrive sync E2E (`tests/e2e/onedrive-sync.e2e.test.ts`, `MARVIN_E2E_MS_PERSONAL`, optional `MARVIN_E2E_MS_SECOND`): written, not run live yet; spec §10 points open until then
++- ⬜ Work/school accounts: supported by the code, not live-tested
++- Known limitation: the pair file does not store the provider (it follows the account alias)
++
+ ## Later
+-- ⬜ OneDrive: sync, change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
++- ⬜ OneDrive: change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
+ - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)
+ - ⬜ Sync watch mode (continuous sync)
+ - ⬜ GUI with Claude-API file classification for sync selection (plugs into `sync_select`; terminal use keeps Claude Code as the selector)
+````
+
+- [ ] **Step 2: Format and run the whole check.**
+
+Run: `npx prettier --write README.md docs/CHANGELOG.md docs/FEATURES.md` then `npm run check`
+
+Expected: exit 0, `Test Files  135 passed (135); Tests  1534 passed | 6 skipped (1540)`.
+
+- [ ] **Step 3: Commit.**
+
+```bash
+git add README.md docs/CHANGELOG.md docs/FEATURES.md
+git commit -F - <<'MSG'
+docs(sync): OneDrive sync in README, CHANGELOG and FEATURES
+
+README: sync works on OneDrive, a "Sync on OneDrive" section (quickXor, the
+root-delta evidence rule and deletion-history-unavailable, Personal Vault
+residual risk, If-Match and the upload-session race above 4 MiB, name rules,
+the case-sensitive uploadKey behaviour, the provider-not-stored limitation)
+and the cloud desktop folder rule. CHANGELOG Unreleased entries; FEATURES
+section 9 with the status rows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 50: Spec: as-built note on the port and the stage-3 deviations
+
+**Spec:** §2.1 (as built). Commit `d633c61` on the reference branch.
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-11-11-onedrive-sync-design.md`
+
+- [ ] **Step 1: Write the change.**
+
+`docs/superpowers/specs/2026-11-11-onedrive-sync-design.md` (modify):
+
+````diff
+diff --git a/docs/superpowers/specs/2026-11-11-onedrive-sync-design.md b/docs/superpowers/specs/2026-11-11-onedrive-sync-design.md
+index 7a99e46..e0b9f45 100644
+--- a/docs/superpowers/specs/2026-11-11-onedrive-sync-design.md
++++ b/docs/superpowers/specs/2026-11-11-onedrive-sync-design.md
+@@ -116,6 +116,46 @@ interface DeletionFeed {
+ }
+ ```
+ 
++**As built** (accepted deviations, recorded after implementation; the plan's Chunk 1 and
++Chunk 3 decisions have the details):
++
++- The port has an extra `account` (the resolved alias, for `pair.account` and audit records)
++  and `read(id)`, which is `get` but throws the provider's `NotFoundError` /
++  `PermissionDeniedError` instead of returning null (`checkRoots` and `createPair` use it).
++- `download(id, consume)` and `exportNative(source, plan, consume)` run a `consume(open)`
++  callback inside one retried operation instead of returning a `Readable`, so a retry reopens
++  the stream.
++- `readNative(id)` returns an opaque `NativeSource`; the Google remote keeps the Drive file
++  (export links) for `exportNative`. OneDrive throws `ValidationError` from both.
++- Google `findChildren` for files reads one page of 100 exact-name results (the old
++  duplicate-upload query); folders are paged and filtered by fold key.
++- `remoteFor(pair)` is async and picks the provider from the pair's account at run time; the
++  pair file does not store the provider.
++- A null or expired cursor is restarted at feed-read time, before the scan, not at the
++  executor's first save; the new cursor is still saved together with the evidence. A 400, a
++  link that fails the page-link check, or a chain without `@odata.deltaLink` also count as
++  expired. Other feed errors fail the run and keep the old cursor.
++- `sync_scan` does not read the feed (it neither probes nor plans); `sync_release` reads it
++  and never persists. Ids a probe sees present leave `E` at once, before later probes.
++- On a case-sensitive volume a case-only folder mismatch stays an `ambiguous` note on OneDrive
++  too (U1 and B11 re-uploads), instead of reusing the remote spelling (§4.3 last bullet):
++  the recorded key would never resolve locally again. Upload folders do compare by fold key
++  on OneDrive on every volume.
++- `ReauthRequiredError` already stopped Google runs; only `OneDriveFullError` was added to the
++  aborting errors.
++- The executor's and release's re-reads use `get` on both providers; null is a skip
++  (`TargetChangedError`). A trash-remote whose item is already gone drops the record only
++  with deletion evidence (defence; unreachable in a real run).
++- A Graph 412 is mapped inside `OneDriveSyncRemote` to the engine's `TargetChangedError`.
++- `OneDriveSyncRemote` checks `signal?.throwIfAborted()` before its reads (GraphClient has no
++  cancellation). The OneDrive pair root `root` is stored as the drive root's real id.
++- `RemoteEntry` carries the OneDrive eTag (`version`), and the re-read compares it for files
++  without a hash. Conflict copies are named "(OneDrive conflict …)" on OneDrive pairs.
++- Name lengths count UTF-16 units; a pair-relative path of 400 units or more is
++  `remote-name-invalid`.
++- The cloud folder guard (§6) also stops scans, runs and releases of an existing pair inside a
++  cloud folder (listed with a warning), not only creation and `repair-marker`.
++
+ The port owns transport, retries and error mapping; the engine keeps every decision and every
+ audit record. `findChildren` lists the parent's children (paged) and filters by fold key, the
+ same comparison `ensureRemoteFolder` and `findDuplicateUpload` make today. There is no path
+````
+
+- [ ] **Step 2: Format and run the whole check.**
+
+Run: `npx prettier --write docs/superpowers/specs/2026-11-11-onedrive-sync-design.md` then `npm run check`
+
+Expected: exit 0, `Test Files  135 passed (135); Tests  1534 passed | 6 skipped (1540)`.
+
+- [ ] **Step 3: Commit.**
+
+```bash
+git add docs/superpowers/specs/2026-11-11-onedrive-sync-design.md
+git commit -F - <<'MSG'
+docs(sync): as-built note on the port and the stage-3 deviations in the spec
+
+Spec §2.1 records the accepted deviations: account, throwing read, the
+consume(open) callbacks, opaque NativeSource, Google findChildren's one page,
+and the Chunk 3 and review-fix decisions (feed restart at read time, the
+expired-cursor cases, case-only folders on case-sensitive volumes, eTag
+re-verify, OneDrive conflict names, the cloud guard on existing pairs).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+
+### Task 51: This chunk of the plan
+
+**Files:**
+- Modify: `docs/superpowers/plans/2026-11-11-onedrive-sync.md`
+
+- [ ] **Step 1:** Replace the Chunk 4 placeholder with Tasks 40–51 (this text).
+- [ ] **Step 2:** `npm run check`. Expected: exit 0, `Test Files  135 passed (135); Tests  1534 passed | 6 skipped (1540)`.
+- [ ] **Step 3: Commit** `docs(sync): implementation plan, chunk 4`.
+
+### End of Chunk 4
+
+- [ ] The user runs the live OneDrive sync E2E (`MARVIN_E2E_MS_PERSONAL=ms-personal MARVIN_E2E_MS_SECOND=ms-work npm run test:e2e -- tests/e2e/onedrive-sync.e2e.test.ts`) and the Google live sync E2E, and records the spec §10 results in `docs/FEATURES.md`.
