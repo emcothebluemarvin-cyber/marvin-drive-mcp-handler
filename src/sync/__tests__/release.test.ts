@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { selectReleasable, type ReleaseSelection } from '../release.js';
-import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
+import { createAudit, createFakeDrive, silentLogger } from '../../files/__tests__/fakes.js';
+import { applyRelease, selectReleasable, type ReleaseSelection } from '../release.js';
+import { binary } from './drive-tree.js';
+import { googleRemoteOver } from './fake-remote.js';
+import {
+  localEntry,
+  makePairFile,
+  nativeEntry,
+  nativeRecord,
+  record,
+  refuseTrash,
+  remoteEntry,
+} from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const A = record('r1', 'a.pdf');
@@ -135,5 +146,36 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
   it('all: true leaves remote-only records out entirely', () => {
     const r = sel({ records: [{ ...A, remoteOnly: true }], remote: [RA] }, { all: true });
     expect(r).toEqual({ eligible: [], skipped: [] });
+  });
+});
+
+describe('applyRelease re-reads R through the remote', () => {
+  it('refuses a file moved in Drive since the scan; nothing is saved or trashed', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockResolvedValueOnce({
+      ...binary('r1', 'a.pdf', 'elsewhere'),
+      md5Checksum: RA.md5 ?? undefined,
+      modifiedTime: RA.modifiedTime,
+    });
+    const saves: unknown[] = [];
+    const file = makePairFile({}, [A]);
+    const out = await applyRelease(
+      {
+        remote: googleRemoteOver(drive),
+        audit: createAudit(),
+        logger: silentLogger(),
+        trash: refuseTrash,
+        save: async (f) => {
+          saves.push(f);
+        },
+      },
+      file,
+      [{ record: A, remote: RA, kind: 'deleted', localName: null }],
+    );
+    expect(out.failed).toEqual([
+      { path: 'a.pdf', reason: 'a.pdf changed, moved or was trashed in Drive since the scan' },
+    ]);
+    expect(saves).toEqual([]);
+    expect(drive.getFile).toHaveBeenCalledWith('r1', expect.stringContaining('md5Checksum'));
   });
 });

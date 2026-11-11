@@ -1,7 +1,6 @@
 import { lstat, readdir, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
 import { AppError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from './content-compare.js';
@@ -9,7 +8,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
 import { md5File } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
-import { toRemoteItem } from './remote/google-remote.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import {
   buildContext,
   isUnknownKey,
@@ -20,13 +19,7 @@ import {
   type PlanInput,
 } from './resolve.js';
 import type { LocalTrash } from './trash.js';
-import {
-  SYNC_FILE_FIELDS,
-  type Pair,
-  type PairFile,
-  type RemoteEntry,
-  type SyncRecord,
-} from './types.js';
+import type { Pair, PairFile, RemoteEntry, SyncRecord } from './types.js';
 
 export type ReleaseStatus =
   | 'released'
@@ -163,7 +156,8 @@ export async function withoutTrash(
 }
 
 export interface ReleaseDeps {
-  ops: OperationRunner;
+  /** The pair's remote. */
+  remote: SyncRemote;
   audit: AuditSink;
   logger: Logger;
   trash: LocalTrash;
@@ -174,11 +168,8 @@ export interface ReleaseDeps {
 const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
 
 /** R must still be present-same: not trashed, content unchanged, same name and parent. */
-async function verifyRemote(deps: ReleaseDeps, pair: Pair, planned: RemoteEntry): Promise<void> {
-  const file = await deps.ops.exec(pair.account, 'idempotent', planned.id, (ctx) =>
-    ctx.drive.getFile(planned.id, SYNC_FILE_FIELDS),
-  );
-  const current = toRemoteItem(file, pair.googleExport);
+async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<void> {
+  const current = await deps.remote.read(planned.id);
   if (
     current.trashed ||
     !remoteUnchangedSince(planned, current) ||
@@ -285,7 +276,7 @@ export async function applyRelease(
     let name: string | null = null;
     let abs = '';
     try {
-      await verifyRemote(deps, pair, c.remote);
+      await verifyRemote(deps, c.remote);
       if (c.kind === 'present') {
         name = c.localName ?? key;
         abs = absInside(pair.localDir, name);

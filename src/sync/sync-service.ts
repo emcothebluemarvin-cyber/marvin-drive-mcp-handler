@@ -278,7 +278,7 @@ export class SyncService {
       }
       const done = await applyRelease(
         {
-          ops: this.ops,
+          remote: this.env.remoteFor(file.pair),
           audit: this.deps.audit,
           logger: this.log,
           trash: this.deps.trash,
