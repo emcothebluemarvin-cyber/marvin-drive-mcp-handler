@@ -112,6 +112,33 @@ describe('OneDrive pairs: basic two-way sync', () => {
   });
 });
 
+describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
+  it('U2 adopts an identical local file by quickXor (no transfer)', async () => {
+    od.addFile(docs.id, 'same.txt', 'same bytes', 'S');
+    await writeFile(at('same.txt'), 'same bytes');
+    await service().select({ name: 'docs', add: ['same.txt'] });
+    const report = await apply();
+    expect(report.actions.adopt).toEqual(['same.txt']);
+    const { records } = await store.load('docs');
+    expect(records[0]).toMatchObject({ remoteId: 'S', remoteHash: { kind: 'quickXor' } });
+    expect(records[0]?.localMd5).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('a different local file is a conflict, not an adopt', async () => {
+    od.addFile(docs.id, 'diff.txt', 'remote bytes', 'D');
+    await writeFile(at('diff.txt'), 'local bytes');
+    await service().select({ name: 'docs', add: ['diff.txt'] });
+    expect((await apply()).actions.conflict).toEqual(['diff.txt']);
+  });
+
+  it('a stat-unchanged tracked file is released with a quickXor digest', async () => {
+    await tracked();
+    const result = await service().release({ name: 'docs', paths: ['a.txt'], apply: true });
+    expect(result.released).toEqual([{ path: 'a.txt', status: 'released' }]);
+    expect(await readdir(trashDir)).toEqual(['a.txt']);
+  });
+});
+
 describe('OneDrive deletion evidence (spec §4.1)', () => {
   it('404 with feed evidence: B10 moves the unchanged local copy to the trash', async () => {
     await tracked();
