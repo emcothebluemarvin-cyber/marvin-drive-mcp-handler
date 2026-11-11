@@ -20,6 +20,8 @@ import { GoogleSyncRemote, SYNC_EXPORT_FIELDS } from '../remote/google-remote.js
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
 import { buildReport } from '../report.js';
+import { hashTargets } from '../resolve.js';
+import { planInput } from './plan-input.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import type { Action, LocalEntry, PairFile, Plan, RemoteEntry, SyncRecord } from '../types.js';
@@ -242,7 +244,22 @@ describe('Executor', () => {
       localMd5: md5('hello'),
       remoteHash: { kind: 'md5', value: 'other' },
       localSize: l.size,
+      localMtimeMs: -1,
     });
+  });
+
+  it('after changed-during-upload, a same-size same-stat edit is re-hashed next run', async () => {
+    const l = await put('a.pdf', 'hello');
+    // The file was edited to 'jello' during the upload: same size, and the next scan sees
+    // the same stat as the planned one (an editor that restores mtime).
+    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf', md5Checksum: md5('jello') });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]?.warning).toBe('changed-during-upload');
+    const input = planInput({ pair: { localDir: dir }, records: file.records, local: [l] });
+    expect(hashTargets(input)).toEqual(['a.pdf']);
   });
 
   it('is quiet when the remote reports no hash for the upload', async () => {

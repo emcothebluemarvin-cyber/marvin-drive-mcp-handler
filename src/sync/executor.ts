@@ -302,6 +302,16 @@ export class Executor {
     return sameContent(planned, fields.hash) === false ? 'changed-during-upload' : undefined;
   }
 
+  /**
+   * Local record fields after an upload. When the file changed during the upload, the
+   * planned md5 may not be what is on disk (an edit can keep size and mtime), so the
+   * stored stat is made unmatchable and the next run re-hashes the file.
+   */
+  private uploadedLocal(local: LocalEntry, md5: string, warning: string | undefined): LocalFields {
+    const fields = this.localFields(local, md5);
+    return warning ? { ...fields, mtimeMs: -1 } : fields;
+  }
+
   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
     const planned = this.plannedDigests(action);
@@ -322,7 +332,7 @@ export class Executor {
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, planned.md5), remote),
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), remote),
         action.rebaseFrom,
       ),
     );
@@ -368,7 +378,10 @@ export class Executor {
     const fields = fromRemote(updated, remote.parentId);
     const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
-      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
+      putRecord(
+        this.file,
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
+      ),
     );
     await this.audit('sync_update', action, remote.id);
     return warning ? { warning } : {};
@@ -481,7 +494,10 @@ export class Executor {
     const fields = fromRemote(updated, remote.parentId);
     const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
-      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
+      putRecord(
+        this.file,
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
+      ),
     );
     await this.audit('sync_update', action, remote.id);
     return { conflictCopy, ...(warning ? { warning } : {}) };
