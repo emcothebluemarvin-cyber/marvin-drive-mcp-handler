@@ -1,6 +1,6 @@
 # OneDrive sub-project 2: selective two-way sync — design
 
-Status: approved in brainstorming on 2026-11-11; revision 3 after spec review round 2.
+Status: approved in brainstorming on 2026-11-11; revision 4 after spec review round 3 (approved).
 Builds on: sync spec `2026-11-02-selective-sync-design.md` (Phase A), addendum
 `2026-11-07-sync-phase-b-addendum.md` (Phase B), OneDrive files spec `2026-11-08-onedrive-files-design.md`
 (sub-project 1).
@@ -196,12 +196,13 @@ Changed, every place that touches Drive shapes today:
   remote whose `hashKind` is not md5, the planner needs a remote-kind digest only to adopt or
   release, never to detect a local change (md5 + stat does that). So `hashTargets` additionally
   returns, on such remotes:
-  - release candidates (the names `sync_release` was given, or all eligible records for a
-    release without names), so release's `check()` gets a quickXor digest;
+  - release candidates (the names `sync_release` was given, or, without names, eligible records
+    whose remote hash is non-null), so release's `check()` gets a quickXor digest;
   - untracked local files that have a same-key remote file (U2/B4 adopt).
 
   Stat-unchanged tracked files are not re-hashed on an ordinary run. Their `localMatchesRemote`
-  is not needed there.
+  is not needed there. `hashTargets` stays pure: `PlanInput` (minus digests) gains
+  `remoteHashKind: HashKind` and `releaseNames: string[] | 'all' | null`.
 - `SyncRecord.localMd5` stays the **local md5, always**. It is never filled from a remote value.
   `exec-records.localFields` takes the local digests: where it uses `remote.md5 ?? planned`
   today, it uses `planned.md5`. The remote hash is only used for the check in §3.2.
@@ -231,7 +232,8 @@ Changed, every place that touches Drive shapes today:
 streaming, it computes md5 (for `localMd5`) and, when `expected` is quickXor, QuickXorHash too.
 It then compares the digest of `expected.kind`. A mismatch keeps today's behaviour: the temp
 file is removed and the action fails. `writeTemp` also gets `expectedSize: number | null` from
-`RemoteItem.size`; when it is known and differs from the bytes written, the action fails the same
+`RemoteItem.size` (Drive reports `size` for binary files; natives use the export path); when it
+is known and differs from the bytes written, the action fails the same
 way. This size check is new and applies to both providers. With a null hash it is the only
 check.
 
@@ -261,8 +263,8 @@ leads to `trashed`.
   empty on Google pairs, and Google never reads them.
 - **Feed scope.** The feed is `GET /me/drive/root/delta` (the whole drive). Moves inside the drive,
   including out of the pair folder, appear there as updates with a new `parentReference`, not as
-  `deleted`. Only ids that match a record of the pair are kept, so the feed's size does not grow
-  the pair file.
+  `deleted`. Only ids that match a record's `remoteId` or `remoteParentId` are kept (folders
+  have no records), so the feed's size does not grow the pair file.
 - **Pair creation** (Microsoft): `remoteCursor = feed.start()` with `?token=latest`, so nothing is
   enumerated. If that call fails, `sync_create_pair` fails with the Graph error and creates
   nothing (no marker, no pair file). The user simply retries.
@@ -271,12 +273,16 @@ leads to `trashed`.
   `E = (remoteDeletedIds ∪ deletedIds) − ids seen present in this scan or probe`. A record also
   counts as evidenced when its `remoteParentId` is in `E`, because the children of a deleted
   folder may not be listed one by one.
-- **Persisting.** Only an apply that reaches the executor persists the feed: not a dry run, and
-  not the early `plan-changed` or `mass-delete` returns (`sync-service.ts`).
-  - The executor's first pair-file save of the run writes the new cursor and `remoteDeletedIds
-    := E ∩ record ids`, always together, in one write.
-  - A run with no actions still does that one save.
-  - Every save that drops a record also drops its id from `remoteDeletedIds`.
+- **Persisting.** `sync_run` persists the feed, dry run or apply, because it already holds the
+  pair lock and the cursor is always saved together with `E`, so evidence is carried forward and
+  never lost. This keeps repeated dry runs from re-reading a growing history. `sync_scan` and
+  `sync_release` only read (no write) and do not persist.
+  - For an apply, the executor's first pair-file save of the run writes the new cursor and `remoteDeletedIds
+    := E ∩ (record remoteIds ∪ record remoteParentIds)`, always together, in one write.
+  - A dry run, an apply with no actions, and the early `plan-changed` / `mass-delete` returns
+    (`sync-service.ts`) do one save of cursor + evidence only, records untouched.
+  - Every save that drops a record also drops its id from `remoteDeletedIds` (and its parent id
+    when no other record has that parent).
   - If the run stops after the first save, the next run replays nothing it needs: the stored
     evidence already carries the deletions seen so far.
 - **Pruning.** An id leaves `remoteDeletedIds` when the scan or a probe sees the item present
@@ -294,7 +300,8 @@ leads to `trashed`.
 - **Null or expired cursor** (a null cursor, or `{ expired: true }` from HTTP 410): the run warns
   "OneDrive change history unavailable; deletions since the last run are reported, not applied".
   It plans with the stored `remoteDeletedIds` only, minus the ids seen present. The executor's
-  first save restarts the cursor with `feed.start()`. Records that went missing in that gap stay
+  first save restarts the cursor with `feed.start()`; if that call fails, the save goes ahead with
+  a null cursor and the next run warns again. Records that went missing in that gap stay
   `unavailable` until the user acts. The README notes that pairs scanned but never applied for a
   long time can reach this state.
 - **Residual risk.** Personal Vault behaviour in the root feed is a live-test point (§10): an item
@@ -336,7 +343,6 @@ the same path Google uses for `native-unsupported` (`resolve.ts`).
     - names that start with `~$`
     - names that contain `_vti_`
     - names longer than 255 characters
-    - a full path inside the drive longer than 400 characters (pair root path + key)
 - The engine never propagates local renames or moves to the remote. A local rename is B5
   (pending confirmation) plus a new untracked file. Remote names are therefore created in only
   three places, and each one is checked:
@@ -394,11 +400,12 @@ check. The message is improved to "this pair was saved by a newer marvin-drive; 
 
 - `TargetChangedError`, `NameConflictError` and `FileLockedError` → `skipped` with the message.
   Today only the first one is skipped; a rethrown `NameConflictError` would be `failed`.
-- The auth-required error and `OneDriveFullError` → `failed`, and the run stops (`aborted =
-  true`), like an abort today. Google's auth-required error gets the same treatment. That is a
+- `ReauthRequiredError` (both providers raise it) and `OneDriveFullError` → `failed`, and the run stops (`aborted =
+  true`), like an abort today. Google's `ReauthRequiredError` gets the same treatment. That is a
   small behaviour change on Google (today each remaining action fails one by one), and it is
   intended and noted in the CHANGELOG. Google's quota errors keep today's per-file handling.
-- Everything else stays as today.
+- Everything else stays as today. The mapping is executor-only: `sync_release` keeps its own
+  per-path handling (release.ts), where a reauth error still fails path by path.
 
 **Null from `get` at the other call sites:**
 - executor `readRemote` → `TargetChangedError` ("gone from OneDrive since planning")
@@ -464,7 +471,8 @@ The README gets:
   - moved-out stays moved-out
   - an id seen present again is pruned; old evidence does not act later
   - a child of an evidenced folder (`remoteParentId`) is evidenced
-  - `plan-changed` / `mass-delete` early returns and `feed.start` failure persist nothing
+  - `feed.start` failure at creation persists nothing; dry runs and early returns save cursor +
+    evidence only
   - cursor and evidence are written in one save, also on a run with no actions
 - §3 tests:
   - U2/B4 adopt by quickXor
