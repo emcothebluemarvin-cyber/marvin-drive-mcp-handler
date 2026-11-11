@@ -7735,12 +7735,5540 @@ MSG
 
 ## Chunk 3: OneDrive
 
-Notes from Chunks 1–2 for this chunk:
-- Write-guarding re-reads use the throwing `read` (executor `verifyRemote` and trash-remote, release `verifyRemote`). On OneDrive they need per-caller null handling (spec §5): e.g. trash-remote of an item already gone with feed evidence drops the record; without evidence the action is skipped, not failed.
-- Plug quickXor into `defaultDigesters` (`src/sync/local-scanner.ts`); `writeTemp`, `hashLocal`, the executor and release already ask for the remote's kind.
-- `Pair.remoteCursor` / `remoteDeletedIds` exist and persist; nothing reads or writes them yet.
+Spec §8 item 3 (§2.2 `onedrive-remote.ts` and `quickxor.ts`, §4.1–§4.4, §5, §7 tool descriptions, §9), preceded by the review fixes for Chunk 2 (Tasks 23–27). Starting point: Chunk 2 done, **1373 passed, 6 skipped (1379)**, 128 files, at `de4e3ca`.
 
-To be written: `quickxor.ts`, `onedrive-remote.ts`, the deletion feed and its probe mapping, `remote-names.ts`, the ignored reasons, Microsoft pair settings, §5 error handling and account routing (spec §2.2, §4, §5, §8 item 3).
+Decisions (keep consistent):
+
+1. **Routing.** `SyncServiceDeps.openOneDrive(ref)` returns a `OneDriveSyncRemote` for a Microsoft account and null otherwise (the app wires it from `auth.resolveAccount`; `App.openOneDrive` exposes it for the E2E). `SyncEnv.remoteFor(pair)` becomes async; `assertSupportedAccount` is removed from sync (content and watch keep their refusal). `openRemote` runs before `writeMarker`, so an account that cannot be opened touches nothing.
+2. **Feed reading** (`deletion-evidence.ts`). The feed is read before the scan. A null or expired cursor restarts the feed (`start()`) at read time, before the scan, instead of at the executor's first save: the restarted cursor is still stored together with the evidence in that save, and no deletion between the scan and the restart can be missed. A failed restart leaves the cursor null (warning again next run). Other feed read errors fail the run (the old cursor is kept).
+3. **`sync_scan` does not read the feed.** It neither probes nor plans, and only `sync_run` persists, so a read there would change nothing (spec §4.1 says "every scan"; deviation). `sync_release` reads it for its probes and never persists.
+4. **`uploadKey` on case-sensitive volumes** keeps returning null (an `ambiguous` note) for a case-only folder mismatch on OneDrive too. Reusing the remote spelling (spec §4.3 last bullet) would record `Docs/x` for the local `docs/x`, and `resolveLocal` reports such a record ambiguous on every later run. Upload folders (`RemoteFolders`) do compare by fold key on OneDrive whatever the volume (deviation).
+5. **Abort errors.** `ReauthRequiredError` already stopped Google runs (`isAbortError`); only `OneDriveFullError` is added. The spec's "small behaviour change on Google" is therefore only the skipped (not failed) outcomes; the CHANGELOG says so.
+6. **Gone items.** The executor's `verifyRemote`, trash-remote and release's `verifyRemote` use `get` on both providers: null is a skip (`TargetChangedError`). Trash-remote of an item already gone drops the record only with deletion evidence (`ExecutorDeps.evidence`, the run's E). `checkRoots` and `createPair` keep `read`; `NotFoundError` reads "The OneDrive folder X no longer exists" / "OneDrive folder X not found on OneDrive".
+7. **412** from Graph (sub-project 1's `TargetChangedError`) is mapped inside `OneDriveSyncRemote` to the engine's `TargetChangedError` ("changed on OneDrive since the scan"), so the executor skips it like any re-verification.
+8. **Signals.** No engine caller passes one; `OneDriveSyncRemote` checks `signal?.throwIfAborted()` before its reads (GraphClient has no cancellation).
+9. **Pair root `root`** on OneDrive is stored as the drive root's real id (children name the real id in `parentReference`).
+10. **Changed during upload** (review fix): the record's `localMtimeMs` is `-1`, so the stat never matches and the next run re-hashes.
+11. Conflict copies keep the `(Drive conflict …)` name on OneDrive (the spec is silent).
+
+Test helpers new in this chunk: `src/sync/__tests__/fake-onedrive.ts` (`remoteOver(responder)`, `graphFile`, `graphFolder`), `src/sync/__tests__/memory-onedrive.ts` (`memoryOneDrive()`: an in-memory OneDrive behind a fake Graph fetch with `remove`, `hide`, `restore`, `move`, `edit`, `expireCursors`).
+
+## Task map (Chunk 3)
+
+| Task | What it adds |
+|---|---|
+| 23–27 | Review fixes for Chunk 2 |
+| 28 | `quickxor.ts`, default quickXor digester |
+| 29 | `remote-names.ts` |
+| 30 | GraphClient raw file bodies |
+| 31 | `OneDriveSyncRemote`, root delta feed, contract suite |
+| 32 | Account routing, Microsoft pair creation |
+| 33 | Deletion evidence lifecycle |
+| 34 | Executor outcome mapping, gone items |
+| 35 | Upload name checks, OneDrive fold rules |
+| 36 | Ignored items, provider words, no-hash release |
+| 37 | Tool descriptions |
+| 38 | Live OneDrive sync E2E |
+| 39 | quickXor adopt/conflict/release pins |
+
+### Task 23: Review fixes for chunk 2 (a): a file changed during its upload is re-hashed next run
+
+**Spec:** stage-2 review item 1 (`executor.ts` changed-during-upload; §3.1 `localMd5` is always local). Commit `61c7280` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/executor.test.ts`
+- Modify: `src/sync/executor.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.test.ts b/src/sync/__tests__/executor.test.ts
+index 4a97287..cc694f4 100644
+--- a/src/sync/__tests__/executor.test.ts
++++ b/src/sync/__tests__/executor.test.ts
+@@ -20,6 +20,8 @@ import { GoogleSyncRemote, SYNC_EXPORT_FIELDS } from '../remote/google-remote.js
+ import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
+ import { foldKey } from '../paths.js';
+ import { buildReport } from '../report.js';
++import { hashTargets } from '../resolve.js';
++import { planInput } from './plan-input.js';
+ import type { DriveFile } from '../../drive/drive-adapter.js';
+ import { GOOGLE_MIME } from '../../files/export-formats.js';
+ import type { Action, LocalEntry, PairFile, Plan, RemoteEntry, SyncRecord } from '../types.js';
+@@ -242,9 +244,24 @@ describe('Executor', () => {
+       localMd5: md5('hello'),
+       remoteHash: { kind: 'md5', value: 'other' },
+       localSize: l.size,
++      localMtimeMs: -1,
+     });
+   });
+ 
++  it('after changed-during-upload, a same-size same-stat edit is re-hashed next run', async () => {
++    const l = await put('a.pdf', 'hello');
++    // The file was edited to 'jello' during the upload: same size, and the next scan sees
++    // the same stat as the planned one (an editor that restores mtime).
++    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf', md5Checksum: md5('jello') });
++    const file = pairFile([], ['a.pdf']);
++    const out = await executor(file).run([
++      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
++    ]);
++    expect(out[0]?.warning).toBe('changed-during-upload');
++    const input = planInput({ pair: { localDir: dir }, records: file.records, local: [l] });
++    expect(hashTargets(input)).toEqual(['a.pdf']);
++  });
++
+   it('is quiet when the remote reports no hash for the upload', async () => {
+     const l = await put('a.pdf', 'hello');
+     drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf' });
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts`
+
+Expected: FAIL. 2 failed: `warns changed-during-upload when Drive reports a different md5` (`localMtimeMs` is the file's mtime, expected `-1`) and `after changed-during-upload, a same-size same-stat edit is re-hashed next run` (`expected [] to deeply equal [ 'a.pdf' ]`).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index 34914ce..1d61b96 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -302,6 +302,16 @@ export class Executor {
+     return sameContent(planned, fields.hash) === false ? 'changed-during-upload' : undefined;
+   }
+ 
++  /**
++   * Local record fields after an upload. When the file changed during the upload, the
++   * planned md5 may not be what is on disk (an edit can keep size and mtime), so the
++   * stored stat is made unmatchable and the next run re-hashes the file.
++   */
++  private uploadedLocal(local: LocalEntry, md5: string, warning: string | undefined): LocalFields {
++    const fields = this.localFields(local, md5);
++    return warning ? { ...fields, mtimeMs: -1 } : fields;
++  }
++
+   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
+     const local = need(action.local, 'local');
+     const planned = this.plannedDigests(action);
+@@ -322,7 +332,7 @@ export class Executor {
+     await this.commit(action, () =>
+       putRecord(
+         this.file,
+-        makeRecord(action.key, this.localFields(local, planned.md5), remote),
++        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), remote),
+         action.rebaseFrom,
+       ),
+     );
+@@ -368,7 +378,10 @@ export class Executor {
+     const fields = fromRemote(updated, remote.parentId);
+     const warning = this.changedDuringUpload(planned, fields);
+     await this.commit(action, () =>
+-      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
++      putRecord(
++        this.file,
++        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
++      ),
+     );
+     await this.audit('sync_update', action, remote.id);
+     return warning ? { warning } : {};
+@@ -481,7 +494,10 @@ export class Executor {
+     const fields = fromRemote(updated, remote.parentId);
+     const warning = this.changedDuringUpload(planned, fields);
+     await this.commit(action, () =>
+-      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
++      putRecord(
++        this.file,
++        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
++      ),
+     );
+     await this.audit('sync_update', action, remote.id);
+     return { conflictCopy, ...(warning ? { warning } : {}) };
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/executor.test.ts src/sync/executor.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1374 passed | 6 skipped (1380)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/executor.test.ts src/sync/executor.ts
+git commit -F - <<'MSG'
+fix(sync): a file changed during its upload is re-hashed on the next run
+
+Review fix for chunk 2: after changed-during-upload the record keeps the planned
+local md5 while disk and remote may hold other bytes. The stored local mtime is
+now -1, so the stat can never match and the next run hashes the file again
+instead of trusting a wrong md5 forever.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 24: Review fixes for chunk 2 (b): an invalid version-1 pair file reports the version-1 problem
+
+**Spec:** stage-2 review item 2 (§4.5 migration). Commit `5ccdd66` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/pair-store.test.ts`
+- Modify: `src/sync/pair-store.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/pair-store.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/pair-store.test.ts b/src/sync/__tests__/pair-store.test.ts
+index 37efacc..852c26a 100644
+--- a/src/sync/__tests__/pair-store.test.ts
++++ b/src/sync/__tests__/pair-store.test.ts
+@@ -91,6 +91,20 @@ describe('PairStore', () => {
+     });
+   });
+ 
++  it('reports an invalid version-1 file against the version-1 schema', async () => {
++    const file = makePairFile({}, [record('r1', 'a.pdf')]);
++    const v1 = {
++      ...file,
++      version: 1,
++      records: file.records.map(({ remoteHash: _hash, ...r }) => ({ ...r, remoteMd5: 42 })),
++    };
++    await mkdir(dir, { recursive: true });
++    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
++    const load = store().load('docs');
++    await expect(load).rejects.toThrow('remoteMd5');
++    await expect(load).rejects.not.toThrow('version');
++  });
++
+   it('refuses a pair file from a newer version with an update hint', async () => {
+     await mkdir(dir, { recursive: true });
+     await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...makePairFile(), version: 3 }));
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: FAIL. 1 failed: `expected 'Sync pair file for "docs" is invalid:…' to contain 'remoteMd5'` (the version-2 schema reported the version literal).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/pair-store.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-store.ts b/src/sync/pair-store.ts
+index eb05c67..6c0407d 100644
+--- a/src/sync/pair-store.ts
++++ b/src/sync/pair-store.ts
+@@ -74,9 +74,13 @@ const pairFileV1Schema = z.object({
+ });
+ 
+ /** Reads a stored pair file; version 1 is migrated in memory and saved as version 2. */
+-function parsePairFile(json: unknown): ReturnType<typeof pairFileSchema.safeParse> {
++function parsePairFile(
++  json: unknown,
++): { success: true; data: PairFile } | { success: false; error: z.ZodError } {
++  if ((json as { version?: unknown } | null)?.version !== 1) return pairFileSchema.safeParse(json);
++  // A version-1 file is reported against the version-1 schema, not as a version mismatch.
+   const v1 = pairFileV1Schema.safeParse(json);
+-  if (!v1.success) return pairFileSchema.safeParse(json);
++  if (!v1.success) return v1;
+   return pairFileSchema.safeParse({
+     ...v1.data,
+     version: 2,
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/pair-store.test.ts src/sync/pair-store.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1375 passed | 6 skipped (1381)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/pair-store.test.ts src/sync/pair-store.ts
+git commit -F - <<'MSG'
+fix(sync): an invalid version-1 pair file reports the version-1 problem
+
+Review fix for chunk 2: a version-1 file that failed the version-1 schema fell
+through to the version-2 schema and reported a misleading version mismatch. A
+file that says version 1 is now checked against the version-1 schema only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 25: Review fixes for chunk 2 (c): the download digester is created before the temp file
+
+**Spec:** stage-2 review item 3 (§3.3 `writeTemp`). Commit `b3ebfff` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/transfer.test.ts`
+- Modify: `src/sync/transfer.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/transfer.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/transfer.test.ts b/src/sync/__tests__/transfer.test.ts
+index a9e48c1..2561163 100644
+--- a/src/sync/__tests__/transfer.test.ts
++++ b/src/sync/__tests__/transfer.test.ts
+@@ -95,6 +95,19 @@ describe('placeExclusive', () => {
+     expect(await leftovers()).toEqual([]);
+   });
+ 
++  it('a digester that cannot be created leaves no temp file behind', async () => {
++    const digesters = (): never => {
++      throw new Error('no quickXor here');
++    };
++    await expect(
++      placeExclusive(dir, () => 'a.pdf', source('hello'), {
++        expected: { kind: 'quickXor', value: 'QX' },
++        digesters,
++      }),
++    ).rejects.toThrow('no quickXor here');
++    expect(await readdir(dir)).toEqual([]);
++  });
++
+   it('falls back to exists-check + rename where hard links are unsupported', async () => {
+     const noLink = async (): Promise<void> => {
+       throw Object.assign(new Error('nope'), { code: 'ENOTSUP' });
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/transfer.test.ts`
+
+Expected: FAIL. 1 failed: `a digester that cannot be created leaves no temp file behind`: `expected [ Array(1) ] to deeply equal []` (the `.marvin-part` file stayed).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/transfer.ts` (modify):
+
+```diff
+diff --git a/src/sync/transfer.ts b/src/sync/transfer.ts
+index 848dcfc..a5a02a4 100644
+--- a/src/sync/transfer.ts
++++ b/src/sync/transfer.ts
+@@ -59,14 +59,15 @@ async function writeTemp(
+   what: string,
+   check: DownloadCheck,
+ ): Promise<{ tmp: string; md5: string; size: number }> {
+-  const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
+-  const handle = await open(tmp, 'wx', 0o644);
++  // Digesters first: one that throws must not leave an open handle or a temp file.
+   const hash = createHash('md5');
+   const expected = check.expected ?? null;
+   const other =
+     expected !== null && expected.kind !== 'md5'
+       ? (check.digesters ?? defaultDigesters)(expected.kind)
+       : null;
++  const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
++  const handle = await open(tmp, 'wx', 0o644);
+   let size = 0;
+   try {
+     for await (const chunk of source) {
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/transfer.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/transfer.test.ts src/sync/transfer.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1376 passed | 6 skipped (1382)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/transfer.test.ts src/sync/transfer.ts
+git commit -F - <<'MSG'
+fix(sync): create the download digester before the temp file
+
+Review fix for chunk 2: writeTemp opened the .marvin-part file before asking
+for the remote-kind digester, so a digester that throws leaked the handle and
+left the temp file. The digesters are created first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 26: Review fixes for chunk 2 (d): the md5 hashTargets test has a non-empty base
+
+**Spec:** stage-2 review item 4 (§3.1 `hashTargets`). Commit `796e996` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/resolve.test.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/resolve.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/resolve.test.ts b/src/sync/__tests__/resolve.test.ts
+index 17c4d8f..a104a61 100644
+--- a/src/sync/__tests__/resolve.test.ts
++++ b/src/sync/__tests__/resolve.test.ts
+@@ -180,10 +180,27 @@ describe('hashTargets', () => {
+     });
+ 
+   it('on an md5 remote, release requests and adopt candidates add nothing', () => {
+-    const base = hashTargets(releaseCase());
+-    expect(base).toEqual([]);
+-    expect(hashTargets({ ...releaseCase(), releaseNames: 'all' })).toEqual(base);
+-    expect(hashTargets({ ...releaseCase(), releaseNames: ['same.pdf'] })).toEqual(base);
++    // Also a stat-changed tracked file and a new selected file, so the base set is not empty.
++    const md5Case = (o: Partial<InputOptions> = {}) => {
++      const base = releaseCase(o);
++      return {
++        ...base,
++        records: [...base.records, record('r5', 'touched.pdf')],
++        pair: { ...base.pair, selection: [...base.pair.selection, 'touched.pdf', 'new.pdf'] },
++        local: {
++          ...base.local,
++          entries: [
++            ...base.local.entries,
++            localEntry('touched.pdf', { ctimeMs: 2 }),
++            localEntry('new.pdf'),
++          ],
++        },
++      };
++    };
++    const base = hashTargets(md5Case());
++    expect(base).toEqual(['new.pdf', 'touched.pdf']);
++    expect(hashTargets({ ...md5Case(), releaseNames: 'all' })).toEqual(base);
++    expect(hashTargets({ ...md5Case(), releaseNames: ['same.pdf'] })).toEqual(base);
+   });
+ 
+   it('on another hash kind, adds release candidates and untracked same-key files', () => {
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/resolve.test.ts`
+
+Expected: PASS already (behaviour unchanged); the stronger fixture pins it.
+
+- [ ] **Step 3: Implement.**
+
+Nothing beyond Step 1.
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/resolve.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/resolve.test.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1376 passed | 6 skipped (1382)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/resolve.test.ts
+git commit -F - <<'MSG'
+test(sync): the md5 hash set is unchanged with a non-empty base
+
+Review fix for chunk 2: the md5-remote hashTargets test compared against an
+empty base set. It now has a stat-changed tracked file and a new selected file,
+so it proves that release requests and adopt candidates add nothing on md5.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 27: Review fixes for chunk 2 (e): CHANGELOG note on the pair file upgrade
+
+**Spec:** stage-2 review item 5 (§4.5). Commit `5e696b9` on the reference branch.
+
+**Files:**
+- Modify: `docs/CHANGELOG.md`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+No test: documentation only.
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Expected: nothing to run (documentation only).
+
+- [ ] **Step 3: Implement.**
+
+`docs/CHANGELOG.md` (modify):
+
+```diff
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 11486e6..5c6fc2b 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -18,6 +18,7 @@
+ - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
+ 
+ ### Changed
++- Sync pair files move to version 2 (content hashes with their kind; OneDrive deletion cursor and evidence). A version-1 file is read and upgraded on the first save; after that, older marvin-drive versions refuse it ("this pair was saved by a newer marvin-drive; update it"). To roll back, keep the new version or re-create the pairs.
+ - Tool descriptions are provider-neutral and mark Google-only parameters. Accounts are shown with their provider in `auth list`.
+ - The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).
+ - `src/cli/main.ts` is a small entry that loads the rest of the CLI lazily, so the hook path starts fast; the former entry is `src/cli/program.ts`.
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Expected: nothing to run beyond Step 5.
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write docs/CHANGELOG.md` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1376 passed | 6 skipped (1382)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add docs/CHANGELOG.md
+git commit -F - <<'MSG'
+docs(sync): changelog note on the pair file upgrade to version 2
+
+Review fix for chunk 2: pair files are upgraded on the first save and older
+versions cannot read them afterwards; rolling back needs the new version or
+re-created pairs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 28: QuickXorHash, the default quickXor digester
+
+**Spec:** §2.2 `quickxor.ts`, §3.1, §9 (`quickxor.ts` vectors). The vectors are the published rclone ones (`backend/onedrive/quickxorhash/quickxorhash_test.go`, a subset), and the test also checks a bit-by-bit reference written from the definition. Commit `504bcb5` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/local-scanner.test.ts`
+- Test (create): `src/sync/__tests__/quickxor.test.ts`
+- Modify: `src/sync/local-scanner.ts`
+- Create: `src/sync/remote/quickxor.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/local-scanner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/local-scanner.test.ts b/src/sync/__tests__/local-scanner.test.ts
+index c3a5f91..0dbabd1 100644
+--- a/src/sync/__tests__/local-scanner.test.ts
++++ b/src/sync/__tests__/local-scanner.test.ts
+@@ -6,6 +6,7 @@ import path from 'node:path';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
+ import { hashFileDigests, hashLocal, probeOnDisk, scanLocal } from '../local-scanner.js';
++import { quickXor } from '../remote/quickxor.js';
+ 
+ const NFD = 'şartname.pdf'.normalize('NFD');
+ const isRoot = process.getuid?.() === 0;
+@@ -136,8 +137,9 @@ describe('hashing', () => {
+       remote: { kind: 'quickXor', value: 'QX-STUB' },
+     });
+     expect(seen).toEqual(['quickXor:hello']);
+-    await expect(hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).rejects.toThrow(
+-      'No quickXor digest',
+-    );
++    expect(await hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).toEqual({
++      md5: expected,
++      remote: { kind: 'quickXor', value: quickXor(Buffer.from('hello')) },
++    });
+   });
+ });
+```
+
+`src/sync/__tests__/quickxor.test.ts` (create):
+
+```ts
+import { randomBytes } from 'node:crypto';
+import { describe, expect, it } from 'vitest';
+import { defaultDigesters } from '../local-scanner.js';
+import { QuickXorHash, quickXor } from '../remote/quickxor.js';
+
+/** Published by rclone (backend/onedrive/quickxorhash/quickxorhash_test.go): base64 in → out. */
+const RCLONE_VECTORS: Array<[number, string, string]> = [
+  [0, '', 'AAAAAAAAAAAAAAAAAAAAAAAAAAA='],
+  [1, 'Sg==', 'SgAAAAAAAAAAAAAAAQAAAAAAAAA='],
+  [2, 'tbQ=', 'taAFAAAAAAAAAAAAAgAAAAAAAAA='],
+  [3, '0pZP', '0rDEEwAAAAAAAAAAAwAAAAAAAAA='],
+  [4, 'jRRDVA==', 'jaDAEKgAAAAAAAAABAAAAAAAAAA='],
+  [5, 'eAV52qE=', 'eChAHrQRCgAAAAAABQAAAAAAAAA='],
+  [6, 'luBZlaT6', 'lgBHFipBCn0AAAAABgAAAAAAAAA='],
+  [7, 'qaApEj66lw==', 'qQBFCiTgA11cAgAABwAAAAAAAAA='],
+  [8, '/aNzzCFPS/A=', '/RjFHJgRgicsAR4ACAAAAAAAAAA='],
+  [9, 'n6Neh7p6fFgm', 'nxiFFw6hCz3wAQsmCQAAAAAAAAA='],
+  [10, 'J9iPGCbfZSTNyw==', 'J8DGIzBggm+UgQTNUgYAAAAAAAA='],
+  [11, 'i+UZyUGJKh+ISbk=', 'iyhHBpIRhESo4AOIQ0IuAAAAAAA='],
+  [12, 'h490d57Pqz5q2rtT', 'h3gEHe7giWeswgdq3MYupgAAAAA='],
+  [13, 'vPgoDjOfO6fm71RxLw==', 'vMAHChwwg0/s4BTmdQcV4vACAAA='],
+  [14, 'XoJ1AsoR4fDYJrDqYs4=', 'XhBEHQSgjAiEAx7YPgEs1CEGZwA='],
+  [15, 'gQaybEqS/4UlDc8e4IJm', 'gDCALNigBEn8oxAlZ8AzPAAOQZg='],
+  [16, '2fuxhBJXtpWFe8dOfdGeHw==', 'O9tHLAghgSvYohKFyMMxnNCHaHg='],
+  [17, 'XBV6YKU9V7yMakZnFIxIkuU=', 'HbplHsBQih5cgReMQYMRzkABRiA='],
+  [18, 'XJZSOiNO2bmfKnTKD7fztcQX', '/6ZArHQwAidkIxefQgEdlPGAW8w='],
+  [19, 'g8VtAh+2Kf4k0kY5tzji2i2zmA==', 'wDNrgwHWAVukwB8kg4YRcnALHIg='],
+  [20, 'T6LYJIfDh81JrAK309H2JMJTXis=', 'zBTHrspn3mEcohlJdIUAbjGNaNg='],
+  [21, 'DWAAX5/CIfrmErgZa8ot6ZraeSbu', 'LR2Z0PjuRYGKQB/mhQAuMrAGZbQ='],
+  [24, 'bU2j/0XYdgfPFD4691jV0AOUEUPR4Z5E', 'bnLBiLpVgnxVkXhNsIAPdHAPLFQ='],
+  [32, 'NbYXsp5/K6mR+NmHwExjvWeWDJFnXTKWVlzYHoesp2E=', 'wjuAuWDiq04qDt1R8hHWDDcwVoQ='],
+  [
+    111,
+    'jyibxJSzO6ZiZ0O1qe3tG/bvIAYssvukh9suIT5wEy1JBINVgPiqdsTW0cOpP0aUfP7mgqLfADkzI/m/GgCuVhr8oFLrOCoTx1/psBOWwhltCbhUx51Icm9aH8tY4Z3ccU+6BKpYQkLCy0B/A9Zc',
+    'hZfLIilSITC6N3e3tQ/iSgEzkto=',
+  ],
+  [
+    128,
+    'ikwCorI7PKWz17EI50jZCGbV9JU2E8bXVfxNMg5zdmqSZ2NlsQPp0kqYIPjzwTg1MBtfWPg53k0h0P2naJNEVgrqpoHTfV2b3pJ4m0zYPTJmUX4Bg/lOxcnCxAYKU29Y5F0U8Quz7ZXFBEweftXxJ7RS4r6N7BzJrPsLhY7hgck=',
+    'imAoFvCWlDn4yVw3/oq1PDbbm6U=',
+  ],
+  [
+    256,
+    'qwGf2ESubE5jOUHHyc94ORczFYYbc2OmEzo+hBIyzJiNwAzC8PvJqtTzwkWkSslgHFGWQZR2BV5+uYTrYT7HVwRM40vqfj0dBgeDENyTenIOL1LHkjtDKoXEnQ0mXAHoJ8PjbNC93zi5TovVRXTNzfGEs5dpWVqxUzb5lc7dwkyvOluBw482mQ4xrzYyIY1t+//OrNi1ObGXuUw2jBQOFfJVj2Y6BOyYmfB1y36eBxi3zxeG5d5NYjm2GSh6e08QMAwu3zrINcqIzLOuNIiGXBtl7DjKt7b5wqi4oFiRpZsCyx2smhSrdrtK/CkdU6nDN+34vSR/M8rZpWQdBE7a8g==',
+    'WYT9JY3JIo/pEBp+tIM6Gt2nyTM=',
+  ],
+];
+
+/**
+ * Bit-by-bit reference written straight from the definition: bit k of input byte n goes to
+ * state bit (11n + k) mod 160 (little-endian bit order); then the length is XORed in.
+ */
+function reference(data: Uint8Array): string {
+  const state = new Uint8Array(20);
+  for (let n = 0; n < data.length; n++) {
+    for (let k = 0; k < 8; k++) {
+      if ((((data[n] as number) >> k) & 1) === 0) continue;
+      const bit = (11 * n + k) % 160;
+      state[bit >> 3] = (state[bit >> 3] as number) ^ (1 << (bit & 7));
+    }
+  }
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64LE(BigInt(data.length));
+  for (let i = 0; i < 8; i++) state[12 + i] = (state[12 + i] as number) ^ (length[i] as number);
+  return Buffer.from(state).toString('base64');
+}
+
+describe('QuickXorHash', () => {
+  it.each(RCLONE_VECTORS)('matches rclone vector of %i bytes', (size, input, out) => {
+    const data = Buffer.from(input, 'base64');
+    expect(data.length).toBe(size);
+    expect(quickXor(data)).toBe(out);
+    expect(reference(data)).toBe(out);
+  });
+
+  it('hashes empty input to zeros', () => {
+    expect(new QuickXorHash().digest()).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+  });
+
+  it('matches the reference on inputs that wrap the 160-bit state many times', () => {
+    for (const size of [159, 160, 161, 319, 320, 1000, 4096 + 7]) {
+      const data = randomBytes(size);
+      expect(quickXor(data)).toBe(reference(data));
+    }
+  });
+
+  it('does not depend on chunk boundaries', () => {
+    const data = randomBytes(5000);
+    const whole = quickXor(data);
+    for (const step of [1, 2, 7, 64, 159, 160, 161, 999]) {
+      const h = new QuickXorHash();
+      for (let i = 0; i < data.length; i += step) h.update(data.subarray(i, i + step));
+      expect(h.digest()).toBe(whole);
+    }
+  });
+
+  it('is the default quickXor digester', () => {
+    const data = randomBytes(300);
+    const d = defaultDigesters('quickXor');
+    d.update(data.subarray(0, 100));
+    d.update(data.subarray(100));
+    expect(d.digest()).toBe(quickXor(data));
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/quickxor.test.ts`
+
+Expected: FAIL. `Error: Cannot find module '../remote/quickxor.js'`. With `quickxor.ts` created but `local-scanner.ts` unchanged: 1 failed, `is the default quickXor digester`: `ValidationError: No quickXor digest is available in this build` (and the local-scanner test still expects that error).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/local-scanner.ts` (modify):
+
+```diff
+diff --git a/src/sync/local-scanner.ts b/src/sync/local-scanner.ts
+index 2953639..89569dd 100644
+--- a/src/sync/local-scanner.ts
++++ b/src/sync/local-scanner.ts
+@@ -4,6 +4,7 @@ import { lstat, readdir } from 'node:fs/promises';
+ import path from 'node:path';
+ import { ValidationError, hasErrorCode } from '../errors.js';
+ import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
++import { QuickXorHash } from './remote/quickxor.js';
+ import type { HashKind } from './remote/sync-remote.js';
+ import type { LocalDigests, LocalScan, OnDiskProbe } from './types.js';
+ 
+@@ -16,9 +17,17 @@ export interface Digester {
+ /** Makes a digester for a remote's hash kind (injectable; quickXor plugs in here). */
+ export type DigesterFactory = (kind: HashKind) => Digester;
+ 
+-/** md5 only; other kinds are added with their implementation. */
++/** md5 (hex) and QuickXorHash (base64, OneDrive). */
+ export const defaultDigesters: DigesterFactory = (kind) => {
+-  if (kind !== 'md5') throw new ValidationError(`No ${kind} digest is available in this build`);
++  if (kind === 'quickXor') {
++    const qx = new QuickXorHash();
++    return {
++      update: (chunk): void => {
++        qx.update(chunk);
++      },
++      digest: (): string => qx.digest(),
++    };
++  }
+   const hash = createHash('md5');
+   return {
+     update: (chunk): void => {
+```
+
+`src/sync/remote/quickxor.ts` (create):
+
+```ts
+/*
+ * QuickXorHash, OneDrive's content hash (OneDrive sync spec §2.2). The state is 160 bits;
+ * byte n of the input is XORed in at bit (11 * n) mod 160, rotating; the 64-bit
+ * little-endian input length is XORed into the last 8 bytes. The digest is base64.
+ */
+
+const WIDTH_BITS = 160;
+const SHIFT = 11;
+const WIDTH_BYTES = WIDTH_BITS / 8;
+
+/**
+ * Incremental QuickXorHash. Byte n lands at a bit position that depends only on n mod 160,
+ * so the bytes are folded into 160 cells while streaming and placed once in `digest()`.
+ */
+export class QuickXorHash {
+  private readonly cells = new Uint8Array(WIDTH_BITS);
+  private index = 0;
+  private length = 0n;
+
+  update(chunk: Uint8Array): this {
+    const cells = this.cells;
+    let i = this.index;
+    for (let j = 0; j < chunk.length; j++) {
+      cells[i] = (cells[i] as number) ^ (chunk[j] as number);
+      i = i === WIDTH_BITS - 1 ? 0 : i + 1;
+    }
+    this.index = i;
+    this.length += BigInt(chunk.length);
+    return this;
+  }
+
+  /** The base64 digest (28 characters). */
+  digest(): string {
+    const out = new Uint8Array(WIDTH_BYTES);
+    for (let cell = 0; cell < WIDTH_BITS; cell++) {
+      const value = this.cells[cell] as number;
+      if (value === 0) continue;
+      const bit = (cell * SHIFT) % WIDTH_BITS;
+      const byte = bit >> 3;
+      const offset = bit & 7;
+      // A byte spans at most two state bytes; the second wraps to the start of the state.
+      out[byte] = (out[byte] as number) ^ ((value << offset) & 0xff);
+      if (offset > 0) {
+        const next = (byte + 1) % WIDTH_BYTES;
+        out[next] = (out[next] as number) ^ (value >> (8 - offset));
+      }
+    }
+    let length = this.length;
+    for (let i = 0; i < 8; i++) {
+      const at = WIDTH_BYTES - 8 + i;
+      out[at] = (out[at] as number) ^ Number(length & 0xffn);
+      length >>= 8n;
+    }
+    return Buffer.from(out).toString('base64');
+  }
+}
+
+/** QuickXorHash of a whole buffer. */
+export function quickXor(data: Uint8Array): string {
+  return new QuickXorHash().update(data).digest();
+}
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/quickxor.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/quickxor.test.ts src/sync/local-scanner.ts src/sync/remote/quickxor.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  129 passed (129); Tests  1407 passed | 6 skipped (1413)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/quickxor.test.ts src/sync/local-scanner.ts src/sync/remote/quickxor.ts
+git commit -F - <<'MSG'
+feat(sync): QuickXorHash digests for OneDrive
+
+An incremental QuickXorHash (160-bit state, 11-bit shift, length XORed into the
+last 8 bytes, base64) is the default quickXor digester, so local scans,
+downloads, the executor and release can compare against OneDrive's hash.
+Tested with rclone's published vectors, a bit-by-bit reference, wrapping inputs
+and chunk-boundary independence.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 29: Remote name rules per provider
+
+**Spec:** §4.3 (`remote-names.ts`), §9 (`remote-names.ts`: every rule). Commit `da8736e` on the reference branch.
+
+**Files:**
+- Test (create): `src/sync/__tests__/remote-names.test.ts`
+- Create: `src/sync/remote/remote-names.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/remote-names.test.ts` (create):
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { providerLabel, remoteNameProblem } from '../remote/remote-names.js';
+
+describe('remoteNameProblem', () => {
+  it('Google accepts every name', () => {
+    for (const name of ['a:b', 'CON', ' x', 'x.', '~$a', '_vti_', 'x'.repeat(400)]) {
+      expect(remoteNameProblem('google', name)).toBeNull();
+    }
+  });
+
+  it.each(['"', '*', ':', '<', '>', '?', '/', '\\', '|'])('OneDrive refuses %s', (c) => {
+    expect(remoteNameProblem('microsoft', `a${c}b.txt`)).toContain('character OneDrive');
+  });
+
+  it('OneDrive refuses leading and trailing spaces and a trailing dot', () => {
+    expect(remoteNameProblem('microsoft', ' a.txt')).toContain('space');
+    expect(remoteNameProblem('microsoft', 'a.txt ')).toContain('space');
+    expect(remoteNameProblem('microsoft', 'a.')).toContain('dot');
+    expect(remoteNameProblem('microsoft', '.hidden')).toBeNull();
+  });
+
+  it.each([
+    '.lock',
+    'desktop.ini',
+    'Desktop.INI',
+    'CON',
+    'prn.txt',
+    'AUX',
+    'nul.tar.gz',
+    'COM0',
+    'com9.log',
+    'LPT0',
+    'lpt9',
+  ])('OneDrive refuses the reserved name %s', (name) => {
+    expect(remoteNameProblem('microsoft', name)).toContain('reserved');
+  });
+
+  it('OneDrive accepts names that only contain a reserved word', () => {
+    for (const name of ['CONsole.txt', 'com10', 'lpt', 'my.lock', 'a.CON']) {
+      expect(remoteNameProblem('microsoft', name)).toBeNull();
+    }
+  });
+
+  it('OneDrive refuses ~$ prefixes, _vti_ and names over 255 characters', () => {
+    expect(remoteNameProblem('microsoft', '~$report.docx')).toContain('~$');
+    expect(remoteNameProblem('microsoft', 'a~$b')).toBeNull();
+    expect(remoteNameProblem('microsoft', 'x_VTI_y')).toContain('_vti_');
+    expect(remoteNameProblem('microsoft', 'é'.repeat(255))).toBeNull();
+    expect(remoteNameProblem('microsoft', 'é'.repeat(256))).toContain('255');
+  });
+
+  it('labels the providers', () => {
+    expect(providerLabel('google')).toBe('Drive');
+    expect(providerLabel('microsoft')).toBe('OneDrive');
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/remote-names.test.ts`
+
+Expected: FAIL. `Error: Cannot find module '../remote/remote-names.js'`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote/remote-names.ts` (create):
+
+```ts
+import type { SyncRemote } from './sync-remote.js';
+
+/*
+ * Names a provider refuses (OneDrive sync spec §4.3). The engine checks every name it
+ * creates on the remote: uploaded files, the folders created for them and the pair root.
+ */
+
+const ONEDRIVE_FORBIDDEN = /["*:<>?/\\|]/;
+const ONEDRIVE_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+const ONEDRIVE_MAX_LENGTH = 255;
+
+function oneDriveProblem(name: string): string | null {
+  if (name === '') return 'the name is empty';
+  if (ONEDRIVE_FORBIDDEN.test(name)) {
+    return 'the name contains a character OneDrive does not allow (" * : < > ? / \\ |)';
+  }
+  if (name.startsWith(' ') || name.endsWith(' ')) return 'the name starts or ends with a space';
+  if (name.endsWith('.')) return 'the name ends with a dot';
+  const lower = name.toLowerCase();
+  if (lower === '.lock' || lower === 'desktop.ini') return `"${name}" is a reserved name`;
+  if (ONEDRIVE_RESERVED.test(name.split('.')[0] ?? '')) {
+    return `"${name}" is a reserved name (CON, PRN, AUX, NUL, COM0–9, LPT0–9)`;
+  }
+  if (name.startsWith('~$')) return 'names starting with ~$ are not allowed';
+  if (lower.includes('_vti_')) return 'names containing _vti_ are not allowed';
+  if ([...name].length > ONEDRIVE_MAX_LENGTH) return 'the name is longer than 255 characters';
+  return null;
+}
+
+/** Why `provider` cannot store `name` as one file or folder name, or null when it can. */
+export function remoteNameProblem(provider: SyncRemote['provider'], name: string): string | null {
+  return provider === 'microsoft' ? oneDriveProblem(name) : null;
+}
+
+/** The provider's name in user-facing texts. */
+export function providerLabel(provider: SyncRemote['provider']): string {
+  return provider === 'microsoft' ? 'OneDrive' : 'Drive';
+}
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/remote-names.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/remote-names.test.ts src/sync/remote/remote-names.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  130 passed (130); Tests  1432 passed | 6 skipped (1438)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/remote-names.test.ts src/sync/remote/remote-names.ts
+git commit -F - <<'MSG'
+feat(sync): per-provider remote name rules
+
+remoteNameProblem(provider, name) holds OneDrive's name rules (forbidden
+characters, leading/trailing space, trailing dot, reserved names, ~$, _vti_,
+255 characters); Google accepts every name, as today. providerLabel names the
+provider in user-facing texts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 30: GraphClient sends a local file as a raw body
+
+**Spec:** §2.2 (`uploadNew` / `replaceContent` simple PUT up to 4 MiB), §3.4 (If-Match checked when the write happens). Commit `08bd176` on the reference branch.
+
+**Files:**
+- Test: `src/onedrive/__tests__/graph-client.upload.test.ts`
+- Modify: `src/onedrive/graph-client.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/onedrive/__tests__/graph-client.upload.test.ts` (modify):
+
+```diff
+diff --git a/src/onedrive/__tests__/graph-client.upload.test.ts b/src/onedrive/__tests__/graph-client.upload.test.ts
+index 4143095..8d196b5 100644
+--- a/src/onedrive/__tests__/graph-client.upload.test.ts
++++ b/src/onedrive/__tests__/graph-client.upload.test.ts
+@@ -194,3 +194,25 @@ describe('GraphClient.upload', () => {
+     }
+   });
+ });
++
++describe('GraphClient file bodies', () => {
++  it('sends a local file as the raw body, re-read on a retry', async () => {
++    let calls = 0;
++    const fake = fakeGraph(() => (calls++ === 0 ? empty(503) : json({ id: 'f1' })));
++    const small = { localPath, size: SIZE };
++    await expect(
++      makeClient(fake).client.json('PUT', '/me/drive/items/f1/content', {
++        retry: 'idempotent',
++        file: small,
++        headers: { 'If-Match': 'e1' },
++      }),
++    ).resolves.toEqual({ id: 'f1' });
++    expect(fake.calls).toHaveLength(2);
++    for (const call of fake.calls) {
++      expect(call.bytes?.equals(content)).toBe(true);
++      expect(call.headers['content-type']).toBe('application/octet-stream');
++      expect(call.headers['content-length']).toBe(String(SIZE));
++      expect(call.headers['if-match']).toBe('e1');
++    }
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/onedrive/__tests__/graph-client.upload.test.ts`
+
+Expected: FAIL. `npm run typecheck`: `TS2353: Object literal may only specify known properties, and 'file' does not exist in type 'GraphRequestOptions'`; under vitest the PUT carries no bytes (`call.bytes` undefined).
+
+- [ ] **Step 3: Implement.**
+
+`src/onedrive/graph-client.ts` (modify):
+
+```diff
+diff --git a/src/onedrive/graph-client.ts b/src/onedrive/graph-client.ts
+index 27ba68c..f9e8094 100644
+--- a/src/onedrive/graph-client.ts
++++ b/src/onedrive/graph-client.ts
+@@ -35,6 +35,8 @@ export interface GraphRequestOptions {
+   headers?: Record<string, string>;
+   /** A 404 on a repeat means an earlier attempt already succeeded. */
+   notFoundOnRepeatIsOk?: boolean;
++  /** Sends this local file as the raw request body (re-read on every attempt). */
++  file?: { localPath: string; size: number };
+ }
+ 
+ /** 10 MiB, a multiple of 320 KiB as Graph requires. */
+@@ -345,6 +347,8 @@ export class GraphClient {
+       const token = await this.deps.accessToken(forceRefresh ? { forceRefresh } : undefined);
+       forceRefresh = false;
+       let res: Response | undefined;
++      const file = options.file;
++      const stream = file ? createReadStream(file.localPath) : undefined;
+       try {
+         res = await this.fetch(url, {
+           method,
+@@ -352,12 +356,18 @@ export class GraphClient {
+           headers: {
+             Authorization: `Bearer ${token}`,
+             ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
++            ...(file
++              ? { 'Content-Type': 'application/octet-stream', 'Content-Length': String(file.size) }
++              : {}),
+             ...options.headers,
+           },
+           ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+-        });
++          ...(stream ? { body: stream as unknown as RequestInit['body'], duplex: 'half' } : {}),
++        } as RequestInit);
+       } catch (err) {
+         this.log.warn('Graph request failed to reach the network', { error: err });
++      } finally {
++        stream?.destroy();
+       }
+       if (res?.status === 401) {
+         await res.body?.cancel();
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/onedrive/__tests__/graph-client.upload.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/onedrive/__tests__/graph-client.upload.test.ts src/onedrive/graph-client.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  130 passed (130); Tests  1433 passed | 6 skipped (1439)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/onedrive/__tests__/graph-client.upload.test.ts src/onedrive/graph-client.ts
+git commit -F - <<'MSG'
+feat(onedrive): GraphClient sends a local file as a raw request body
+
+GraphRequestOptions.file streams a local file as the body of a simple PUT
+(octet-stream, Content-Length), opened again for every attempt. Sync uses it
+for uploads up to 4 MiB, where If-Match is checked when the write happens.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 31: OneDriveSyncRemote over GraphClient, with the root delta feed
+
+**Spec:** §2.1, §2.2 (`onedrive-remote.ts`), §3.4 (412), §4.1 (feed: `root/delta`, `?token=latest`, 410), §4.2 (detection), §5 (error mapping), §9 (contract suite). Commit `2a77f84` on the reference branch.
+
+**Files:**
+- Test (create): `src/sync/__tests__/fake-onedrive.ts`
+- Test (create): `src/sync/__tests__/onedrive-remote.test.ts`
+- Test (create): `src/sync/__tests__/remote-contract.test.ts`
+- Create: `src/sync/remote/onedrive-remote.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/fake-onedrive.ts` (create):
+
+```ts
+import {
+  GRAPH,
+  fakeGraph,
+  json,
+  makeClient,
+  type FakeCall,
+  type Responder,
+} from '../../onedrive/__tests__/fake-graph.js';
+import { OneDriveSyncRemote, type SyncGraphItem } from '../remote/onedrive-remote.js';
+
+export const DRIVE = 'b!drive1';
+export const NEXT = `${GRAPH}/me/drive/items/P/children?$skiptoken=abc`;
+
+/** A OneDriveSyncRemote for account `ms` over a fake Graph fetch (drive id answered). */
+export function remoteOver(responder: Responder): {
+  remote: OneDriveSyncRemote;
+  calls: FakeCall[];
+} {
+  const fake = fakeGraph((call) =>
+    call.path === '/me/drive?$select=id' ? json({ id: DRIVE }) : responder(call),
+  );
+  return { remote: new OneDriveSyncRemote(makeClient(fake).client, 'ms'), calls: fake.calls };
+}
+
+export function graphFile(
+  id: string,
+  name: string,
+  extra: Partial<SyncGraphItem> = {},
+): SyncGraphItem {
+  return {
+    id,
+    name,
+    size: 5,
+    eTag: `"{${id}},1"`,
+    createdDateTime: '2026-11-01T00:00:00Z',
+    lastModifiedDateTime: '2026-11-02T00:00:00Z',
+    file: { mimeType: 'application/pdf', hashes: { quickXorHash: `qx-${id}` } },
+    parentReference: { id: 'P', driveId: DRIVE },
+    ...extra,
+  };
+}
+
+export const graphFolder = (id: string, name: string): SyncGraphItem => ({
+  id,
+  name,
+  folder: {},
+  eTag: `"{${id}},1"`,
+  parentReference: { id: 'P' },
+});
+```
+
+`src/sync/__tests__/onedrive-remote.test.ts` (create):
+
+```ts
+import { randomBytes } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { NameConflictError, ValidationError } from '../../errors.js';
+import { GRAPH, empty, graphError, json } from '../../onedrive/__tests__/fake-graph.js';
+import { TargetChangedError } from '../errors.js';
+import {
+  ONEDRIVE_SYNC_SELECT,
+  SIMPLE_UPLOAD_MAX,
+  toRemoteItemFromGraph,
+} from '../remote/onedrive-remote.js';
+import { NEXT, graphFile, graphFolder, remoteOver } from './fake-onedrive.js';
+
+describe('toRemoteItemFromGraph', () => {
+  it('maps a file with its quickXor hash and eTag', () => {
+    expect(toRemoteItemFromGraph(graphFile('f1', 'a.pdf'))).toEqual({
+      id: 'f1',
+      name: 'a.pdf',
+      parentId: 'P',
+      kind: 'file',
+      mimeType: 'application/pdf',
+      size: 5,
+      modifiedTime: '2026-11-02T00:00:00Z',
+      createdTime: '2026-11-01T00:00:00Z',
+      hash: { kind: 'quickXor', value: 'qx-f1' },
+      version: '"{f1},1"',
+      trashed: false,
+      canEdit: true,
+      canTrash: true,
+      canAddChildren: true,
+      native: null,
+    });
+  });
+
+  it('a file without a quickXorHash has no hash; a folder has no size', () => {
+    const noHash = toRemoteItemFromGraph(graphFile('f1', 'a.pdf', { file: { hashes: {} } }));
+    expect(noHash.hash).toBeNull();
+    const folder = toRemoteItemFromGraph({ ...graphFolder('d1', 'docs'), size: 99 });
+    expect(folder).toMatchObject({ kind: 'folder', size: null, hash: null });
+  });
+
+  it('OneNote, shared and facet-less items are unsupported (spec §4.2)', () => {
+    const base = { id: 'x', name: 'x', parentReference: { id: 'P' } };
+    expect(toRemoteItemFromGraph({ ...base, package: { type: 'oneNote' } })).toMatchObject({
+      kind: 'unsupported',
+      unsupported: 'onenote',
+    });
+    expect(toRemoteItemFromGraph({ ...base, remoteItem: {}, folder: {} })).toMatchObject({
+      kind: 'unsupported',
+      unsupported: 'shared',
+    });
+    expect(toRemoteItemFromGraph({ ...base, name: 'Personal Vault' })).toMatchObject({
+      kind: 'unsupported',
+      unsupported: 'special',
+    });
+  });
+
+  it('the drive root has no parent', () => {
+    expect(toRemoteItemFromGraph({ id: 'R', name: 'root', folder: {} }).parentId).toBeNull();
+  });
+});
+
+describe('OneDriveSyncRemote reads', () => {
+  it('get reads the sync fields; 404 and 403 are null, other errors throw', async () => {
+    const { remote, calls } = remoteOver((call) => {
+      if (call.path.startsWith('/me/drive/items/f1?')) return json(graphFile('f1', 'a.pdf'));
+      if (call.path.startsWith('/me/drive/items/gone')) return graphError(404, 'itemNotFound');
+      if (call.path.startsWith('/me/drive/items/hidden')) return graphError(403, 'accessDenied');
+      return graphError(423, 'resourceLocked');
+    });
+    expect((await remote.get('f1'))?.id).toBe('f1');
+    expect(calls[0]?.path).toBe(`/me/drive/items/f1?$select=${ONEDRIVE_SYNC_SELECT}`);
+    expect(await remote.get('gone')).toBeNull();
+    expect(await remote.get('hidden')).toBeNull();
+    await expect(remote.get('locked')).rejects.toThrow(/locked/);
+    await expect(remote.read('gone')).rejects.toThrow('File not found');
+  });
+
+  it('listChildren pages through nextLink after the page-link check', async () => {
+    const { remote, calls } = remoteOver((call) => {
+      if (call.url === NEXT) return json({ value: [graphFile('f2', 'b.pdf')] });
+      return json({ value: [graphFile('f1', 'a.pdf')], '@odata.nextLink': NEXT });
+    });
+    const first = await remote.listChildren('P', undefined);
+    expect(first.items.map((i) => i.id)).toEqual(['f1']);
+    expect(first.next).toBe(NEXT);
+    expect(calls[0]?.path).toBe(
+      `/me/drive/items/P/children?$select=${ONEDRIVE_SYNC_SELECT}&$top=200`,
+    );
+    const second = await remote.listChildren('P', first.next);
+    expect(second).toEqual({ items: [expect.objectContaining({ id: 'f2' })] });
+    await expect(remote.listChildren('P', 'https://evil.example/me/drive/x')).rejects.toThrow(
+      ValidationError,
+    );
+  });
+
+  it('findChildren returns every fold match over all pages; folders on request', async () => {
+    const { remote } = remoteOver((call) => {
+      if (call.url === NEXT)
+        return json({ value: [graphFolder('d2', 'DOCS'), graphFolder('o', 'x')] });
+      return json({
+        value: [graphFolder('d1', 'Docs'), graphFile('f1', 'docs')],
+        '@odata.nextLink': NEXT,
+      });
+    });
+    expect((await remote.findChildren('P', 'docs')).map((i) => i.id)).toEqual(['d1', 'f1', 'd2']);
+    expect((await remote.findChildren('P', 'docs', 'folder')).map((i) => i.id)).toEqual([
+      'd1',
+      'd2',
+    ]);
+  });
+
+  it('readNative and exportNative refuse (no natives on OneDrive)', async () => {
+    const { remote } = remoteOver(() => empty(500));
+    await expect(remote.readNative()).rejects.toBeInstanceOf(ValidationError);
+    await expect(remote.exportNative()).rejects.toBeInstanceOf(ValidationError);
+    expect(remote.deletionFeed()).not.toBeNull();
+    expect([remote.provider, remote.hashKind, remote.rootId]).toEqual([
+      'microsoft',
+      'quickXor',
+      'root',
+    ]);
+  });
+});
+
+describe('OneDriveSyncRemote writes', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'od-remote-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const file = async (name: string, bytes: Buffer): Promise<string> => {
+    const abs = path.join(dir, name);
+    await writeFile(abs, bytes);
+    return abs;
+  };
+
+  it('createFolder posts with conflictBehavior fail; 409 is NameConflictError', async () => {
+    let n = 0;
+    const { remote, calls } = remoteOver(() =>
+      n++ === 0
+        ? json({ id: 'd1', name: 'docs', folder: {} }, 201)
+        : graphError(409, 'nameAlreadyExists'),
+    );
+    expect(await remote.createFolder('P', 'docs')).toMatchObject({
+      id: 'd1',
+      kind: 'folder',
+      parentId: 'P',
+    });
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      path: `/me/drive/items/P/children?$select=${ONEDRIVE_SYNC_SELECT}`,
+    });
+    expect(JSON.parse(calls[0]?.text ?? '')).toEqual({
+      name: 'docs',
+      folder: {},
+      '@microsoft.graph.conflictBehavior': 'fail',
+    });
+    await expect(remote.createFolder('P', 'docs')).rejects.toBeInstanceOf(NameConflictError);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('uploadNew: a simple PUT with conflictBehavior fail up to 4 MiB; 409 is not retried', async () => {
+    const bytes = Buffer.from('hello');
+    const abs = await file('a.pdf', bytes);
+    let n = 0;
+    const { remote, calls } = remoteOver(() =>
+      n++ === 0 ? json(graphFile('f1', 'a b.pdf'), 201) : graphError(409, 'nameAlreadyExists'),
+    );
+    expect((await remote.uploadNew('P', 'a b.pdf', abs)).hash).toEqual({
+      kind: 'quickXor',
+      value: 'qx-f1',
+    });
+    expect(calls[0]).toMatchObject({
+      method: 'PUT',
+      path: '/me/drive/items/P:/a%20b.pdf:/content?@microsoft.graph.conflictBehavior=fail',
+    });
+    expect(calls[0]?.bytes?.equals(bytes)).toBe(true);
+    await expect(remote.uploadNew('P', 'a b.pdf', abs)).rejects.toBeInstanceOf(NameConflictError);
+    expect(calls).toHaveLength(2);
+    await expect(remote.uploadNew('P', 'x/y', abs)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('uploadNew above 4 MiB uses an upload session with conflictBehavior fail', async () => {
+    const abs = await file('big.bin', randomBytes(SIMPLE_UPLOAD_MAX + 1));
+    const { remote, calls } = remoteOver((call) => {
+      if (call.path.endsWith('createUploadSession')) {
+        return json({ uploadUrl: 'https://upload.example/s?sig=1' });
+      }
+      return json(graphFile('f9', 'big.bin'), 201);
+    });
+    expect((await remote.uploadNew('P', 'big.bin', abs)).id).toBe('f9');
+    expect(calls[0]?.path).toBe('/me/drive/items/P:/big.bin:/createUploadSession');
+    expect(JSON.parse(calls[0]?.text ?? '')).toEqual({
+      item: { '@microsoft.graph.conflictBehavior': 'fail' },
+    });
+  });
+
+  it('replaceContent sends If-Match; 412 is the engine TargetChangedError', async () => {
+    const abs = await file('a.pdf', Buffer.from('new'));
+    const item = toRemoteItemFromGraph(graphFile('f1', 'a.pdf'));
+    let n = 0;
+    const { remote, calls } = remoteOver(() =>
+      n++ === 0 ? json(graphFile('f1', 'a.pdf', { eTag: '"{f1},2"' })) : graphError(412, 'x'),
+    );
+    expect((await remote.replaceContent(item, abs)).version).toBe('"{f1},2"');
+    expect(calls[0]).toMatchObject({ method: 'PUT', path: '/me/drive/items/f1/content' });
+    expect(calls[0]?.headers['if-match']).toBe('"{f1},1"');
+    expect(calls[0]?.bytes?.toString()).toBe('new');
+    await expect(remote.replaceContent(item, abs)).rejects.toThrow(
+      new TargetChangedError('a.pdf changed on OneDrive since the scan'),
+    );
+    await expect(remote.replaceContent({ ...item, version: null }, abs)).rejects.toBeInstanceOf(
+      TargetChangedError,
+    );
+  });
+
+  it('replaceContent above 4 MiB opens a session with If-Match', async () => {
+    const abs = await file('big.bin', randomBytes(SIMPLE_UPLOAD_MAX + 1));
+    const item = toRemoteItemFromGraph(graphFile('f1', 'big.bin'));
+    const { remote, calls } = remoteOver((call) =>
+      call.path.endsWith('createUploadSession')
+        ? json({ uploadUrl: 'https://upload.example/s?sig=1' })
+        : json(graphFile('f1', 'big.bin'), 200),
+    );
+    await remote.replaceContent(item, abs);
+    expect(calls[0]?.path).toBe('/me/drive/items/f1/createUploadSession');
+    expect(calls[0]?.headers['if-match']).toBe('"{f1},1"');
+  });
+
+  it('trash deletes with If-Match; 412 is TargetChangedError', async () => {
+    const item = toRemoteItemFromGraph(graphFile('f1', 'a.pdf'));
+    let n = 0;
+    const { remote, calls } = remoteOver(() => (n++ === 0 ? empty(204) : graphError(412, 'x')));
+    await remote.trash(item);
+    expect(calls[0]).toMatchObject({ method: 'DELETE', path: '/me/drive/items/f1' });
+    expect(calls[0]?.headers['if-match']).toBe('"{f1},1"');
+    await expect(remote.trash(item)).rejects.toBeInstanceOf(TargetChangedError);
+  });
+
+  it('download streams the content through the consumer', async () => {
+    const { remote, calls } = remoteOver(() => new Response('bytes', { status: 200 }));
+    const text = await remote.download('f1', async (open) => {
+      let out = '';
+      for await (const chunk of await open()) out += String(chunk);
+      return out;
+    });
+    expect(text).toBe('bytes');
+    expect(calls[0]?.path).toBe('/me/drive/items/f1/content');
+  });
+});
+
+describe('OneDriveSyncRemote deletion feed', () => {
+  const LATEST = `${GRAPH}/me/drive/root/delta?token=latest-1`;
+  const PAGE2 = `${GRAPH}/me/drive/root/delta?token=page-2`;
+  const AFTER = `${GRAPH}/me/drive/root/delta?token=after-3`;
+
+  it('start asks for token=latest and returns the delta link', async () => {
+    const { remote, calls } = remoteOver(() => json({ value: [], '@odata.deltaLink': LATEST }));
+    expect(await remote.deletionFeed().start()).toBe(LATEST);
+    expect(calls[0]?.path).toBe('/me/drive/root/delta?token=latest');
+  });
+
+  it('read collects deleted ids over every page and returns the next cursor', async () => {
+    const { remote, calls } = remoteOver((call) => {
+      if (call.url === LATEST) {
+        return json({
+          value: [{ id: 'gone', name: 'a', deleted: {} }, graphFile('moved', 'b')],
+          '@odata.nextLink': PAGE2,
+        });
+      }
+      return json({
+        value: [{ id: 'gone2', deleted: { state: 'deleted' } }],
+        '@odata.deltaLink': AFTER,
+      });
+    });
+    expect(await remote.deletionFeed().read(LATEST)).toEqual({
+      deletedIds: ['gone', 'gone2'],
+      cursor: AFTER,
+    });
+    expect(calls.map((c) => c.url)).toEqual([`${GRAPH}/me/drive?$select=id`, LATEST, PAGE2]);
+  });
+
+  it('a 410 means the cursor expired; a foreign cursor is refused', async () => {
+    const { remote } = remoteOver(() => graphError(410, 'resyncRequired'));
+    expect(await remote.deletionFeed().read(LATEST)).toEqual({ expired: true });
+    await expect(
+      remote.deletionFeed().read('https://evil.example/v1.0/me/drive/root/delta'),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+});
+```
+
+`src/sync/__tests__/remote-contract.test.ts` (create):
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { createFakeDrive, httpError } from '../../files/__tests__/fakes.js';
+import { GOOGLE_MIME } from '../../files/export-formats.js';
+import { graphError, json } from '../../onedrive/__tests__/fake-graph.js';
+import type { SyncRemote } from '../remote/sync-remote.js';
+import { googleRemoteOver } from './fake-remote.js';
+import { NEXT, graphFile, graphFolder, remoteOver } from './fake-onedrive.js';
+
+/** One fake per provider, answering the same scenario (OneDrive sync spec §9). */
+interface Setup {
+  /** `ok` is readable, `gone` 404, `hidden` 403. */
+  reads(): SyncRemote;
+  /** Children of P over two pages: folders Docs and DOCS, file docs, folder other. */
+  children(): SyncRemote;
+}
+
+const google: Setup = {
+  reads: () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockImplementation(async (id: string) => {
+      if (id === 'gone') throw httpError(404, 'notFound');
+      if (id === 'hidden') throw httpError(403, 'insufficientFilePermissions');
+      return { id, name: 'a.pdf', mimeType: 'application/pdf', parents: ['P'] };
+    });
+    return googleRemoteOver(drive);
+  },
+  children: () => {
+    const drive = createFakeDrive();
+    const folder = GOOGLE_MIME.folder;
+    drive.listFiles.mockImplementation(async (params: { pageToken?: string; q?: string }) => {
+      const page1 = [
+        { id: 'd1', name: 'Docs', mimeType: folder, parents: ['P'] },
+        { id: 'f1', name: 'docs', mimeType: 'text/plain', parents: ['P'] },
+      ];
+      const page2 = [
+        { id: 'd2', name: 'DOCS', mimeType: folder, parents: ['P'] },
+        { id: 'o', name: 'other', mimeType: folder, parents: ['P'] },
+      ];
+      const onlyFolders = params.q?.includes(folder) === true;
+      const keep = (files: typeof page1) =>
+        onlyFolders ? files.filter((f) => f.mimeType === folder) : files;
+      return params.pageToken
+        ? { files: keep(page2) }
+        : { files: keep(page1), nextPageToken: 'n2' };
+    });
+    return googleRemoteOver(drive);
+  },
+};
+
+const onedrive: Setup = {
+  reads: () =>
+    remoteOver((call) => {
+      if (call.path.startsWith('/me/drive/items/gone')) return graphError(404, 'itemNotFound');
+      if (call.path.startsWith('/me/drive/items/hidden')) return graphError(403, 'accessDenied');
+      return json(graphFile('ok', 'a.pdf'));
+    }).remote,
+  children: () =>
+    remoteOver((call) =>
+      call.url === NEXT
+        ? json({ value: [graphFolder('d2', 'DOCS'), graphFolder('o', 'other')] })
+        : json({
+            value: [graphFolder('d1', 'Docs'), graphFile('f1', 'docs')],
+            '@odata.nextLink': NEXT,
+          }),
+    ).remote,
+};
+
+describe.each([
+  ['google', google],
+  ['microsoft', onedrive],
+] as const)('SyncRemote contract: %s', (provider, setup) => {
+  it('get: an item, or null on 404 and 403', async () => {
+    const remote = setup.reads();
+    expect(remote.provider).toBe(provider);
+    expect((await remote.get('ok'))?.name).toBe('a.pdf');
+    expect(await remote.get('gone')).toBeNull();
+    expect(await remote.get('hidden')).toBeNull();
+  });
+
+  it('listChildren pages until there is no next token', async () => {
+    const remote = setup.children();
+    const ids: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await remote.listChildren('P', token);
+      ids.push(...page.items.map((i) => i.id));
+      token = page.next;
+    } while (token);
+    expect(ids).toEqual(['d1', 'f1', 'd2', 'o']);
+  });
+
+  it('findChildren folders: every fold match over all pages', async () => {
+    const found = await setup.children().findChildren('P', 'docs', 'folder');
+    expect(found.map((f) => [f.id, f.kind])).toEqual([
+      ['d1', 'folder'],
+      ['d2', 'folder'],
+    ]);
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/fake-onedrive.ts src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/remote-contract.test.ts`
+
+Expected: FAIL. `Error: Cannot find module '../remote/onedrive-remote.js'` (onedrive-remote.test.ts, fake-onedrive.ts, remote-contract.test.ts).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote/onedrive-remote.ts` (create):
+
+```ts
+import { stat } from 'node:fs/promises';
+import {
+  GraphApiError,
+  NotFoundError,
+  PermissionDeniedError,
+  TargetChangedError as GraphTargetChangedError,
+  ValidationError,
+} from '../../errors.js';
+import { childPath, itemPath, type GraphClient } from '../../onedrive/graph-client.js';
+import { mimeOf, type GraphItem } from '../../onedrive/map-item.js';
+import { TargetChangedError } from '../errors.js';
+import { foldKey } from '../paths.js';
+import type {
+  DeletionFeed,
+  NativeSource,
+  OpenStream,
+  RemoteItem,
+  SyncRemote,
+} from './sync-remote.js';
+
+/** Graph fields every sync read requests; `file` carries `hashes.quickXorHash`. */
+export const ONEDRIVE_SYNC_SELECT =
+  'id,name,size,eTag,createdDateTime,lastModifiedDateTime,file,folder,package,remoteItem,parentReference';
+export const ONEDRIVE_PAGE_SIZE = 200;
+/** Up to this size a simple PUT is used, so If-Match is checked when the write happens. */
+export const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
+const CONFLICT_FAIL = '@microsoft.graph.conflictBehavior';
+
+/** A driveItem as sync reads it (the hashes are inside the `file` facet). */
+export interface SyncGraphItem extends Omit<GraphItem, 'file'> {
+  file?: { mimeType?: string; hashes?: { quickXorHash?: string; sha1Hash?: string } };
+}
+
+interface GraphPage {
+  value?: SyncGraphItem[];
+  '@odata.nextLink'?: string;
+  '@odata.deltaLink'?: string;
+}
+
+/** A driveItem as the engine sees it (OneDrive sync spec §2.1, §4.2). */
+export function toRemoteItemFromGraph(item: SyncGraphItem): RemoteItem {
+  const quickXor = item.file?.hashes?.quickXorHash;
+  const base = {
+    id: item.id,
+    name: item.name,
+    parentId: item.parentReference?.id ?? null,
+    mimeType: mimeOf(item as GraphItem),
+    size: item.file && typeof item.size === 'number' ? item.size : null,
+    modifiedTime: item.lastModifiedDateTime ?? '',
+    createdTime: item.createdDateTime ?? '',
+    hash: quickXor ? { kind: 'quickXor' as const, value: quickXor } : null,
+    version: item.eTag ?? null,
+    trashed: false,
+    canEdit: true,
+    canTrash: true,
+    canAddChildren: true,
+    native: null,
+  };
+  if (item.remoteItem) return { ...base, kind: 'unsupported', unsupported: 'shared' };
+  if (item.package) return { ...base, kind: 'unsupported', unsupported: 'onenote' };
+  if (item.folder) return { ...base, kind: 'folder' };
+  if (item.file) return { ...base, kind: 'file' };
+  return { ...base, kind: 'unsupported', unsupported: 'special' };
+}
+
+function noExport(): never {
+  throw new ValidationError('Google-native exports do not exist on OneDrive');
+}
+
+/** A 412 from Graph is the engine's "changed since the scan" skip (spec §5). */
+function changedSinceScan(err: unknown, name: string): unknown {
+  if (err instanceof GraphTargetChangedError) {
+    return new TargetChangedError(`${name} changed on OneDrive since the scan`, { cause: err });
+  }
+  return err;
+}
+
+/**
+ * SyncRemote over sub-project 1's GraphClient (OneDrive sync spec §2.2). Personal drives
+ * only: the user's own items; shared items (`remoteItem`) are reported, never followed.
+ * The optional signals are checked before each request (GraphClient has no cancellation).
+ */
+export class OneDriveSyncRemote implements SyncRemote {
+  readonly provider = 'microsoft';
+  readonly hashKind = 'quickXor';
+  readonly rootId = 'root';
+  private driveId: Promise<string> | undefined;
+
+  constructor(
+    private readonly client: GraphClient,
+    readonly account: string,
+  ) {}
+
+  /** The drive id, for `checkPageToken` (read once per remote). */
+  private drive(): Promise<string> {
+    if (!this.driveId) {
+      const read = this.client
+        .get<{ id: string }>('/me/drive?$select=id')
+        .then((drive) => drive.id);
+      read.catch(() => {
+        this.driveId = undefined;
+      });
+      this.driveId = read;
+    }
+    return this.driveId;
+  }
+
+  /** Follows a page or delta link after the sub-project 1 host and shape check. */
+  private async follow(link: string): Promise<GraphPage> {
+    this.client.checkPageToken(link, await this.drive());
+    return this.client.page<GraphPage>(link);
+  }
+
+  async read(id: string, signal?: AbortSignal): Promise<RemoteItem> {
+    signal?.throwIfAborted();
+    const item = await this.client.get<SyncGraphItem>(
+      `${itemPath(id)}?$select=${ONEDRIVE_SYNC_SELECT}`,
+      id,
+    );
+    return toRemoteItemFromGraph(item);
+  }
+
+  async get(id: string, signal?: AbortSignal): Promise<RemoteItem | null> {
+    try {
+      return await this.read(id, signal);
+    } catch (err) {
+      if (err instanceof NotFoundError || err instanceof PermissionDeniedError) return null;
+      throw err;
+    }
+  }
+
+  async listChildren(
+    folderId: string,
+    pageToken: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ items: RemoteItem[]; next?: string }> {
+    signal?.throwIfAborted();
+    const page = pageToken
+      ? await this.follow(pageToken)
+      : await this.client.get<GraphPage>(
+          `${itemPath(folderId)}/children?$select=${ONEDRIVE_SYNC_SELECT}&$top=${ONEDRIVE_PAGE_SIZE}`,
+          folderId,
+        );
+    const items = (page.value ?? []).map(toRemoteItemFromGraph);
+    const next = page['@odata.nextLink'];
+    return next ? { items, next } : { items };
+  }
+
+  /** Every child (all pages) whose name folds to `name`'s fold key; folders only on request. */
+  async findChildren(parentId: string, name: string, kind?: 'folder'): Promise<RemoteItem[]> {
+    const fold = foldKey(name);
+    const found: RemoteItem[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.listChildren(parentId, token);
+      for (const item of page.items) {
+        if (foldKey(item.name) !== fold) continue;
+        if (kind === 'folder' && item.kind !== 'folder') continue;
+        found.push(item);
+      }
+      token = page.next;
+    } while (token);
+    return found;
+  }
+
+  /** conflictBehavior=fail: a taken name raises NameConflictError (never a renamed copy). */
+  async createFolder(parentId: string, name: string): Promise<RemoteItem> {
+    const created = await this.client.json<SyncGraphItem>(
+      'POST',
+      `${itemPath(parentId)}/children?$select=${ONEDRIVE_SYNC_SELECT}`,
+      { retry: 'create', target: name, body: { name, folder: {}, [CONFLICT_FAIL]: 'fail' } },
+    );
+    return toRemoteItemFromGraph({ parentReference: { id: parentId }, ...created });
+  }
+
+  async uploadNew(parentId: string, name: string, localPath: string): Promise<RemoteItem> {
+    const { size } = await stat(localPath);
+    const target = childPath(parentId, name);
+    const uploaded =
+      size <= SIMPLE_UPLOAD_MAX
+        ? await this.client.json<SyncGraphItem>('PUT', `${target}:/content?${CONFLICT_FAIL}=fail`, {
+            retry: 'create',
+            target: name,
+            ...(size > 0 ? { file: { localPath, size } } : {}),
+          })
+        : await this.client.upload<SyncGraphItem>({
+            createPath: `${target}:/createUploadSession`,
+            body: { item: { [CONFLICT_FAIL]: 'fail' } },
+            localPath,
+            size,
+            target: name,
+          });
+    return toRemoteItemFromGraph({ parentReference: { id: parentId }, ...uploaded });
+  }
+
+  /** If-Match with the re-read eTag; a 412 is TargetChangedError (spec §3.4). */
+  async replaceContent(item: RemoteItem, localPath: string): Promise<RemoteItem> {
+    if (!item.version) {
+      throw new TargetChangedError(`${item.name} has no version on OneDrive; scan again`);
+    }
+    const { size } = await stat(localPath);
+    const headers = { 'If-Match': item.version };
+    try {
+      const replaced =
+        size <= SIMPLE_UPLOAD_MAX
+          ? await this.client.json<SyncGraphItem>('PUT', `${itemPath(item.id)}/content`, {
+              retry: 'create',
+              target: item.name,
+              headers,
+              ...(size > 0 ? { file: { localPath, size } } : {}),
+            })
+          : await this.client.upload<SyncGraphItem>({
+              createPath: `${itemPath(item.id)}/createUploadSession`,
+              body: { item: { [CONFLICT_FAIL]: 'replace' } },
+              headers,
+              localPath,
+              size,
+              target: item.name,
+            });
+      const parentReference = { id: item.parentId ?? '' };
+      return toRemoteItemFromGraph({ parentReference, ...replaced });
+    } catch (err) {
+      throw changedSinceScan(err, item.name);
+    }
+  }
+
+  download<T>(id: string, consume: (open: OpenStream) => Promise<T>): Promise<T> {
+    return consume(() => this.client.download(`${itemPath(id)}/content`, id));
+  }
+
+  readNative(): Promise<NativeSource> {
+    return Promise.resolve().then(noExport);
+  }
+
+  exportNative<T>(): Promise<T> {
+    return Promise.resolve().then(noExport);
+  }
+
+  /** DELETE with If-Match: OneDrive moves the item to its recycle bin. */
+  async trash(item: RemoteItem): Promise<void> {
+    if (!item.version) {
+      throw new TargetChangedError(`${item.name} has no version on OneDrive; scan again`);
+    }
+    try {
+      await this.client.json('DELETE', itemPath(item.id), {
+        retry: 'idempotent',
+        target: item.name,
+        headers: { 'If-Match': item.version },
+        notFoundOnRepeatIsOk: true,
+      });
+    } catch (err) {
+      throw changedSinceScan(err, item.name);
+    }
+  }
+
+  /** The drive-wide root `delta` feed (spec §4.1); only `deleted` entries are evidence. */
+  deletionFeed(): DeletionFeed {
+    return {
+      start: async (): Promise<string> => {
+        const page = await this.client.get<GraphPage>('/me/drive/root/delta?token=latest');
+        const link = page['@odata.deltaLink'];
+        if (!link) throw new GraphApiError(undefined);
+        return link;
+      },
+      read: async (
+        cursor: string,
+      ): Promise<{ deletedIds: string[]; cursor: string } | { expired: true }> => {
+        const deletedIds: string[] = [];
+        try {
+          for (let link = cursor; ;) {
+            const page = await this.follow(link);
+            for (const item of page.value ?? []) if (item.deleted) deletedIds.push(item.id);
+            const next = page['@odata.nextLink'];
+            if (next) {
+              link = next;
+              continue;
+            }
+            const delta = page['@odata.deltaLink'];
+            if (!delta) throw new GraphApiError(undefined);
+            return { deletedIds, cursor: delta };
+          }
+        } catch (err) {
+          if (err instanceof GraphApiError && err.status === 410) return { expired: true };
+          throw err;
+        }
+      },
+    };
+  }
+}
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/fake-onedrive.ts src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/remote-contract.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/fake-onedrive.ts src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/remote-contract.test.ts src/sync/remote/onedrive-remote.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  132 passed (132); Tests  1457 passed | 6 skipped (1463)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/fake-onedrive.ts src/sync/__tests__/onedrive-remote.test.ts src/sync/__tests__/remote-contract.test.ts src/sync/remote/onedrive-remote.ts
+git commit -F - <<'MSG'
+feat(sync): OneDriveSyncRemote over GraphClient, with the root delta feed
+
+Every port method on Graph: reads with the sync fields (null on 404/403),
+children paged through checked nextLinks, findChildren by fold key, folder and
+file creation with conflictBehavior=fail (simple PUT up to 4 MiB, else an
+upload session), replace and delete with If-Match (412 becomes the engine's
+TargetChangedError), downloads, and the drive-wide delta feed (token=latest,
+deleted ids, 410 means expired). OneNote, shared and facet-less items are
+unsupported. A contract suite runs get, paging and findChildren on both
+remotes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 32: Account routing: Microsoft accounts get OneDrive pairs
+
+**Spec:** §2.2 last bullet (routing, `assertSupportedAccount` removed for sync), §4.1 (pair creation cursor), §4.3 (pair root name), §4.4 (googleExport, nativeBaselineDone, root problems), §5 (null root → folder not found). Commit `75caf82` on the reference branch.
+
+**Files:**
+- Test: `src/__tests__/app.test.ts`
+- Test: `src/sync/__tests__/gather-digests.test.ts`
+- Test (create): `src/sync/__tests__/memory-onedrive.ts`
+- Test: `src/sync/__tests__/sync-service.pairs.test.ts`
+- Modify: `src/app.ts`
+- Modify: `src/sync/pair-admin.ts`
+- Modify: `src/sync/scan-select.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/__tests__/app.test.ts` (modify):
+
+```diff
+diff --git a/src/__tests__/app.test.ts b/src/__tests__/app.test.ts
+index 81b214b..b6fc715 100644
+--- a/src/__tests__/app.test.ts
++++ b/src/__tests__/app.test.ts
+@@ -23,7 +23,7 @@ afterEach(async () => {
+ });
+ 
+ describe('buildApp', () => {
+-  it('refuses a Microsoft account in sync before writeMarker', async () => {
++  it('routes a Microsoft account in sync to OneDrive, failing before writeMarker', async () => {
+     const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
+     await new AccountRegistry(app.paths.accounts).add({
+       alias: 'ms',
+@@ -33,9 +33,15 @@ describe('buildApp', () => {
+     });
+     const localDir = path.join(tmp, 'Local');
+     await mkdir(localDir);
+-    await expect(
+-      app.sync.createPair({ name: 'docs', localDir, remoteFolderId: 'R', account: 'ms' }),
+-    ).rejects.toThrow(ProviderNotSupportedError);
++    // No Microsoft client or token here: the first Graph call (the delta cursor) fails.
++    const failure = await app.sync
++      .createPair({ name: 'docs', localDir, remoteFolderId: 'R', account: 'ms' })
++      .then(
++        () => null,
++        (err: unknown) => err,
++      );
++    expect(failure).toBeInstanceOf(Error);
++    expect(failure).not.toBeInstanceOf(ProviderNotSupportedError);
+     expect(writeMarker).not.toHaveBeenCalled();
+   });
+```
+
+`src/sync/__tests__/gather-digests.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/gather-digests.test.ts b/src/sync/__tests__/gather-digests.test.ts
+index 1e62cfe..6ee23fc 100644
+--- a/src/sync/__tests__/gather-digests.test.ts
++++ b/src/sync/__tests__/gather-digests.test.ts
+@@ -69,9 +69,8 @@ describe('gatherInput on a non-md5 remote (spec §3.1 stat-unchanged files)', ()
+       log: silentLogger(),
+       clock: () => new Date('2026-11-03T12:00:00.000Z'),
+       store: new PairStore({ dir: path.join(dir, '.store'), logger: silentLogger() }),
+-      remoteFor: () => remote,
++      remoteFor: async () => remote,
+       openRemote: async () => remote,
+-      assertSupportedAccount: async () => {},
+       digesters: stubDigester,
+     };
+     const plain = await gatherInput(env, file);
+```
+
+`src/sync/__tests__/memory-onedrive.ts` (create):
+
+```ts
+import {
+  GRAPH,
+  empty,
+  fakeGraph,
+  graphError,
+  json,
+  makeClient,
+  type FakeCall,
+} from '../../onedrive/__tests__/fake-graph.js';
+import { quickXor } from '../remote/quickxor.js';
+import { OneDriveSyncRemote, type SyncGraphItem } from '../remote/onedrive-remote.js';
+
+/** One item of the in-memory OneDrive. */
+export interface MemoryItem {
+  id: string;
+  name: string;
+  parentId: string | null;
+  folder: boolean;
+  content: Buffer;
+  version: number;
+  modified: string;
+  /** Without `file`/`folder` (Personal Vault and similar). */
+  special?: boolean;
+}
+
+export interface MemoryOneDrive {
+  rootId: string;
+  items: Map<string, MemoryItem>;
+  calls: FakeCall[];
+  /** A OneDriveSyncRemote for account `ms` over this drive. */
+  remote(): OneDriveSyncRemote;
+  addFolder(parentId: string, name: string, id?: string): MemoryItem;
+  addFile(parentId: string, name: string, content: string, id?: string): MemoryItem;
+  edit(id: string, content: string): void;
+  /** Deletes the item (and its subtree): 404 from now on, reported by the delta feed. */
+  remove(id: string): void;
+  /** The item becomes unreachable (404) without a feed entry (e.g. a locked vault). */
+  hide(id: string): void;
+  /** The next delta read with an old cursor answers 410. */
+  expireCursors(): void;
+  /** Number of delta reads. */
+  deltaReads(): number;
+}
+
+const DRIVE_ID = 'mem-drive';
+
+/** An in-memory OneDrive behind a fake Graph fetch (paths as OneDriveSyncRemote sends them). */
+export function memoryOneDrive(): MemoryOneDrive {
+  const rootId = 'ROOTID';
+  const items = new Map<string, MemoryItem>();
+  /** Every delete appends its ids; a cursor is an index into this log. */
+  const deletions: string[] = [];
+  /** Cursors of an older generation are expired (410). */
+  let generation = 0;
+  let deltaReads = 0;
+  let nextId = 1;
+  let tick = 0;
+  const stamp = (): string => new Date(Date.UTC(2026, 10, 1, 0, 0, tick++)).toISOString();
+  items.set(rootId, {
+    id: rootId,
+    name: 'root',
+    parentId: null,
+    folder: true,
+    content: Buffer.alloc(0),
+    version: 1,
+    modified: stamp(),
+  });
+
+  const add = (item: Omit<MemoryItem, 'version' | 'modified'>): MemoryItem => {
+    const full = { ...item, version: 1, modified: stamp() };
+    items.set(full.id, full);
+    return full;
+  };
+  const toGraph = (item: MemoryItem): SyncGraphItem => ({
+    id: item.id,
+    name: item.name,
+    eTag: `"{${item.id}},${item.version}"`,
+    createdDateTime: '2026-11-01T00:00:00Z',
+    lastModifiedDateTime: item.modified,
+    ...(item.parentId ? { parentReference: { id: item.parentId, driveId: DRIVE_ID } } : {}),
+    ...(item.special
+      ? {}
+      : item.folder
+        ? { folder: {} }
+        : {
+            size: item.content.length,
+            file: {
+              mimeType: 'application/octet-stream',
+              hashes: { quickXorHash: quickXor(item.content) },
+            },
+          }),
+  });
+  const resolve = (ref: string): MemoryItem | undefined =>
+    items.get(ref === 'root' ? rootId : decodeURIComponent(ref));
+  const childNamed = (parentId: string, name: string): MemoryItem | undefined =>
+    [...items.values()].find(
+      (i) => i.parentId === parentId && i.name.toLowerCase() === name.toLowerCase(),
+    );
+  const ifMatch = (call: FakeCall, item: MemoryItem): boolean =>
+    call.headers['if-match'] === undefined ||
+    call.headers['if-match'] === `"{${item.id}},${item.version}"`;
+  const subtree = (id: string): string[] => [
+    id,
+    ...[...items.values()].filter((i) => i.parentId === id).flatMap((i) => subtree(i.id)),
+  ];
+
+  const handle = (call: FakeCall): Response => {
+    const url = new URL(call.url);
+    const p = decodeURIComponent(url.pathname.replace(/^\/v1\.0/, ''));
+    if (p === '/me/drive') return json({ id: DRIVE_ID });
+    if (p === '/me/drive/root/delta') {
+      const token = url.searchParams.get('token') ?? '';
+      const link = (n: number): string => `${GRAPH}/me/drive/root/delta?token=g${generation}-${n}`;
+      if (token === 'latest')
+        return json({ value: [], '@odata.deltaLink': link(deletions.length) });
+      deltaReads++;
+      const [gen, n] = token.slice(1).split('-').map(Number);
+      if (gen !== generation) return graphError(410, 'resyncRequired');
+      const from = n ?? 0;
+      const value = deletions.slice(from).map((id) => ({ id, deleted: { state: 'deleted' } }));
+      return json({ value, '@odata.deltaLink': link(deletions.length) });
+    }
+    // /me/drive/items/{id}[...] or /me/drive/root[...], or path addressing `{id}:/{name}:/content`
+    const m = /^\/me\/drive\/(?:items\/([^/:]+)|(root))(?::\/(.+?):)?(\/children|\/content)?$/.exec(
+      p,
+    );
+    if (!m) return graphError(400, 'invalidRequest');
+    const item = resolve(m[1] ?? m[2] ?? '');
+    const childName = m[3];
+    const tail = m[4];
+    if (!item) return graphError(404, 'itemNotFound');
+    if (childName !== undefined && tail === '/content' && call.method === 'PUT') {
+      if (childNamed(item.id, childName)) return graphError(409, 'nameAlreadyExists');
+      const created = add({
+        id: `od-${nextId++}`,
+        name: childName,
+        parentId: item.id,
+        folder: false,
+        content: call.bytes ?? Buffer.alloc(0),
+      });
+      return json(toGraph(created), 201);
+    }
+    if (tail === '/children' && call.method === 'POST') {
+      const body = JSON.parse(call.text ?? '{}') as { name: string };
+      if (childNamed(item.id, body.name)) return graphError(409, 'nameAlreadyExists');
+      const created = add({
+        id: `od-${nextId++}`,
+        name: body.name,
+        parentId: item.id,
+        folder: true,
+        content: Buffer.alloc(0),
+      });
+      return json(toGraph(created), 201);
+    }
+    if (tail === '/children') {
+      const value = [...items.values()].filter((i) => i.parentId === item.id).map(toGraph);
+      return json({ value });
+    }
+    if (tail === '/content' && call.method === 'PUT') {
+      if (!ifMatch(call, item)) return graphError(412, 'preconditionFailed');
+      item.content = call.bytes ?? Buffer.alloc(0);
+      item.version++;
+      item.modified = stamp();
+      return json(toGraph(item));
+    }
+    if (tail === '/content') return new Response(new Uint8Array(item.content), { status: 200 });
+    if (call.method === 'DELETE') {
+      if (!ifMatch(call, item)) return graphError(412, 'preconditionFailed');
+      api.remove(item.id);
+      return empty(204);
+    }
+    return json(toGraph(item));
+  };
+
+  const fake = fakeGraph(handle);
+  const api: MemoryOneDrive = {
+    rootId,
+    items,
+    calls: fake.calls,
+    remote: () => new OneDriveSyncRemote(makeClient(fake).client, 'ms'),
+    addFolder: (parentId, name, id = `od-${nextId++}`) =>
+      add({ id, name, parentId, folder: true, content: Buffer.alloc(0) }),
+    addFile: (parentId, name, content, id = `od-${nextId++}`) =>
+      add({ id, name, parentId, folder: false, content: Buffer.from(content) }),
+    edit: (id, content) => {
+      const item = items.get(id);
+      if (!item) throw new Error(`no item ${id}`);
+      item.content = Buffer.from(content);
+      item.version++;
+      item.modified = stamp();
+    },
+    remove: (id) => {
+      for (const gone of subtree(id)) {
+        items.delete(gone);
+        deletions.push(gone);
+      }
+    },
+    hide: (id) => {
+      for (const gone of subtree(id)) items.delete(gone);
+    },
+    expireCursors: () => {
+      generation++;
+    },
+    deltaReads: () => deltaReads,
+  };
+  return api;
+}
+```
+
+`src/sync/__tests__/sync-service.pairs.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.pairs.test.ts b/src/sync/__tests__/sync-service.pairs.test.ts
+index 3dd0cef..200b235 100644
+--- a/src/sync/__tests__/sync-service.pairs.test.ts
++++ b/src/sync/__tests__/sync-service.pairs.test.ts
+@@ -2,12 +2,13 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
+ import os from 'node:os';
+ import path from 'node:path';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+-import { ProviderNotSupportedError, ValidationError } from '../../errors.js';
++import { ValidationError } from '../../errors.js';
+ import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
+ import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
+ import { SyncService } from '../sync-service.js';
+ import { record, refuseTrash } from './fixtures.js';
+ import { memoryDrive, type MemoryDrive } from './memory-drive.js';
++import { memoryOneDrive, type MemoryOneDrive } from './memory-onedrive.js';
+ 
+ let tmp: string;
+ let local: string;
+@@ -42,7 +43,7 @@ async function createDocs(): Promise<void> {
+ }
+ 
+ describe('createPair', () => {
+-  it('rejects an unsupported account without touching the folder', async () => {
++  it('an account that cannot be opened fails without touching the folder', async () => {
+     const guarded = new SyncService({
+       runner: createRunner(mem.drive),
+       audit,
+@@ -50,13 +51,13 @@ describe('createPair', () => {
+       logger: silentLogger(),
+       store,
+       trash: refuseTrash,
+-      assertSupportedAccount: async (ref) => {
+-        throw new ProviderNotSupportedError(ref ?? 'default');
++      openOneDrive: async (ref) => {
++        throw new ValidationError(`cannot open ${ref ?? 'default'}`);
+       },
+     });
+     await expect(
+       guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT', account: 'ms' }),
+-    ).rejects.toThrow(ProviderNotSupportedError);
++    ).rejects.toThrow('cannot open ms');
+     expect(await readdir(local)).toEqual([]);
+   });
+ 
+@@ -347,3 +348,106 @@ describe('scan', () => {
+     expect(limited.truncated).toBe(true);
+   });
+ });
++
++describe('Microsoft pairs (OneDrive sync spec §4.1, §4.4)', () => {
++  let od: MemoryOneDrive;
++  let ms: SyncService;
++  beforeEach(() => {
++    od = memoryOneDrive();
++    ms = new SyncService({
++      runner: createRunner(mem.drive),
++      audit,
++      retry: noSleep,
++      logger: silentLogger(),
++      store,
++      trash: refuseTrash,
++      openOneDrive: async (ref) => (ref === 'ms' ? od.remote() : null),
++    });
++  });
++
++  it('routes by account: a OneDrive pair starts its deletion cursor, no native baseline', async () => {
++    const docs = od.addFolder(od.rootId, 'Docs');
++    const summary = await ms.createPair({
++      name: 'docs',
++      localDir: local,
++      remoteFolderId: docs.id,
++      account: 'ms',
++    });
++    expect(summary).toMatchObject({ account: 'ms', remoteFolderId: docs.id });
++    const { pair } = await store.load('docs');
++    expect(pair.nativeBaselineDone).toBe(true);
++    expect(pair.remoteCursor).toMatch(/\/me\/drive\/root\/delta\?token=/);
++    expect(pair.remoteDeletedIds).toEqual([]);
++    expect(od.calls.some((c) => c.path === '/me/drive/root/delta?token=latest')).toBe(true);
++    // A Google account on the same service still gets a Google pair.
++    const g = path.join(tmp, 'G');
++    await mkdir(g);
++    await ms.createPair({ name: 'gdocs', localDir: g, remoteFolderId: 'ROOT' });
++    expect((await store.load('gdocs')).pair).toMatchObject({
++      remoteCursor: null,
++      nativeBaselineDone: false,
++    });
++  });
++
++  it('stores the real id when the pair root is given as root', async () => {
++    await ms.createPair({ name: 'docs', localDir: local, remoteFolderId: 'root', account: 'ms' });
++    expect((await store.load('docs')).pair.remoteFolderId).toBe(od.rootId);
++  });
++
++  it('creates a named root folder on OneDrive; refuses a name OneDrive cannot take', async () => {
++    await ms.createPair({ name: 'docs', localDir: local, remoteFolderName: 'Sync', account: 'ms' });
++    const created = [...od.items.values()].find((i) => i.name === 'Sync');
++    expect((await store.load('docs')).pair.remoteFolderId).toBe(created?.id);
++    const other = path.join(tmp, 'Other');
++    await mkdir(other);
++    await expect(
++      ms.createPair({ name: 'other', localDir: other, remoteFolderName: 'a:b', account: 'ms' }),
++    ).rejects.toThrow('remoteFolderName cannot be created on OneDrive');
++    expect(await readdir(other)).toEqual([]);
++  });
++
++  it('rejects googleExport on a Microsoft account without touching the folder', async () => {
++    await expect(
++      ms.createPair({
++        name: 'docs',
++        localDir: local,
++        remoteFolderId: 'root',
++        account: 'ms',
++        googleExport: { document: 'pdf' },
++      }),
++    ).rejects.toThrow('googleExport is for Google accounts only');
++    expect(await readdir(local)).toEqual([]);
++  });
++
++  it('a failing feed start creates nothing (no marker, no pair file)', async () => {
++    const failing = new SyncService({
++      runner: createRunner(mem.drive),
++      audit,
++      retry: noSleep,
++      logger: silentLogger(),
++      store,
++      trash: refuseTrash,
++      openOneDrive: async () => {
++        const remote = od.remote();
++        const feed = remote.deletionFeed();
++        feed.start = async () => {
++          throw new ValidationError('delta is down');
++        };
++        remote.deletionFeed = () => feed;
++        return remote;
++      },
++    });
++    await expect(
++      failing.createPair({ name: 'docs', localDir: local, remoteFolderId: 'root', account: 'ms' }),
++    ).rejects.toThrow('delta is down');
++    expect(await readdir(local)).toEqual([]);
++    expect(await store.list()).toEqual([]);
++  });
++
++  it('an unknown OneDrive folder reads "not found on OneDrive"', async () => {
++    await expect(
++      ms.createPair({ name: 'docs', localDir: local, remoteFolderId: 'nope', account: 'ms' }),
++    ).rejects.toThrow('OneDrive folder nope not found on OneDrive');
++    expect(await readdir(local)).toEqual([]);
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/__tests__/app.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/sync-service.pairs.test.ts`
+
+Expected: FAIL. `npm run typecheck`: `'openOneDrive' does not exist in type 'SyncServiceDeps'`; under vitest the Microsoft pair tests fail (`memory-onedrive.ts` is new, the service ignores `openOneDrive`) and the app test still gets `ProviderNotSupportedError`.
+
+- [ ] **Step 3: Implement.**
+
+`src/app.ts` (modify):
+
+```diff
+diff --git a/src/app.ts b/src/app.ts
+index 2fc6127..29ca38b 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -12,7 +12,7 @@ import {
+ import { MicrosoftAuth } from './auth/microsoft-auth.js';
+ import { PendingLoginStore } from './auth/pending-login.js';
+ import { FileAuditLog } from './audit/audit-log.js';
+-import { AccountRegistry, isMicrosoft } from './config/account-registry.js';
++import { AccountRegistry, isMicrosoft, type AccountRecord } from './config/account-registry.js';
+ import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
+ import { loadMicrosoftClientId } from './config/microsoft-client.js';
+ import { resolvePaths, type Paths } from './config/paths.js';
+@@ -20,8 +20,9 @@ import { DocsService } from './content/docs-service.js';
+ import { SheetsService } from './content/sheets-service.js';
+ import { SlidesService } from './content/slides-service.js';
+ import { DriveClientFactory } from './drive/client-factory.js';
+-import { ProviderNotSupportedError } from './errors.js';
+ import { PairStore } from './sync/pair-store.js';
++import { OneDriveSyncRemote } from './sync/remote/onedrive-remote.js';
++import type { SyncRemote } from './sync/remote/sync-remote.js';
+ import { SyncService } from './sync/sync-service.js';
+ import { createLocalTrash } from './sync/trash.js';
+ import { FileRouter } from './files/file-router.js';
+@@ -97,18 +98,16 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
+   const runner = new DriveClientFactory(auth);
+   const audit = new FileAuditLog(paths.audit);
+   const googleFiles = new FileService({ runner, audit, downloadsDir: paths.downloadsDir });
++  const graphClient = (record: AccountRecord): GraphClient =>
++    new GraphClient({
++      alias: record.alias,
++      accessToken: (tokenOptions): Promise<string> => microsoft.accessToken(record, tokenOptions),
++    });
+   const files = new FileRouter({
+     registry,
+     google: googleFiles,
+     microsoft: new OneDriveFileService({
+-      clients: async (alias): Promise<GraphClient> => {
+-        const record = await registry.resolve(alias);
+-        return new GraphClient({
+-          alias: record.alias,
+-          accessToken: (tokenOptions): Promise<string> =>
+-            microsoft.accessToken(record, tokenOptions),
+-        });
+-      },
++      clients: async (alias): Promise<GraphClient> => graphClient(await registry.resolve(alias)),
+       audit,
+       downloadsDir: paths.downloadsDir,
+     }),
+@@ -121,9 +120,12 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
+     audit,
+     store: new PairStore({ dir: paths.syncDir }),
+     trash: createLocalTrash(),
+-    assertSupportedAccount: async (ref): Promise<void> => {
++    // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch
++    // keep refusing Microsoft accounts).
++    openOneDrive: async (ref): Promise<SyncRemote | null> => {
+       const account = await auth.resolveAccount(ref);
+-      if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
++      if (!isMicrosoft(account)) return null;
++      return new OneDriveSyncRemote(graphClient(account), account.alias);
+     },
+   });
+   const watch = new WatchService({
+```
+
+`src/sync/pair-admin.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-admin.ts b/src/sync/pair-admin.ts
+index 122d42b..9e901ef 100644
+--- a/src/sync/pair-admin.ts
++++ b/src/sync/pair-admin.ts
+@@ -17,6 +17,7 @@ import {
+   type PairStore,
+ } from './pair-store.js';
+ import { validateGoogleExport } from './remote/google-remote.js';
++import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
+ import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+ import { PAIR_NAME, type GoogleExportPrefs, type Pair, type PairFile } from './types.js';
+ 
+@@ -26,12 +27,13 @@ export interface SyncEnv {
+   log: Logger;
+   clock: () => Date;
+   store: PairStore;
+-  /** The remote of an existing pair (its account alias and export settings). */
+-  remoteFor: (pair: Pair) => SyncRemote;
+-  /** The remote for an account reference (alias, email or default) before a pair exists. */
++  /** The remote of an existing pair: OneDrive for a Microsoft account, else Google. */
++  remoteFor: (pair: Pair) => Promise<SyncRemote>;
++  /**
++   * The remote for an account reference (alias, email or default) before a pair exists.
++   * It fails before anything touches the user's folder when the account cannot be synced.
++   */
+   openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
+-  /** Throws when the account cannot be synced, before anything touches the user's folder. */
+-  assertSupportedAccount: (ref: string | undefined) => Promise<void>;
+   /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
+   digesters: DigesterFactory;
+ }
+@@ -122,13 +124,17 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+       localDir,
+       remoteFolderId: input.remoteFolderId ?? '',
+     });
+-    await env.assertSupportedAccount(input.account);
++    const remote = await env.openRemote(input.account, googleExport);
++    checkProviderSettings(remote, input);
++    // OneDrive (spec §4.1): the deletion cursor starts "from now on"; a failure creates nothing.
++    const feed = remote.deletionFeed();
++    const remoteCursor = feed ? await feed.start() : null;
+     const id = randomUUID();
+     await writeMarker(localDir, input.name, id);
+-    let remote: { folderId: string; alias: string };
++    let folderId: string;
+     try {
+-      remote = await resolveRemoteRoot(env, input, googleExport);
+-      checkOverlap(existing, { name: input.name, localDir, remoteFolderId: remote.folderId });
++      folderId = await resolveRemoteRoot(env, remote, input);
++      checkOverlap(existing, { name: input.name, localDir, remoteFolderId: folderId });
+     } catch (err) {
+       await removeMarker(localDir, input.name);
+       throw err;
+@@ -136,10 +142,10 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+     const pair: Pair = {
+       name: input.name,
+       id,
+-      account: remote.alias,
++      account: remote.account,
+       localDir,
+       caseInsensitive: await probeCaseInsensitive(localDir, input.name),
+-      remoteFolderId: remote.folderId,
++      remoteFolderId: folderId,
+       googleExport,
+       selection: [],
+       excluded: [],
+@@ -148,8 +154,9 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+       createdAt: env.clock().toISOString(),
+       lastAppliedRunAt: null,
+       firstAppliedRunAt: null,
+-      nativeBaselineDone: false,
+-      remoteCursor: null,
++      // Microsoft pairs have no Google-native files to baseline (spec §4.4).
++      nativeBaselineDone: remote.provider === 'microsoft',
++      remoteCursor,
+       remoteDeletedIds: [],
+     };
+     const file: PairFile = { version: 2, pair, records: [] };
+@@ -158,18 +165,47 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+   });
+ }
+ 
++/** Settings and names the pair's provider cannot take (spec §4.3, §4.4). */
++function checkProviderSettings(remote: SyncRemote, input: CreatePairInput): void {
++  if (remote.provider === 'microsoft' && input.googleExport !== undefined) {
++    throw new ValidationError(
++      'googleExport is for Google accounts only; OneDrive has no Google files to export',
++    );
++  }
++  if (input.remoteFolderName !== undefined) {
++    const problem = remoteNameProblem(remote.provider, input.remoteFolderName);
++    if (problem) {
++      throw new ValidationError(
++        `remoteFolderName cannot be created on ${providerLabel(remote.provider)}: ${problem}`,
++      );
++    }
++  }
++}
++
++/** The pair root's id: checked when given, created (and audited) from a name otherwise. */
+ async function resolveRemoteRoot(
+   env: SyncEnv,
++  remote: SyncRemote,
+   input: CreatePairInput,
+-  googleExport: GoogleExportPrefs,
+-): Promise<{ folderId: string; alias: string }> {
+-  const remote = await env.openRemote(input.account, googleExport);
++): Promise<string> {
++  const label = providerLabel(remote.provider);
+   const folderId = input.remoteFolderId;
+   if (folderId) {
+-    const root = await remote.read(folderId);
++    let root: RemoteItem;
++    try {
++      root = await remote.read(folderId);
++    } catch (err) {
++      if (err instanceof NotFoundError) {
++        throw new ValidationError(`${label} folder ${folderId} not found on ${label}`, {
++          cause: err,
++        });
++      }
++      throw err;
++    }
+     const problem = remoteRootProblem(root);
+-    if (problem) throw new ValidationError(`Drive folder ${folderId} ${problem}`);
+-    return { folderId, alias: remote.account };
++    if (problem) throw new ValidationError(`${label} folder ${folderId} ${problem}`);
++    // OneDrive: store the real id ('root' is an alias; children name the real one).
++    return remote.provider === 'microsoft' ? root.id : folderId;
+   }
+   const parentId = input.remoteParentId ?? remote.rootId;
+   const folder = await remote.createFolder(parentId, input.remoteFolderName ?? '');
+@@ -185,7 +221,7 @@ async function resolveRemoteRoot(
+   } catch (err) {
+     env.log.warn('Audit log write failed', { op: 'create_folder', fileId: folder.id, error: err });
+   }
+-  return { folderId: folder.id, alias: remote.account };
++  return folder.id;
+ }
+ 
+ export async function listPairs(env: SyncEnv): Promise<PairSummary[]> {
+@@ -257,17 +293,19 @@ export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
+   if ((await probeCaseInsensitive(pair.localDir, pair.name)) !== pair.caseInsensitive) {
+     throw new SyncRootError(`Case sensitivity of ${pair.localDir} changed; ${hint}`);
+   }
++  const remote = await env.remoteFor(pair);
++  const label = providerLabel(remote.provider);
+   let root: RemoteItem;
+   try {
+-    root = await env.remoteFor(pair).read(pair.remoteFolderId);
++    root = await remote.read(pair.remoteFolderId);
+   } catch (err) {
+     if (err instanceof NotFoundError) {
+-      throw new SyncRootError(`The Drive folder ${pair.remoteFolderId} no longer exists`, {
++      throw new SyncRootError(`The ${label} folder ${pair.remoteFolderId} no longer exists`, {
+         cause: err,
+       });
+     }
+     throw err;
+   }
+   const problem = remoteRootProblem(root);
+-  if (problem) throw new SyncRootError(`The Drive folder ${pair.remoteFolderId} ${problem}`);
++  if (problem) throw new SyncRootError(`The ${label} folder ${pair.remoteFolderId} ${problem}`);
+ }
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 17a2bd2..7d490fb 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -75,8 +75,8 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
+ }
+ 
+ /** Breadth-first scan of the pair's remote folder (no local work). */
+-export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
+-  return scanRemote(pair.remoteFolderId, env.remoteFor(pair));
++export async function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
++  return scanRemote(pair.remoteFolderId, await env.remoteFor(pair));
+ }
+ 
+ export async function scanBoth(
+@@ -102,7 +102,7 @@ export async function gatherInput(
+     pair.localDir,
+     onDiskProbeKeys({ pair, records, local, remote }),
+   );
+-  const syncRemote = env.remoteFor(pair);
++  const syncRemote = await env.remoteFor(pair);
+   const base = {
+     pair,
+     records,
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index 69f38f1..8fe390f 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -56,8 +56,11 @@ export interface SyncServiceDeps extends OperationDeps {
+   /** Moves local files to the OS trash (the app passes `createLocalTrash()`; tests pass a fake, never the real trash). */
+   trash: LocalTrash;
+   clock?: () => Date;
+-  /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
+-  assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
++  /**
++   * Opens the OneDrive remote of a Microsoft account, or null for any other account (the
++   * app wires it; without it every pair is a Google pair).
++   */
++  openOneDrive?: (accountRef: string | undefined) => Promise<SyncRemote | null>;
+   /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
+   digesters?: DigesterFactory;
+ }
+@@ -96,11 +99,11 @@ export class SyncService {
+       log: this.log,
+       clock: this.clock,
+       store: deps.store,
+-      remoteFor: (pair): SyncRemote =>
++      remoteFor: async (pair): Promise<SyncRemote> =>
++        (await deps.openOneDrive?.(pair.account)) ??
+         new GoogleSyncRemote(this.ops, pair.account, pair.googleExport),
+-      openRemote: (ref, prefs): Promise<SyncRemote> => GoogleSyncRemote.open(this.ops, ref, prefs),
+-      assertSupportedAccount:
+-        deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
++      openRemote: async (ref, prefs): Promise<SyncRemote> =>
++        (await deps.openOneDrive?.(ref)) ?? GoogleSyncRemote.open(this.ops, ref, prefs),
+       digesters: deps.digesters ?? defaultDigesters,
+     };
+   }
+@@ -208,7 +211,7 @@ export class SyncService {
+       await this.removeStaleParts(file.pair, local);
+       const executor = new Executor(
+         {
+-          remote: this.env.remoteFor(file.pair),
++          remote: await this.env.remoteFor(file.pair),
+           digesters: this.env.digesters,
+           audit: this.deps.audit,
+           logger: this.log,
+@@ -286,7 +289,7 @@ export class SyncService {
+       }
+       const done = await applyRelease(
+         {
+-          remote: this.env.remoteFor(file.pair),
++          remote: await this.env.remoteFor(file.pair),
+           digesters: this.env.digesters,
+           audit: this.deps.audit,
+           logger: this.log,
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/__tests__/app.test.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/sync-service.pairs.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/__tests__/app.test.ts src/app.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/pair-admin.ts src/sync/scan-select.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  132 passed (132); Tests  1463 passed | 6 skipped (1469)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/__tests__/app.test.ts src/app.ts src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/pair-admin.ts src/sync/scan-select.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): sync routes Microsoft accounts to OneDrive pairs
+
+SyncService picks the remote from the pair's account: openOneDrive (wired in
+app.ts) returns a OneDriveSyncRemote for a Microsoft account, else the Google
+remote is used; remoteFor becomes async. The sync-only Microsoft refusal is
+gone (content and watch keep theirs). sync_create_pair on OneDrive starts the
+deletion cursor (token=latest) before anything is written, so a failure creates
+nothing; it rejects googleExport and root names OneDrive refuses, stores the
+real id for 'root', and sets nativeBaselineDone. memory-onedrive.ts is an
+in-memory OneDrive behind a fake Graph fetch for engine tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 33: Deletion evidence: feed read, probe mapping, persistence and pruning
+
+**Spec:** §4.1 (every bullet), §9 (rule tests for §4.1). Commit `81f8800` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/memory-onedrive.ts`
+- Test: `src/sync/__tests__/remote-probe.test.ts`
+- Test (create): `src/sync/__tests__/sync-service.onedrive.test.ts`
+- Create: `src/sync/deletion-evidence.ts`
+- Modify: `src/sync/executor.ts`
+- Modify: `src/sync/remote-probe.ts`
+- Modify: `src/sync/scan-select.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/memory-onedrive.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/memory-onedrive.ts b/src/sync/__tests__/memory-onedrive.ts
+index 983145f..55ef7c7 100644
+--- a/src/sync/__tests__/memory-onedrive.ts
++++ b/src/sync/__tests__/memory-onedrive.ts
+@@ -32,8 +32,15 @@ export interface MemoryOneDrive {
+   addFolder(parentId: string, name: string, id?: string): MemoryItem;
+   addFile(parentId: string, name: string, content: string, id?: string): MemoryItem;
+   edit(id: string, content: string): void;
+-  /** Deletes the item (and its subtree): 404 from now on, reported by the delta feed. */
+-  remove(id: string): void;
++  /**
++   * Deletes the item and its subtree: 404 from now on, reported by the delta feed (only the
++   * item itself with `feedChildren: false`).
++   */
++  remove(id: string, options?: { feedChildren?: boolean }): void;
++  /** Puts a removed or hidden item back with the same id (recycle bin restore). */
++  restore(item: MemoryItem): void;
++  /** Moves an item to another parent (an update in the feed, never a deletion). */
++  move(id: string, parentId: string): void;
+   /** The item becomes unreachable (404) without a feed entry (e.g. a locked vault). */
+   hide(id: string): void;
+   /** The next delta read with an old cursor answers 410. */
+@@ -189,12 +196,21 @@ export function memoryOneDrive(): MemoryOneDrive {
+       item.version++;
+       item.modified = stamp();
+     },
+-    remove: (id) => {
++    remove: (id, options = {}) => {
+       for (const gone of subtree(id)) {
+         items.delete(gone);
+-        deletions.push(gone);
++        if (gone === id || options.feedChildren !== false) deletions.push(gone);
+       }
+     },
++    restore: (item) => {
++      items.set(item.id, item);
++    },
++    move: (id, parentId) => {
++      const item = items.get(id);
++      if (!item) throw new Error(`no item ${id}`);
++      item.parentId = parentId;
++      item.modified = stamp();
++    },
+     hide: (id) => {
+       for (const gone of subtree(id)) items.delete(gone);
+     },
+```
+
+`src/sync/__tests__/remote-probe.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-probe.test.ts b/src/sync/__tests__/remote-probe.test.ts
+index 27849e5..efb1b9e 100644
+--- a/src/sync/__tests__/remote-probe.test.ts
++++ b/src/sync/__tests__/remote-probe.test.ts
+@@ -43,6 +43,28 @@ function getter(files: Record<string, DriveFile | Error>): ItemGetter {
+ }
+ 
+ describe('probeRecord', () => {
++  it('a missing item is trashed only with deletion evidence (OneDrive sync spec §4.1)', async () => {
++    const get = getter({});
++    expect(await probeRecord('r', scan(), get)).toEqual({ state: 'unavailable' });
++    expect(await probeRecord('r', scan(), get, { evidenced: false })).toEqual({
++      state: 'unavailable',
++    });
++    expect(await probeRecord('r', scan(), get, { evidenced: true })).toEqual({ state: 'trashed' });
++  });
++
++  it('collects the ids it saw present, parents of the walk included', async () => {
++    const seen = new Set<string>();
++    const get = getter({
++      r: binary('r', 'a.pdf', 'elsewhere'),
++      elsewhere: { id: 'elsewhere', parents: ['my-drive'] },
++      'my-drive': { id: 'my-drive' },
++    });
++    expect(await probeRecord('r', scan(), get, { evidenced: true, seen })).toEqual({
++      state: 'moved-out',
++    });
++    expect([...seen]).toEqual(['r', 'elsewhere', 'my-drive']);
++  });
++
+   it('reports trashed files', async () => {
+     const get = getter({ r: binary('r', 'a.pdf', ROOT, { trashed: true }) });
+     expect(await probeRecord('r', scan(), get)).toEqual({ state: 'trashed' });
+```
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (create):
+
+```ts
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  createAudit,
+  createFakeDrive,
+  createRunner,
+  noSleep,
+  silentLogger,
+} from '../../files/__tests__/fakes.js';
+import { PairStore } from '../pair-store.js';
+import { SyncService } from '../sync-service.js';
+import type { LocalTrash } from '../trash.js';
+import type { PairFile } from '../types.js';
+import { dirTrash } from './fixtures.js';
+import { memoryOneDrive, type MemoryItem, type MemoryOneDrive } from './memory-onedrive.js';
+
+let tmp: string;
+let local: string;
+let trashDir: string;
+let od: MemoryOneDrive;
+let store: PairStore;
+let saves: PairFile[];
+let docs: MemoryItem;
+let trash: LocalTrash;
+
+function service(): SyncService {
+  return new SyncService({
+    runner: createRunner(createFakeDrive()),
+    audit: createAudit(),
+    retry: noSleep,
+    logger: silentLogger(),
+    store,
+    clock: () => new Date('2026-11-12T12:00:00.000Z'),
+    trash: { trash: (abs) => trash.trash(abs) },
+    openOneDrive: async (ref) => (ref === 'ms' ? od.remote() : null),
+  });
+}
+
+beforeEach(async () => {
+  tmp = await mkdtemp(path.join(os.tmpdir(), 'sync-od-'));
+  local = path.join(tmp, 'Local');
+  trashDir = path.join(tmp, 'Trash');
+  await mkdir(local);
+  await mkdir(trashDir);
+  trash = dirTrash(trashDir);
+  od = memoryOneDrive();
+  docs = od.addFolder(od.rootId, 'Docs', 'DOCS');
+  store = new PairStore({ dir: path.join(tmp, 'config', 'sync'), logger: silentLogger() });
+  saves = [];
+  const save = store.save.bind(store);
+  store.save = async (file) => {
+    saves.push(structuredClone(file));
+    await save(file);
+  };
+  await service().createPair({
+    name: 'docs',
+    localDir: local,
+    remoteFolderId: 'DOCS',
+    account: 'ms',
+  });
+});
+afterEach(async () => {
+  await rm(tmp, { recursive: true, force: true });
+});
+
+const at = (...parts: string[]): string => path.join(local, ...parts);
+
+async function apply(sync = service()) {
+  const dry = await sync.run({ name: 'docs' });
+  return sync.run({ name: 'docs', apply: true, planId: dry.planId });
+}
+
+/** a.txt on OneDrive and locally, tracked (first applied run downloads it). */
+async function tracked(parent = docs.id, key = 'a.txt'): Promise<MemoryItem> {
+  const item = od.addFile(parent, path.posix.basename(key), 'hello', 'A');
+  await service().select({ name: 'docs', add: [key] });
+  const report = await apply();
+  expect(report.actions['download-new']).toEqual([key]);
+  return item;
+}
+
+const pair = async () => (await store.load('docs')).pair;
+
+describe('OneDrive pairs: basic two-way sync', () => {
+  it('downloads with quickXor verification and uploads a new local file', async () => {
+    await tracked();
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+    await writeFile(at('b.txt'), 'new');
+    await service().select({ name: 'docs', add: ['b.txt'] });
+    const report = await apply();
+    expect(report.actions['upload-new']).toEqual(['b.txt']);
+    const uploaded = [...od.items.values()].find((i) => i.name === 'b.txt');
+    expect(uploaded?.content.toString()).toBe('new');
+    const { records } = await store.load('docs');
+    expect(records.find((r) => r.path === 'b.txt')?.remoteHash?.kind).toBe('quickXor');
+  });
+
+  it('a remote edit is downloaded; a local edit is uploaded with If-Match', async () => {
+    await tracked();
+    od.edit('A', 'remote edit');
+    expect((await apply()).actions['download-replace']).toEqual(['a.txt']);
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('remote edit');
+    await writeFile(at('a.txt'), 'local edit!');
+    expect((await apply()).actions['update-remote']).toEqual(['a.txt']);
+    expect(od.items.get('A')?.content.toString()).toBe('local edit!');
+    const put = od.calls.filter(
+      (c) => c.method === 'PUT' && c.path === '/me/drive/items/A/content',
+    );
+    expect(put.at(-1)?.headers['if-match']).toMatch(/^"\{A\},\d+"$/);
+  });
+});
+
+describe('OneDrive deletion evidence (spec §4.1)', () => {
+  it('404 with feed evidence: B10 moves the unchanged local copy to the trash', async () => {
+    await tracked();
+    od.remove('A');
+    const report = await apply();
+    expect(report.actions['trash-local']).toEqual(['a.txt']);
+    expect(await readdir(trashDir)).toEqual(['a.txt']);
+    expect((await store.load('docs')).records).toEqual([]);
+    expect((await pair()).remoteDeletedIds).toEqual([]);
+  });
+
+  it('404 without evidence: B14 reports only, nothing is trashed', async () => {
+    await tracked();
+    od.hide('A');
+    const report = await apply();
+    expect(report.actions).toEqual({});
+    expect(report.warnings).toContainEqual(
+      expect.objectContaining({ path: 'a.txt', code: 'remote-unavailable' }),
+    );
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+    expect(await readdir(trashDir)).toEqual([]);
+  });
+
+  it('a dry run moves the cursor and carries the evidence; its apply still sees it', async () => {
+    await tracked();
+    const before = await pair();
+    od.remove('A');
+    const sync = service();
+    const dry = await sync.run({ name: 'docs' });
+    expect(dry.actions['trash-local']).toEqual(['a.txt']);
+    const after = await pair();
+    expect(after.remoteCursor).not.toBe(before.remoteCursor);
+    expect(after.remoteDeletedIds).toEqual(['A']);
+    // The next read starts after the deletion; the stored evidence still plans B10.
+    const report = await sync.run({ name: 'docs', apply: true, planId: dry.planId });
+    expect(report.actions['trash-local']).toEqual(['a.txt']);
+  });
+
+  it('dry runs and early returns save cursor and evidence only, records untouched', async () => {
+    await tracked();
+    od.remove('A');
+    const records = (await store.load('docs')).records;
+    saves.length = 0;
+    await service().run({ name: 'docs' });
+    const changed = await service().run({ name: 'docs', apply: true, planId: 'stale' });
+    expect(changed.aborted?.reason).toBe('plan-changed');
+    expect(saves).toHaveLength(2);
+    for (const saved of saves) {
+      expect(saved.records).toEqual(records);
+      expect(saved.pair.remoteDeletedIds).toEqual(['A']);
+    }
+  });
+
+  it('cursor and evidence go in one save, also on an applied run with no actions', async () => {
+    await tracked();
+    const start = (await pair()).remoteCursor;
+    saves.length = 0;
+    const report = await service().run({ name: 'docs', apply: true });
+    expect(report.actions).toEqual({});
+    expect(saves).toHaveLength(1);
+    expect(saves[0]?.pair.remoteCursor).toBe(start); // nothing changed on OneDrive
+    // With actions: the executor's first save already carries the new cursor and evidence.
+    od.remove('A');
+    saves.length = 0;
+    const cursor = (await pair()).remoteCursor;
+    await service().run({ name: 'docs', apply: true });
+    expect(saves[0]?.pair.remoteCursor).not.toBe(cursor);
+  });
+
+  it('evidence survives an apply that skipped the record', async () => {
+    await tracked();
+    od.remove('A');
+    trash = {
+      trash: async () => {
+        throw new Error('trash is busy');
+      },
+    };
+    const failed = await apply();
+    expect(failed.failures).toEqual([expect.objectContaining({ path: 'a.txt' })]);
+    expect((await pair()).remoteDeletedIds).toEqual(['A']);
+    trash = dirTrash(trashDir);
+    expect((await apply()).actions['trash-local']).toEqual(['a.txt']);
+  });
+
+  it('an expired cursor warns and does not apply new deletions; it restarts', async () => {
+    await tracked();
+    od.remove('A');
+    od.expireCursors();
+    const report = await service().run({ name: 'docs', apply: true });
+    expect(report.warnings).toContainEqual({
+      path: '',
+      code: 'deletion-history-unavailable',
+      message:
+        'OneDrive change history unavailable; deletions since the last run are reported, not applied',
+    });
+    expect(report.actions).toEqual({});
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+    const after = await pair();
+    expect(after.remoteCursor).toMatch(/token=g1-/);
+    // The next run reads the restarted cursor without a warning.
+    const next = await service().run({ name: 'docs' });
+    expect(next.warnings.map((w) => w.code)).not.toContain('deletion-history-unavailable');
+  });
+
+  it('an expired cursor still plans with the stored evidence', async () => {
+    await tracked();
+    od.remove('A');
+    await service().run({ name: 'docs' }); // stores A as evidence
+    od.expireCursors();
+    const report = await apply();
+    expect(report.actions['trash-local']).toEqual(['a.txt']);
+  });
+
+  it('moved out of the pair stays moved-out (feed update, not a deletion)', async () => {
+    await tracked();
+    od.move('A', od.rootId);
+    const report = await apply();
+    expect(report.actions.untrack).toEqual(['a.txt']);
+    expect(await readFile(at('a.txt'), 'utf8')).toBe('hello');
+  });
+
+  it('an id seen present again is pruned; old evidence does not act later', async () => {
+    const item = await tracked();
+    od.remove('A');
+    await service().run({ name: 'docs' });
+    expect((await pair()).remoteDeletedIds).toEqual(['A']);
+    od.restore(item);
+    await service().run({ name: 'docs' });
+    expect((await pair()).remoteDeletedIds).toEqual([]);
+    od.hide('A');
+    const report = await apply();
+    expect(report.actions).toEqual({});
+    expect(report.warnings).toContainEqual(
+      expect.objectContaining({ path: 'a.txt', code: 'remote-unavailable' }),
+    );
+  });
+
+  it('a child of an evidenced folder is evidenced (remoteParentId)', async () => {
+    const sub = od.addFolder(docs.id, 'sub', 'SUB');
+    await tracked(sub.id, 'sub/a.txt');
+    od.remove('SUB', { feedChildren: false });
+    const report = await apply();
+    expect(report.actions['trash-local']).toEqual(['sub/a.txt']);
+    expect((await pair()).remoteDeletedIds).toEqual([]);
+  });
+
+  it('sync_release reads the feed but does not persist it', async () => {
+    await tracked();
+    const before = await pair();
+    od.remove('A');
+    saves.length = 0;
+    const result = await service().release({ name: 'docs', paths: ['a.txt'] });
+    expect(result.skipped).toEqual([expect.objectContaining({ path: 'a.txt' })]);
+    expect(saves).toEqual([]);
+    expect((await pair()).remoteCursor).toBe(before.remoteCursor);
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: FAIL. sync-service.onedrive.test.ts: `404 with feed evidence` gets a `remote-unavailable` warning instead of `trash-local`; `a dry run moves the cursor` expects `remoteDeletedIds ['A']`, got `[]`; `an expired cursor warns` misses `deletion-history-unavailable`; remote-probe.test.ts: `expected { state: 'unavailable' } to deeply equal { state: 'trashed' }`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/deletion-evidence.ts` (create):
+
+```ts
+import type { Logger } from '../logger.js';
+import { isAbortError } from './errors.js';
+import type { SyncRemote } from './remote/sync-remote.js';
+import type { Pair, PairFile, SyncRecord } from './types.js';
+
+/*
+ * OneDrive deletion evidence (OneDrive sync spec §4.1). A 404 alone never means "deleted":
+ * only ids the drive-wide delta feed reported with the `deleted` facet count, and only
+ * while no scan or probe sees the item present again.
+ */
+
+export const HISTORY_UNAVAILABLE =
+  'OneDrive change history unavailable; deletions since the last run are reported, not applied';
+
+export interface FeedRead {
+  /** The cursor to store with the evidence (null: the feed could not be restarted). */
+  cursor: string | null;
+  /** Stored evidence plus the feed's deleted ids; callers remove the ids seen present. */
+  evidence: Set<string>;
+  /** The stored cursor was null or expired: only the stored evidence is used. */
+  unavailable: boolean;
+}
+
+/**
+ * Reads the feed from the pair's cursor (never writes). Null on remotes without a feed
+ * (Google). A null or expired cursor restarts the feed "from now on"; if that fails too,
+ * the cursor stays null and the next run warns again. Other read errors throw.
+ */
+export async function readDeletionFeed(
+  remote: SyncRemote,
+  pair: Pair,
+  log: Logger,
+): Promise<FeedRead | null> {
+  const feed = remote.deletionFeed();
+  if (!feed) return null;
+  const evidence = new Set(pair.remoteDeletedIds);
+  if (pair.remoteCursor !== null) {
+    const read = await feed.read(pair.remoteCursor);
+    if (!('expired' in read)) {
+      for (const id of read.deletedIds) evidence.add(id);
+      return { cursor: read.cursor, evidence, unavailable: false };
+    }
+  }
+  let cursor: string | null = null;
+  try {
+    cursor = await feed.start();
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    log.warn('Could not restart the OneDrive change history', { pair: pair.name, error: err });
+  }
+  return { cursor, evidence, unavailable: true };
+}
+
+/** Evidence that matters: ids of records and of their parents (folders have no records). */
+export function keptEvidence(ids: Iterable<string>, records: readonly SyncRecord[]): string[] {
+  const wanted = new Set(records.flatMap((r) => [r.remoteId, r.remoteParentId]));
+  return [...new Set(ids)].filter((id) => wanted.has(id)).sort();
+}
+
+/** Drops evidence no record refers to any more (after records were dropped). */
+export function pruneEvidence(file: PairFile): void {
+  if (file.pair.remoteDeletedIds.length === 0) return;
+  file.pair.remoteDeletedIds = keptEvidence(file.pair.remoteDeletedIds, file.records);
+}
+
+/** Cursor and evidence of this run on the pair, always together (records untouched). */
+export function storeFeed(file: PairFile, feed: FeedRead): void {
+  file.pair.remoteCursor = feed.cursor;
+  file.pair.remoteDeletedIds = keptEvidence(feed.evidence, file.records);
+}
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index 1d61b96..1f0a8a3 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -25,6 +25,7 @@ import {
+   type LocalFields,
+   type RemoteFields,
+ } from './exec-records.js';
++import { pruneEvidence } from './deletion-evidence.js';
+ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-export.js';
+ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, parentKey, prepareParent } from './paths.js';
+@@ -176,6 +177,8 @@ export class Executor {
+ 
+   /** Atomic pair-file save; a failure aborts the run (see PersistenceError). */
+   private async persist(): Promise<void> {
++    // Spec §4.1: a dropped record takes its deletion evidence with it.
++    pruneEvidence(this.file);
+     try {
+       await this.deps.save(this.file);
+     } catch (err) {
+```
+
+`src/sync/remote-probe.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-probe.ts b/src/sync/remote-probe.ts
+index 071ea23..4cb22ce 100644
+--- a/src/sync/remote-probe.ts
++++ b/src/sync/remote-probe.ts
+@@ -20,11 +20,22 @@ function failure(err: unknown): Probe {
+   return unknown(err instanceof AppError ? err.message : 'probe failed');
+ }
+ 
+-/** Classifies one record missing from the scan (spec §6.2). */
++export interface ProbeOptions {
++  /** OneDrive (spec §4.1): the feed reported this record (or its parent) deleted. */
++  evidenced?: boolean;
++  /** Collects the ids `get` found present (they leave the deletion evidence). */
++  seen?: Set<string>;
++}
++
++/**
++ * Classifies one record missing from the scan (spec §6.2). A missing item is `trashed`
++ * only with deletion evidence (OneDrive); without it, `unavailable` (B14, report only).
++ */
+ export async function probeRecord(
+   remoteId: string,
+   scan: RemoteScan,
+   remote: ItemGetter,
++  options: ProbeOptions = {},
+ ): Promise<Probe> {
+   let file: RemoteItem | null;
+   try {
+@@ -32,7 +43,8 @@ export async function probeRecord(
+   } catch (err) {
+     return failure(err);
+   }
+-  if (file === null) return { state: 'unavailable' };
++  if (file === null) return { state: options.evidenced ? 'trashed' : 'unavailable' };
++  options.seen?.add(file.id);
+   if (file.trashed) return { state: 'trashed' };
+   const parent = file.parentId;
+   if (!parent) return { state: 'moved-out' };
+@@ -66,6 +78,7 @@ export async function probeRecord(
+       return failure(err);
+     }
+     if (folder === null) return unknown('a parent folder cannot be read');
++    options.seen?.add(folder.id);
+     const up = folder.parentId;
+     if (!up) return { state: 'moved-out' };
+     if (scan.folders.has(up) || scan.unknownFolderIds.includes(up)) {
+@@ -81,8 +94,18 @@ export async function probeRecords(
+   remoteIds: readonly string[],
+   scan: RemoteScan,
+   remote: ItemGetter,
++  options: { evidenced?: (id: string) => boolean; seen?: Set<string> } = {},
+ ): Promise<Map<string, Probe>> {
+   const probes = new Map<string, Probe>();
+-  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, remote));
++  for (const id of remoteIds) {
++    const evidenced = options.evidenced?.(id) ?? false;
++    probes.set(
++      id,
++      await probeRecord(id, scan, remote, {
++        evidenced,
++        ...(options.seen ? { seen: options.seen } : {}),
++      }),
++    );
++  }
+   return probes;
+ }
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 7d490fb..35fe315 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -12,6 +12,7 @@ import {
+   toKey,
+   validateRelPath,
+ } from './paths.js';
++import { pruneEvidence, readDeletionFeed, type FeedRead } from './deletion-evidence.js';
+ import { probeRecords } from './remote-probe.js';
+ import { scanRemote } from './remote-scanner.js';
+ import { hashTargets, onDiskProbeKeys, type PlanInput } from './resolve.js';
+@@ -93,8 +94,10 @@ export async function gatherInput(
+   env: SyncEnv,
+   file: PairFile,
+   releaseNames: PlanInput['releaseNames'] = null,
+-): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan }> {
++): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan; feed: FeedRead | null }> {
+   const { pair, records } = file;
++  // The feed is read before the scan: a deletion after this point is never missed.
++  const feed = await readDeletionFeed(await env.remoteFor(pair), pair, env.log);
+   const { local, remote } = await scanBoth(env, pair);
+   // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
+   // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
+@@ -122,8 +125,18 @@ export async function gatherInput(
+   for (const name of failed) local.unknownSubtrees.push(toKey(name));
+   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
+   const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
+-  const probes = await probeRecords(missing, remote, syncRemote);
+-  return { input: { ...base, probes, digests }, local, remote };
++  // Spec §4.1: E = (stored ∪ feed) − ids seen present; a record's parent in E counts too.
++  const present = new Set([...seen, ...remote.folders.keys(), ...remote.unknownFolderIds]);
++  const evidence = feed?.evidence ?? new Set<string>();
++  for (const id of present) evidence.delete(id);
++  const parentOf = new Map(records.map((r) => [r.remoteId, r.remoteParentId]));
++  const probed = new Set<string>();
++  const probes = await probeRecords(missing, remote, syncRemote, {
++    evidenced: (id) => evidence.has(id) || evidence.has(parentOf.get(id) ?? ''),
++    seen: probed,
++  });
++  for (const id of probed) evidence.delete(id);
++  return { input: { ...base, probes, digests }, local, remote, feed };
+ }
+ 
+ /** sync_scan: local files (with text previews) and remote candidates for Claude to choose from. */
+@@ -254,6 +267,7 @@ export async function selectPaths(env: SyncEnv, input: SelectInput): Promise<Sel
+         }
+       }
+     }
++    pruneEvidence(file);
+     await env.store.save(file);
+     return {
+       ...result,
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index 8fe390f..af43d4f 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -2,6 +2,12 @@ import { rm } from 'node:fs/promises';
+ import { OperationRunner, type OperationDeps } from '../core/operation.js';
+ import { ValidationError } from '../errors.js';
+ import { logger as defaultLogger, type Logger } from '../logger.js';
++import {
++  HISTORY_UNAVAILABLE,
++  pruneEvidence,
++  storeFeed,
++  type FeedRead,
++} from './deletion-evidence.js';
+ import { Executor } from './executor.js';
+ import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
+ import {
+@@ -145,9 +151,9 @@ export class SyncService {
+   /** Spec §5 steps 3–5: scan, hash, probe, plan. */
+   private async buildPlan(
+     file: PairFile,
+-  ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan }> {
+-    const { input, local, remote } = await gatherInput(this.env, file);
+-    return { plan: makePlan(input), remote, local };
++  ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan; feed: FeedRead | null }> {
++    const { input, local, remote, feed } = await gatherInput(this.env, file);
++    return { plan: makePlan(input), remote, local, feed };
+   }
+ 
+   private async removeStaleParts(pair: Pair, local: LocalScan): Promise<void> {
+@@ -170,8 +176,14 @@ export class SyncService {
+       const startedAt = this.clock().toISOString();
+       const file = await this.store.load(input.name);
+       await checkRoots(this.env, file.pair);
+-      const { plan, remote, local } = await this.buildPlan(file);
++      const { plan, remote, local, feed } = await this.buildPlan(file);
+       const name = file.pair.name;
++      // Spec §4.1: the run persists the feed (dry run or apply), cursor and evidence together.
++      // An apply's first executor save carries them; the other paths save them alone.
++      if (feed) storeFeed(file, feed);
++      const saveFeedOnly = async (): Promise<void> => {
++        if (feed) await this.store.save(file);
++      };
+       const confirm = input.confirmRemoteTrash ?? false;
+       const awaiting = confirm ? [] : plan.actions.filter((a) => a.reason === 'local-deleted');
+       const pendingConfirmation = awaiting.map((a) => ({
+@@ -184,10 +196,21 @@ export class SyncService {
+         if (awaiting.length > 0 && plan.brake.tripped && !plan.brakeUnconfirmed.tripped) {
+           r.warnings.push(CONFIRM_NEEDS_MASS_DELETE);
+         }
++        if (feed?.unavailable) {
++          r.warnings.push({
++            path: '',
++            code: 'deletion-history-unavailable',
++            message: HISTORY_UNAVAILABLE,
++          });
++        }
+         return r;
+       };
+-      if (!apply) return report({ dryRun: true });
++      if (!apply) {
++        await saveFeedOnly();
++        return report({ dryRun: true });
++      }
+       if (input.planId !== undefined && input.planId !== plan.planId) {
++        await saveFeedOnly();
+         return report({
+           dryRun: true,
+           aborted: {
+@@ -200,6 +223,7 @@ export class SyncService {
+       const brake = confirm ? plan.brake : plan.brakeUnconfirmed;
+       if (brake.tripped && !input.allowMassDelete) {
+         const { trashRemote, trashLocal, tracked } = brake;
++        await saveFeedOnly();
+         return report({
+           dryRun: true,
+           aborted: {
+@@ -243,6 +267,7 @@ export class SyncService {
+         ].sort();
+         file.pair.nativeBaselineDone = true;
+       }
++      pruneEvidence(file);
+       await this.store.save(file);
+       const done = new Set(outcomes.filter((o) => o.status === 'done').map((o) => o.path));
+       const inSync = new Set(plan.inSync);
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/deletion-evidence.ts src/sync/executor.ts src/sync/remote-probe.ts src/sync/scan-select.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  133 passed (133); Tests  1479 passed | 6 skipped (1485)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/memory-onedrive.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/sync-service.onedrive.test.ts src/sync/deletion-evidence.ts src/sync/executor.ts src/sync/remote-probe.ts src/sync/scan-select.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): OneDrive deletion evidence from the delta feed
+
+Every run reads the root delta feed from the pair's cursor before scanning.
+Evidence E = (stored ids ∪ feed deleted ids) − ids seen present in the scan or
+a probe; a missing record is trashed (B10/B12) only when it or its parent is in
+E, otherwise unavailable (B14). sync_run persists cursor and evidence together:
+the executor's first save carries them, dry runs and early returns save them
+alone; saves that drop records prune their evidence. A null or expired cursor
+warns deletion-history-unavailable, plans with the stored evidence only and
+restarts the feed. sync_release reads but never persists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 34: Executor outcome mapping; re-reads that find nothing
+
+**Spec:** §5 (error table rows 409/423/401/507, executor outcome mapping, null from `get` at the call sites, 409 on `createFolder`). Spec deviation: `ReauthRequiredError` already stopped Google runs (`isAbortError`), so only `OneDriveFullError` is added; the CHANGELOG says so. Commit `d50ef8f` on the reference branch.
+
+**Files:**
+- Test (create): `src/sync/__tests__/executor.onedrive.test.ts`
+- Test: `src/sync/__tests__/remote-folders.test.ts`
+- Modify: `docs/CHANGELOG.md`
+- Modify: `src/sync/errors.ts`
+- Modify: `src/sync/executor.ts`
+- Modify: `src/sync/release.ts`
+- Modify: `src/sync/remote-folders.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.onedrive.test.ts` (create):
+
+```ts
+import { mkdtemp, rm, writeFile, lstat } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  FileLockedError,
+  NameConflictError,
+  OneDriveFullError,
+  ReauthRequiredError,
+} from '../../errors.js';
+import { createAudit, silentLogger } from '../../files/__tests__/fakes.js';
+import { Executor } from '../executor.js';
+import { foldKey } from '../paths.js';
+import { quickXor } from '../remote/quickxor.js';
+import type { SyncRemote } from '../remote/sync-remote.js';
+import type { Action, LocalEntry, PairFile } from '../types.js';
+import { dirTrash, makePairFile, record, remoteEntry } from './fixtures.js';
+import { memoryOneDrive, type MemoryOneDrive } from './memory-onedrive.js';
+
+let dir: string;
+let od: MemoryOneDrive;
+
+beforeEach(async () => {
+  dir = await mkdtemp(path.join(os.tmpdir(), 'exec-od-'));
+  od = memoryOneDrive();
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+function executor(
+  file: PairFile,
+  remote: SyncRemote = od.remote(),
+  evidence?: ReadonlySet<string>,
+): Executor {
+  return new Executor(
+    {
+      remote,
+      audit: createAudit(),
+      logger: silentLogger(),
+      clock: () => new Date('2026-11-12T10:00:00Z'),
+      save: async () => undefined,
+      trash: dirTrash(dir),
+      ...(evidence ? { evidence } : {}),
+    },
+    file,
+    new Map([[od.rootId, '']]),
+  );
+}
+
+async function put(name: string, content: string): Promise<LocalEntry> {
+  const abs = path.join(dir, name);
+  await writeFile(abs, content);
+  const s = await lstat(abs);
+  return {
+    key: name,
+    foldKey: foldKey(name),
+    name,
+    size: s.size,
+    mtimeMs: s.mtimeMs,
+    ctimeMs: s.ctimeMs,
+    ino: s.ino,
+  };
+}
+
+const upload = (l: LocalEntry): Action => ({
+  kind: 'upload-new',
+  rule: 'U1',
+  key: l.key,
+  record: null,
+  local: l,
+  localMd5: 'md5',
+  localDigests: { md5: 'md5', remote: { kind: 'quickXor', value: 'qx' } },
+  remote: null,
+  selection: {},
+});
+
+/** The OneDrive remote with `uploadNew` failing with `err`. */
+function failingUploads(err: Error): SyncRemote {
+  const remote = od.remote();
+  remote.uploadNew = async () => {
+    throw err;
+  };
+  return remote;
+}
+
+describe('Executor outcome mapping (OneDrive sync spec §5)', () => {
+  it('NameConflictError and FileLockedError skip with the provider message', async () => {
+    const a = await put('a.txt', 'a');
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId });
+    const conflict = await executor(file, failingUploads(new NameConflictError('a.txt'))).run([
+      upload(a),
+    ]);
+    expect(conflict).toEqual([
+      {
+        kind: 'upload-new',
+        path: 'a.txt',
+        status: 'skipped',
+        message: 'a file with this name appeared on OneDrive',
+      },
+    ]);
+    const locked = await executor(file, failingUploads(new FileLockedError('a.txt'))).run([
+      upload(a),
+    ]);
+    expect(locked[0]).toMatchObject({
+      status: 'skipped',
+      message: 'open in an Office app on OneDrive; try again later',
+    });
+  });
+
+  it('a 409 on upload adopts our own earlier upload when it matches (findDuplicateUpload)', async () => {
+    const a = await put('a.txt', 'same');
+    const existing = od.addFile(od.rootId, 'a.txt', 'same');
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId });
+    const action = {
+      ...upload(a),
+      localDigests: {
+        md5: 'md5',
+        remote: { kind: 'quickXor' as const, value: quickXor(Buffer.from('same')) },
+      },
+    };
+    // The memory drive stamps createdTime 2026-11-01; the duplicate window is 10 minutes.
+    const remote = od.remote();
+    const find = remote.findChildren.bind(remote);
+    remote.findChildren = async (...args) =>
+      (await find(...args)).map((i) => ({ ...i, createdTime: '2026-11-12T09:59:00Z' }));
+    const out = await executor(file, remote).run([action]);
+    expect(out[0]).toMatchObject({ status: 'done' });
+    expect(file.records[0]?.remoteId).toBe(existing.id);
+  });
+
+  it.each([
+    ['ReauthRequiredError', new ReauthRequiredError('ms')],
+    ['OneDriveFullError', new OneDriveFullError('ms')],
+  ])('%s fails the action and stops the run', async (_name, err) => {
+    const a = await put('a.txt', 'a');
+    const b = await put('b.txt', 'b');
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId });
+    const out = await executor(file, failingUploads(err)).run([upload(a), upload(b)]);
+    expect(out.map((o) => o.status)).toEqual(['failed', 'not-run']);
+  });
+});
+
+describe('Executor re-reads that find nothing (OneDrive sync spec §5)', () => {
+  it('update-remote of an item gone from OneDrive is skipped', async () => {
+    const a = await put('a.txt', 'local');
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
+      record('gone', 'a.txt'),
+    ]);
+    const out = await executor(file).run([
+      {
+        kind: 'update-remote',
+        rule: 'B2',
+        key: 'a.txt',
+        record: record('gone', 'a.txt'),
+        local: a,
+        localMd5: 'md5',
+        remote: remoteEntry('gone', 'a.txt'),
+        selection: {},
+      },
+    ]);
+    expect(out[0]).toMatchObject({
+      status: 'skipped',
+      message: 'a.txt is gone from OneDrive since planning',
+    });
+  });
+
+  const trashRemote = (id: string, parentId = od.rootId): Action => ({
+    kind: 'trash-remote',
+    rule: 'B5',
+    key: 'a.txt',
+    record: record(id, 'a.txt', { remoteParentId: parentId }),
+    local: null,
+    localMd5: null,
+    remote: remoteEntry(id, 'a.txt', { parentId }),
+    selection: { remove: ['a.txt'] },
+  });
+
+  it('trash-remote of an item already gone: evidence drops the record', async () => {
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
+      record('gone', 'a.txt'),
+    ]);
+    const out = await executor(file, od.remote(), new Set(['gone'])).run([trashRemote('gone')]);
+    expect(out[0]?.status).toBe('done');
+    expect(file.records).toEqual([]);
+  });
+
+  it('trash-remote of an item gone without evidence is skipped, the record kept', async () => {
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
+      record('gone', 'a.txt'),
+    ]);
+    const out = await executor(file).run([trashRemote('gone')]);
+    expect(out[0]).toMatchObject({
+      status: 'skipped',
+      message: 'a.txt is gone from OneDrive since planning',
+    });
+    expect(file.records).toHaveLength(1);
+  });
+
+  it('trash-remote deletes with If-Match; a stale eTag skips', async () => {
+    const item = od.addFile(od.rootId, 'a.txt', 'x', 'R1');
+    const planned = remoteEntry('R1', 'a.txt', {
+      parentId: od.rootId,
+      hash: { kind: 'quickXor', value: quickXor(Buffer.from('x')) },
+      modifiedTime: item.modified,
+      size: 1,
+    });
+    const action = { ...trashRemote('R1'), remote: planned };
+    const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
+      record('R1', 'a.txt'),
+    ]);
+    // A remote whose re-read returns the old eTag: the DELETE gets 412.
+    const remote = od.remote();
+    const get = remote.get.bind(remote);
+    remote.get = async (id) => {
+      const current = await get(id);
+      od.edit('R1', 'x'); // same content, new version on the server
+      return current;
+    };
+    const out = await executor(file, remote).run([action]);
+    expect(out[0]).toMatchObject({
+      status: 'skipped',
+      message: 'a.txt changed on OneDrive since the scan',
+    });
+    expect(od.items.has('R1')).toBe(true);
+    const ok = await executor(file).run([
+      { ...action, remote: { ...planned, modifiedTime: od.items.get('R1')?.modified ?? '' } },
+    ]);
+    expect(ok[0]?.status).toBe('done');
+    expect(od.items.has('R1')).toBe(false);
+  });
+});
+```
+
+`src/sync/__tests__/remote-folders.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-folders.test.ts b/src/sync/__tests__/remote-folders.test.ts
+index fdb1d94..251210b 100644
+--- a/src/sync/__tests__/remote-folders.test.ts
++++ b/src/sync/__tests__/remote-folders.test.ts
+@@ -5,6 +5,7 @@ import { RemoteFolders } from '../remote-folders.js';
+ import { googleRemoteOver } from './fake-remote.js';
+ import { ROOT_ID, makePair } from './fixtures.js';
+ import { memoryDrive } from './memory-drive.js';
++import { memoryOneDrive } from './memory-onedrive.js';
+ 
+ function folders(caseInsensitive: boolean) {
+   const mem = memoryDrive(ROOT_ID);
+@@ -47,3 +48,21 @@ describe('RemoteFolders through SyncRemote', () => {
+     await expect(made.folderFor('docs')).rejects.toThrow('Several Drive folders named "docs"');
+   });
+ });
++
++describe('RemoteFolders on OneDrive', () => {
++  it('a 409 on createFolder reuses the one folder that appeared meanwhile', async () => {
++    const od = memoryOneDrive();
++    const remote = od.remote();
++    const create = remote.createFolder.bind(remote);
++    remote.createFolder = async (parentId, name) => {
++      od.addFolder(parentId, name, 'RACE'); // another client created it first
++      return create(parentId, name);
++    };
++    const made = new RemoteFolders(
++      { remote, audit: createAudit(), logger: silentLogger() },
++      makePair({ caseInsensitive: true, remoteFolderId: od.rootId }),
++      new Map([[od.rootId, '']]),
++    );
++    expect(await made.folderFor('docs')).toBe('RACE');
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/executor.onedrive.test.ts src/sync/__tests__/remote-folders.test.ts`
+
+Expected: FAIL. executor.onedrive.test.ts: NameConflict/FileLocked outcomes are `failed` (expected `skipped`); OneDriveFullError: `expected [ 'failed', 'failed' ] to deeply equal [ 'failed', 'not-run' ]`; gone items fail with `File not found: gone`; remote-folders.test.ts: `NameConflictError` on the 409.
+
+- [ ] **Step 3: Implement.**
+
+`docs/CHANGELOG.md` (modify):
+
+```diff
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 5c6fc2b..9204a80 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -18,6 +18,7 @@
+ - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
+ 
+ ### Changed
++- Sync (both providers): an action whose remote item is gone since planning is now `skipped` ("gone from Drive since planning") instead of `failed`; a name taken meanwhile (`NAME_CONFLICT`) and a file locked by Office (`FILE_LOCKED`) are skipped too. A full OneDrive (`ONEDRIVE_FULL`) stops the run like an expired session (`REAUTH_REQUIRED`, which already stopped Google runs) and Drive's full storage.
+ - Sync pair files move to version 2 (content hashes with their kind; OneDrive deletion cursor and evidence). A version-1 file is read and upgraded on the first save; after that, older marvin-drive versions refuse it ("this pair was saved by a newer marvin-drive; update it"). To roll back, keep the new version or re-create the pairs.
+ - Tool descriptions are provider-neutral and mark Google-only parameters. Accounts are shown with their provider in `auth list`.
+ - The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).
+```
+
+`src/sync/errors.ts` (modify):
+
+```diff
+diff --git a/src/sync/errors.ts b/src/sync/errors.ts
+index f929492..e34ae0e 100644
+--- a/src/sync/errors.ts
++++ b/src/sync/errors.ts
+@@ -2,6 +2,7 @@ import type { HashKind } from './remote/sync-remote.js';
+ import {
+   ApiDisabledError,
+   AppError,
++  OneDriveFullError,
+   QuotaExceededError,
+   RateLimitError,
+   ReauthRequiredError,
+@@ -61,13 +62,17 @@ export class PersistenceError extends AppError {
+   readonly code = 'SYNC_PERSISTENCE';
+ }
+ 
+-/** Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). */
++/**
++ * Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). Both
++ * providers raise ReauthRequiredError; OneDriveFullError is OneDrive's full storage (§5).
++ */
+ export function isAbortError(err: unknown): boolean {
+   return (
+     err instanceof ReauthRequiredError ||
+     err instanceof QuotaExceededError ||
+     err instanceof ApiDisabledError ||
+     err instanceof RateLimitError ||
++    err instanceof OneDriveFullError ||
+     err instanceof PersistenceError
+   );
+ }
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index 1f0a8a3..a528733 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -1,7 +1,13 @@
+ import { lstat } from 'node:fs/promises';
+ import path from 'node:path';
+ import type { AuditOp, AuditSink } from '../audit/audit-log.js';
+-import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
++import {
++  AppError,
++  ExportTooLargeError,
++  FileLockedError,
++  NameConflictError,
++  hasErrorCode,
++} from '../errors.js';
+ import type { Logger } from '../logger.js';
+ import { remoteUnchangedSince, sameContent } from './content-compare.js';
+ import {
+@@ -30,6 +36,7 @@ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-ex
+ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, parentKey, prepareParent } from './paths.js';
+ import { RemoteFolders } from './remote-folders.js';
++import { providerLabel } from './remote/remote-names.js';
+ import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+ import { downloadReplace, moveLocal, placeExclusive, type DownloadCheck } from './transfer.js';
+ import type { LocalTrash } from './trash.js';
+@@ -70,6 +77,16 @@ export interface ExecutorDeps {
+   trash: LocalTrash;
+   /** Local digests of the remote's hash kind (default: built-in digesters). */
+   digesters?: DigesterFactory;
++  /** OneDrive deletion evidence of this run (spec §4.1); empty on Google. */
++  evidence?: ReadonlySet<string>;
++}
++
++/** Outcomes that skip an action with a message instead of failing it (OneDrive sync spec §5). */
++function skipMessage(err: unknown, label: string): string | null {
++  if (err instanceof TargetChangedError) return err.message;
++  if (err instanceof NameConflictError) return `a file with this name appeared on ${label}`;
++  if (err instanceof FileLockedError) return `open in an Office app on ${label}; try again later`;
++  return null;
+ }
+ 
+ /** Executes a plan in spec §7 order, persisting the pair file after every success. */
+@@ -114,8 +131,9 @@ export class Executor {
+           // N5: whatever went wrong after the local edit was moved aside, name the kept copy.
+           const kept = caught instanceof LocalEditKeptError ? { conflictCopy: caught.kept } : {};
+           const err = caught instanceof LocalEditKeptError ? caught.original : caught;
+-          if (err instanceof TargetChangedError) {
+-            outcomes.push({ ...base, ...kept, status: 'skipped', message: err.message });
++          const skip = skipMessage(err, this.label);
++          if (skip !== null) {
++            outcomes.push({ ...base, ...kept, status: 'skipped', message: skip });
+           } else if (err instanceof ExportTooLargeError) {
+             outcomes.push({
+               ...base,
+@@ -235,11 +253,22 @@ export class Executor {
+     return { name, md5, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
+   }
+ 
+-  /** Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7). */
++  /** "Drive" or "OneDrive", for messages. */
++  private get label(): string {
++    return providerLabel(this.deps.remote.provider);
++  }
++
++  /**
++   * Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7);
++   * an item that is gone (404/403) is skipped too (OneDrive sync spec §5).
++   */
+   private async verifyRemote(planned: RemoteEntry): Promise<RemoteItem> {
+-    const current = await this.deps.remote.read(planned.id);
++    const current = await this.deps.remote.get(planned.id);
++    if (current === null) {
++      throw new TargetChangedError(`${planned.key} is gone from ${this.label} since planning`);
++    }
+     if (current.trashed || !remoteUnchangedSince(planned, current)) {
+-      throw new TargetChangedError(`${planned.key} changed in Drive since planning`);
++      throw new TargetChangedError(`${planned.key} changed in ${this.label} since planning`);
+     }
+     return current;
+   }
+@@ -519,10 +548,19 @@ export class Executor {
+       },
+     );
+     if (back) throw new TargetChangedError(`${action.key} exists locally again`);
+-    const current = await this.deps.remote.read(remote.id);
+-    if (!current.trashed) {
++    const current = await this.deps.remote.get(remote.id);
++    if (current === null) {
++      // Already gone: with deletion evidence it is deleted (drop the record); without, it
++      // may only be unreachable, so nothing is touched (OneDrive sync spec §4.1, §5).
++      const evidence = this.deps.evidence;
++      if (!evidence?.has(remote.id) && !evidence?.has(record.remoteParentId)) {
++        throw new TargetChangedError(`${action.key} is gone from ${this.label} since planning`);
++      }
++    } else if (!current.trashed) {
+       if (!remoteUnchangedSince(remote, current) || (current.parentId ?? '') !== remote.parentId) {
+-        throw new TargetChangedError(`${action.key} changed or moved in Drive since planning`);
++        throw new TargetChangedError(
++          `${action.key} changed or moved in ${this.label} since planning`,
++        );
+       }
+       await this.deps.remote.trash(current);
+     }
+```
+
+`src/sync/release.ts` (modify):
+
+```diff
+diff --git a/src/sync/release.ts b/src/sync/release.ts
+index c4ffe27..441fab0 100644
+--- a/src/sync/release.ts
++++ b/src/sync/release.ts
+@@ -8,6 +8,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
+ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
+ import { TYPE_CHANGED } from './plan-tracked.js';
++import { providerLabel } from './remote/remote-names.js';
+ import type { SyncRemote } from './remote/sync-remote.js';
+ import {
+   buildContext,
+@@ -171,7 +172,9 @@ const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
+ 
+ /** R must still be present-same: not trashed, content unchanged, same name and parent. */
+ async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<void> {
+-  const current = await deps.remote.read(planned.id);
++  const label = providerLabel(deps.remote.provider);
++  const current = await deps.remote.get(planned.id);
++  if (current === null) throw new TargetChangedError(`${planned.key} not found on ${label}`);
+   if (
+     current.trashed ||
+     !remoteUnchangedSince(planned, current) ||
+@@ -179,7 +182,7 @@ async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<vo
+     (current.parentId ?? '') !== planned.parentId
+   ) {
+     throw new TargetChangedError(
+-      `${planned.key} changed, moved or was trashed in Drive since the scan`,
++      `${planned.key} changed, moved or was trashed in ${label} since the scan`,
+     );
+   }
+ }
+```
+
+`src/sync/remote-folders.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-folders.ts b/src/sync/remote-folders.ts
+index 6c876a9..592eb00 100644
+--- a/src/sync/remote-folders.ts
++++ b/src/sync/remote-folders.ts
+@@ -1,8 +1,9 @@
+ import type { AuditSink } from '../audit/audit-log.js';
+-import { ValidationError } from '../errors.js';
++import { NameConflictError, ValidationError } from '../errors.js';
+ import type { Logger } from '../logger.js';
+ import { isAbortError, messageOf } from './errors.js';
+ import { baseName, foldKey, parentKey } from './paths.js';
++import { providerLabel } from './remote/remote-names.js';
+ import type { SyncRemote } from './remote/sync-remote.js';
+ import type { Action, Pair } from './types.js';
+ 
+@@ -54,20 +55,36 @@ export class RemoteFolders {
+     return id;
+   }
+ 
+-  /** Reuses exactly one non-trashed same-name folder; several → refuse (spec §4). */
+-  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
++  /** The one existing folder named `name`, null for none; several → refuse (spec §4). */
++  private async existingFolder(parentId: string, name: string): Promise<string | null> {
+     // findChildren already matched the fold key; a case-sensitive volume needs the NFC name.
+     const folders = await this.deps.remote.findChildren(parentId, name, 'folder');
+     const same = this.pair.caseInsensitive
+       ? folders
+       : folders.filter((f) => f.name.normalize('NFC') === name.normalize('NFC'));
+-    if (same.length > 1)
++    if (same.length > 1) {
++      const label = providerLabel(this.deps.remote.provider);
+       throw new ValidationError(
+-        `Several Drive folders named "${name}"; resolve the duplicate first`,
++        `Several ${label} folders named "${name}"; resolve the duplicate first`,
+       );
+-    const existing = same[0]?.id;
++    }
++    return same[0]?.id ?? null;
++  }
++
++  /** Reuses exactly one non-trashed same-name folder, else creates it. */
++  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
++    const existing = await this.existingFolder(parentId, name);
+     if (existing) return existing;
+-    const created = await this.deps.remote.createFolder(parentId, name);
++    let created;
++    try {
++      created = await this.deps.remote.createFolder(parentId, name);
++    } catch (err) {
++      // OneDrive (spec §5): the name was taken meanwhile; look again, reuse exactly one.
++      if (!(err instanceof NameConflictError)) throw err;
++      const appeared = await this.existingFolder(parentId, name);
++      if (appeared) return appeared;
++      throw err;
++    }
+     const id = created.id;
+     if (!id) throw new ValidationError('Internal: folder id missing for sync action');
+     try {
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index af43d4f..241794d 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -242,6 +242,7 @@ export class SyncService {
+           clock: this.clock,
+           save: (f): Promise<void> => this.store.save(f),
+           trash: this.deps.trash,
++          ...(feed ? { evidence: feed.evidence } : {}),
+         },
+         file,
+         remote.folders,
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/executor.onedrive.test.ts src/sync/__tests__/remote-folders.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write docs/CHANGELOG.md src/sync/__tests__/executor.onedrive.test.ts src/sync/__tests__/remote-folders.test.ts src/sync/errors.ts src/sync/executor.ts src/sync/release.ts src/sync/remote-folders.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1488 passed | 6 skipped (1494)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add docs/CHANGELOG.md src/sync/__tests__/executor.onedrive.test.ts src/sync/__tests__/remote-folders.test.ts src/sync/errors.ts src/sync/executor.ts src/sync/release.ts src/sync/remote-folders.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): executor outcome mapping and gone items for both providers
+
+NameConflictError and FileLockedError skip the action with the provider's
+message (after findDuplicateUpload had its chance); OneDriveFullError joins the
+errors that stop the run. The executor and release re-reads use get: an item
+gone since planning is skipped ("gone from OneDrive since planning", release:
+"not found on OneDrive"); a trash-remote whose item is already gone drops the
+record only with deletion evidence. A 409 on createFolder looks again and
+reuses exactly one folder. CHANGELOG notes the Google-visible changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 35: Upload name checks and OneDrive fold rules
+
+**Spec:** §4.3 (U1/B11 checks, `remote-name-invalid`, subtree once, fold-key folder checks). Spec deviation: on a case-sensitive volume `uploadKey` still returns null for a case-only folder mismatch on OneDrive (reusing `Docs` for a local `docs/x` would store `Docs/x`, which `resolveLocal` reports ambiguous on every later run); see Decision 4. Commit `14403e2` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/plan-input.ts`
+- Test: `src/sync/__tests__/plan-tracked.test.ts`
+- Test: `src/sync/__tests__/plan-untracked.test.ts`
+- Test: `src/sync/__tests__/remote-folders.test.ts`
+- Modify: `src/sync/plan-shared.ts`
+- Modify: `src/sync/plan-tracked.ts`
+- Modify: `src/sync/plan-untracked.ts`
+- Modify: `src/sync/planner.ts`
+- Modify: `src/sync/remote-folders.ts`
+- Modify: `src/sync/report.ts`
+- Modify: `src/sync/resolve.ts`
+- Modify: `src/sync/scan-select.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/plan-input.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-input.ts b/src/sync/__tests__/plan-input.ts
+index 193cdd6..f1dbb97 100644
+--- a/src/sync/__tests__/plan-input.ts
++++ b/src/sync/__tests__/plan-input.ts
+@@ -25,6 +25,7 @@ export interface InputOptions {
+   md5s?: Array<[string, string]>;
+   digests?: Array<[string, LocalDigests]>;
+   remoteHashKind?: HashKind;
++  remoteProvider?: 'google' | 'microsoft';
+   releaseNames?: PlanInput['releaseNames'];
+   onDisk?: Array<[string, OnDiskProbe]>;
+   blocking?: string[];
+@@ -69,6 +70,7 @@ export function planInput(o: InputOptions = {}): PlanInput {
+       ...(o.digests ?? []),
+     ]),
+     remoteHashKind: o.remoteHashKind ?? 'md5',
++    ...(o.remoteProvider ? { remoteProvider: o.remoteProvider } : {}),
+     releaseNames: o.releaseNames ?? null,
+     onDisk: new Map(o.onDisk ?? []),
+   };
+```
+
+`src/sync/__tests__/plan-tracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-tracked.test.ts b/src/sync/__tests__/plan-tracked.test.ts
+index c980e49..d02d660 100644
+--- a/src/sync/__tests__/plan-tracked.test.ts
++++ b/src/sync/__tests__/plan-tracked.test.ts
+@@ -240,6 +240,29 @@ describe('binary tracked records (spec §6.4)', () => {
+     expect(a).toMatchObject({ kind: 'upload-new', rule: 'B11', rebaseFrom: 'r1' });
+   });
+ 
++  it('B11 on OneDrive with a name OneDrive refuses → remote-name-invalid, no upload', () => {
++    const k = record('r1', 'a?.pdf');
++    const result = run(
++      {
++        local: [localEntry('a?.pdf', { mtimeMs: 2000, size: 12 })],
++        probes: [['r1', { state: 'trashed' }]],
++        md5s: [['a?.pdf', 'edit']],
++        remoteProvider: 'microsoft',
++      },
++      k,
++    );
++    expect(result.actions).toEqual([]);
++    expect(result.notes).toEqual([
++      {
++        code: 'remote-name-invalid',
++        path: 'a?.pdf',
++        rule: 'B11',
++        message:
++          'cannot be uploaded to OneDrive: the name contains a character OneDrive does not allow (" * : < > ? / \\ |)',
++      },
++    ]);
++  });
++
+   it('B11 after a crash adopts the identical re-upload instead of uploading twice', () => {
+     const a = only({
+       local: [L_EDITED],
+```
+
+`src/sync/__tests__/plan-untracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-untracked.test.ts b/src/sync/__tests__/plan-untracked.test.ts
+index 5685287..d78f835 100644
+--- a/src/sync/__tests__/plan-untracked.test.ts
++++ b/src/sync/__tests__/plan-untracked.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, it } from 'vitest';
+ import { CANDIDATE_CAP, planUntracked, type Claims } from '../plan-untracked.js';
++import { plan } from '../planner.js';
+ import { buildContext } from '../resolve.js';
+ import { localEntry, nativeEntry, remoteEntry } from './fixtures.js';
+ import { planInput, type InputOptions } from './plan-input.js';
+@@ -346,3 +347,71 @@ describe('untracked Google-native files (spec §6.5, §6.6)', () => {
+     expect(result.candidates.remote).toEqual([]);
+   });
+ });
++
++describe('remote names (OneDrive sync spec §4.3)', () => {
++  it('U1 on OneDrive: a refused file name is a note, the file stays local', () => {
++    const result = run({
++      selection: ['a:b.txt', 'ok.txt'],
++      local: [localEntry('a:b.txt'), localEntry('ok.txt')],
++      remoteProvider: 'microsoft',
++    });
++    expect(result.actions.map((a) => a.key)).toEqual(['ok.txt']);
++    expect(result.notes).toEqual([
++      {
++        code: 'remote-name-invalid',
++        path: 'a:b.txt',
++        rule: 'U1',
++        message:
++          'cannot be uploaded to OneDrive: the name contains a character OneDrive does not allow (" * : < > ? / \\ |)',
++      },
++    ]);
++  });
++
++  it('a refused folder segment is reported once for its subtree', () => {
++    const p = plan(
++      planInput({
++        selection: ['CON/a.txt', 'CON/b.txt', 'CON/deep/c.txt'],
++        local: [localEntry('CON/a.txt'), localEntry('CON/b.txt'), localEntry('CON/deep/c.txt')],
++        remoteProvider: 'microsoft',
++      }),
++    );
++    expect(p.actions).toEqual([]);
++    expect(p.notes.map((n) => [n.code, n.path])).toEqual([['remote-name-invalid', 'CON']]);
++  });
++
++  it('an existing remote folder is not checked; Google checks no names', () => {
++    const onedrive = run({
++      selection: ['Weird/a.txt'],
++      local: [localEntry('Weird/a.txt')],
++      folders: [['fw', 'Weird']],
++      remoteProvider: 'microsoft',
++    });
++    expect(onedrive.actions.map((a) => a.kind)).toEqual(['upload-new']);
++    const google = run({ selection: ['a:b.txt'], local: [localEntry('a:b.txt')] });
++    expect(google.actions.map((a) => a.kind)).toEqual(['upload-new']);
++  });
++
++  it('on a case-sensitive volume a case-only folder mismatch stays ambiguous on OneDrive too', () => {
++    // Reusing the remote spelling would record Docs/a.txt for the local docs/a.txt, which a
++    // case-sensitive volume never resolves again (see the plan's Chunk 3 decisions).
++    const result = run({
++      pair: { caseInsensitive: false },
++      selection: ['docs/a.txt'],
++      local: [localEntry('docs/a.txt')],
++      folders: [['fd', 'Docs']],
++      remoteProvider: 'microsoft',
++    });
++    expect(result.actions).toEqual([]);
++    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
++  });
++
++  it('on a case-insensitive volume the remote spelling is reused on OneDrive', () => {
++    const result = run({
++      selection: ['docs/a.txt'],
++      local: [localEntry('docs/a.txt')],
++      folders: [['fd', 'Docs']],
++      remoteProvider: 'microsoft',
++    });
++    expect(result.actions[0]).toMatchObject({ kind: 'upload-new', key: 'Docs/a.txt' });
++  });
++});
+```
+
+`src/sync/__tests__/remote-folders.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-folders.test.ts b/src/sync/__tests__/remote-folders.test.ts
+index 251210b..dad5ade 100644
+--- a/src/sync/__tests__/remote-folders.test.ts
++++ b/src/sync/__tests__/remote-folders.test.ts
+@@ -66,3 +66,14 @@ describe('RemoteFolders on OneDrive', () => {
+     expect(await made.folderFor('docs')).toBe('RACE');
+   });
+ });
++
++it('OneDrive compares folder names by fold key on a case-sensitive volume too', async () => {
++  const od = memoryOneDrive();
++  od.addFolder(od.rootId, 'Docs', 'D1');
++  const made = new RemoteFolders(
++    { remote: od.remote(), audit: createAudit(), logger: silentLogger() },
++    makePair({ caseInsensitive: false, remoteFolderId: od.rootId }),
++    new Map([[od.rootId, '']]),
++  );
++  expect(await made.folderFor('docs')).toBe('D1');
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/plan-input.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-folders.test.ts`
+
+Expected: FAIL. plan-untracked.test.ts: `a:b.txt` and `CON/…` plan `upload-new` (expected a `remote-name-invalid` note); plan-tracked.test.ts: B11 uploads `a?.pdf`; remote-folders.test.ts: a new `docs` folder is created instead of reusing `D1`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/plan-shared.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-shared.ts b/src/sync/plan-shared.ts
+index 278983d..ada09a9 100644
+--- a/src/sync/plan-shared.ts
++++ b/src/sync/plan-shared.ts
+@@ -1,5 +1,6 @@
+ import { sameHashOrNone } from './content-compare.js';
+ import { foldKey } from './paths.js';
++import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
+ import { isExcluded, type PlanContext } from './resolve.js';
+ import type {
+   Action,
+@@ -42,6 +43,29 @@ export interface ActionBase {
+   selection: SelectionChange;
+ }
+ 
++/**
++ * Why `key` cannot be uploaded to the pair's remote (OneDrive sync spec §4.3): the file
++ * name, or a parent folder the executor would create (one with no scanned remote folder).
++ * `path` is that folder for a folder problem, so its subtree is reported once.
++ */
++export function uploadNameProblem(
++  ctx: PlanContext,
++  key: string,
++): { path: string; message: string } | null {
++  const provider = ctx.input.remoteProvider ?? 'google';
++  const existing = new Set(ctx.input.remote.folders.values());
++  const segments = key.split('/');
++  for (let i = 0; i < segments.length; i++) {
++    const path = segments.slice(0, i + 1).join('/');
++    if (i < segments.length - 1 && existing.has(path)) continue;
++    const problem = remoteNameProblem(provider, segments[i] ?? '');
++    if (problem) {
++      return { path, message: `cannot be uploaded to ${providerLabel(provider)}: ${problem}` };
++    }
++  }
++  return null;
++}
++
+ export function makeScope(ctx: PlanContext, record: SyncRecord): TrackedScope {
+   const out: TrackedResult = {
+     actions: [],
+```
+
+`src/sync/plan-tracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-tracked.ts b/src/sync/plan-tracked.ts
+index dff2375..14f24f8 100644
+--- a/src/sync/plan-tracked.ts
++++ b/src/sync/plan-tracked.ts
+@@ -2,7 +2,13 @@ import { localMatchesRemote, remoteChanged, sameContent } from './content-compar
+ import { foldKey } from './paths.js';
+ import { planNative } from './plan-native.js';
+ import { planRemoteOnly } from './plan-remote-only.js';
+-import { makeScope, needsRefresh, planMoved, type TrackedResult } from './plan-shared.js';
++import {
++  makeScope,
++  needsRefresh,
++  planMoved,
++  uploadNameProblem,
++  type TrackedResult,
++} from './plan-shared.js';
+ import {
+   isUnknownKey,
+   localState,
+@@ -106,6 +112,16 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+         'trashed in Drive, and a different Drive file now uses this name',
+       );
+     }
++    const bad = uploadNameProblem(ctx, record.path);
++    if (bad) {
++      out.notes.push({
++        code: 'remote-name-invalid',
++        path: bad.path,
++        rule: 'B11',
++        message: bad.message,
++      });
++      return out;
++    }
+     return act({
+       ...base,
+       kind: 'upload-new',
+```
+
+`src/sync/plan-untracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-untracked.ts b/src/sync/plan-untracked.ts
+index 2d91b0a..0516c23 100644
+--- a/src/sync/plan-untracked.ts
++++ b/src/sync/plan-untracked.ts
+@@ -1,5 +1,6 @@
+ import { localMatchesRemote } from './content-compare.js';
+ import { baseName, foldKey, parentKey } from './paths.js';
++import { uploadNameProblem } from './plan-shared.js';
+ import {
+   isBlocked,
+   isExcluded,
+@@ -159,6 +160,11 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
+           note('ambiguous', 'U1', 'a Drive folder name differs only in case');
+           continue;
+         }
++        const bad = uploadNameProblem(ctx, target);
++        if (bad) {
++          note('remote-name-invalid', 'U1', bad.message, bad.path);
++          continue;
++        }
+         out.actions.push({
+           ...base,
+           kind: 'upload-new',
+```
+
+`src/sync/planner.ts` (modify):
+
+```diff
+diff --git a/src/sync/planner.ts b/src/sync/planner.ts
+index 911f7dc..bcf7069 100644
+--- a/src/sync/planner.ts
++++ b/src/sync/planner.ts
+@@ -105,6 +105,16 @@ export function plan(input: PlanInput): Plan {
+     }
+   }
+ 
++  // A folder name the remote refuses is reported once for its whole subtree (spec §4.3).
++  const reported = new Set<string>();
++  const deduped = notes.filter((n) => {
++    if (n.code !== 'remote-name-invalid') return true;
++    if (reported.has(n.path)) return false;
++    reported.add(n.path);
++    return true;
++  });
++  notes.splice(0, notes.length, ...deduped);
++
+   actions.sort(byKindThenKey);
+   const tracked = input.records.filter((r) => !r.remoteOnly).length;
+   const baselineFiles = [
+```
+
+`src/sync/remote-folders.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-folders.ts b/src/sync/remote-folders.ts
+index 592eb00..464c8a8 100644
+--- a/src/sync/remote-folders.ts
++++ b/src/sync/remote-folders.ts
+@@ -26,6 +26,11 @@ export class RemoteFolders {
+     for (const [id, key] of folders) this.folderIds.set(key, id);
+   }
+ 
++  /** Folder names compare by fold key: case-insensitive volume, or OneDrive (spec §4.3). */
++  private get foldNames(): boolean {
++    return this.pair.caseInsensitive || this.deps.remote.provider === 'microsoft';
++  }
++
+   async ensureAll(uploads: readonly Action[]): Promise<void> {
+     const dirs = [...new Set(uploads.map((a) => parentKey(a.key)))].sort(
+       (a, b) => a.split('/').length - b.split('/').length || (a < b ? -1 : 1),
+@@ -43,7 +48,7 @@ export class RemoteFolders {
+   async folderFor(dir: string): Promise<string> {
+     const known =
+       this.folderIds.get(dir) ??
+-      (this.pair.caseInsensitive
++      (this.foldNames
+         ? [...this.folderIds].find(([key]) => foldKey(key) === foldKey(dir))?.[1]
+         : undefined);
+     if (known) return known;
+@@ -59,7 +64,7 @@ export class RemoteFolders {
+   private async existingFolder(parentId: string, name: string): Promise<string | null> {
+     // findChildren already matched the fold key; a case-sensitive volume needs the NFC name.
+     const folders = await this.deps.remote.findChildren(parentId, name, 'folder');
+-    const same = this.pair.caseInsensitive
++    const same = this.foldNames
+       ? folders
+       : folders.filter((f) => f.name.normalize('NFC') === name.normalize('NFC'));
+     if (same.length > 1) {
+```
+
+`src/sync/report.ts` (modify):
+
+```diff
+diff --git a/src/sync/report.ts b/src/sync/report.ts
+index e0468b5..a5c4073 100644
+--- a/src/sync/report.ts
++++ b/src/sync/report.ts
+@@ -16,6 +16,8 @@ const WARNING_CODES: ReadonlySet<NoteCode> = new Set([
+   'native-local-missing',
+   'native-trashed-edited',
+   'remote-only-trashed',
++  'remote-name-invalid',
++  'ignored',
+ ]);
+ 
+ function unique(values: string[]): string[] {
+```
+
+`src/sync/resolve.ts` (modify):
+
+```diff
+diff --git a/src/sync/resolve.ts b/src/sync/resolve.ts
+index bb78dec..701fa20 100644
+--- a/src/sync/resolve.ts
++++ b/src/sync/resolve.ts
+@@ -1,5 +1,5 @@
+ import { ancestorKeys, foldKey, isUnder } from './paths.js';
+-import type { HashKind } from './remote/sync-remote.js';
++import type { HashKind, SyncRemote } from './remote/sync-remote.js';
+ import type {
+   LocalDigests,
+   LocalEntry,
+@@ -24,6 +24,8 @@ export interface PlanInput {
+   digests: ReadonlyMap<string, LocalDigests>;
+   /** The pair remote's hash kind (local digests of this kind are compared with it). */
+   remoteHashKind: HashKind;
++  /** The pair's provider, for remote name rules (OneDrive sync spec §4.3); default google. */
++  remoteProvider?: SyncRemote['provider'];
+   /** sync_release's request (`all` or the given paths); null for scans and runs. */
+   releaseNames: readonly string[] | 'all' | null;
+   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 35fe315..5d58c39 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -114,6 +114,7 @@ export async function gatherInput(
+     probes: new Map(),
+     onDisk,
+     remoteHashKind: syncRemote.hashKind,
++    remoteProvider: syncRemote.provider,
+     releaseNames,
+   };
+   const { digests, failed } = await hashLocal(
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index 4c0de62..c96f97e 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -231,6 +231,7 @@ export type NoteCode =
+   | 'native-local-missing'
+   | 'native-trashed-edited'
+   | 'remote-only-trashed'
++  | 'remote-name-invalid'
+   | 'ignored';
+ 
+ export interface Note {
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/plan-input.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-folders.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/plan-input.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-folders.test.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts src/sync/planner.ts src/sync/remote-folders.ts src/sync/report.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1495 passed | 6 skipped (1501)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/plan-input.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/plan-untracked.test.ts src/sync/__tests__/remote-folders.test.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts src/sync/planner.ts src/sync/remote-folders.ts src/sync/report.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/types.ts
+git commit -F - <<'MSG'
+feat(sync): OneDrive name rules for uploads; remote-name-invalid notes
+
+U1 and B11 uploads check the file name and every parent folder the executor
+would create against the provider's rules; a refused name becomes a
+remote-name-invalid note ("cannot be uploaded to OneDrive: …") and the file
+stays local, a refused folder is reported once for its subtree. PlanInput
+carries the remote's provider. Upload folders compare by fold key on OneDrive
+whatever the local volume.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 36: Ignored OneDrive items, provider words, the no-hash release refusal
+
+**Spec:** §4.2 (texts, tracked record → unknown), §4.1 last bullet (remote-only provider words), §3.2 (release refuses a file without a hash). Commit `c580065` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/plan-remote-only.test.ts`
+- Test: `src/sync/__tests__/planner.test.ts`
+- Test: `src/sync/__tests__/release.test.ts`
+- Test: `src/sync/__tests__/remote-probe.test.ts`
+- Modify: `src/sync/plan-remote-only.ts`
+- Modify: `src/sync/planner.ts`
+- Modify: `src/sync/release.ts`
+- Modify: `src/sync/remote-probe.ts`
+- Modify: `src/sync/resolve.ts`
+- Modify: `src/sync/sync-service.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/plan-remote-only.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-remote-only.test.ts b/src/sync/__tests__/plan-remote-only.test.ts
+index 150faab..568cdf5 100644
+--- a/src/sync/__tests__/plan-remote-only.test.ts
++++ b/src/sync/__tests__/plan-remote-only.test.ts
+@@ -61,6 +61,23 @@ describe('remote-only records (spec §6.7)', () => {
+       expect(p.notes[0]?.rule).toBe('O2');
+     }
+   });
++  it('O2/O5 name the OneDrive recycle bin on OneDrive pairs', () => {
++    const restore = run(
++      { probes: [['r1', { state: 'trashed' }]], remoteProvider: 'microsoft' },
++      PENDING,
++    );
++    expect(restore.notes[0]?.message).toBe(
++      'cannot restore: the only copy is in the OneDrive recycle bin; restore it there first',
++    );
++    const trashed = run({ probes: [['r1', { state: 'trashed' }]], remoteProvider: 'microsoft' });
++    expect(trashed.notes[0]?.message).toBe(
++      'the only copy is in the OneDrive recycle bin; it is removed by OneDrive after 30 days',
++    );
++    const google = run({ probes: [['r1', { state: 'trashed' }]] });
++    expect(google.notes[0]?.message).toBe(
++      'the only copy is in the Drive trash; it is purged after 30 days',
++    );
++  });
+   it('O3 L absent, R present-same → nothing; a changed R only refreshes the record', () => {
+     expect(run({ remote: [R] }).actions).toEqual([]);
+     expect(
+```
+
+`src/sync/__tests__/planner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/planner.test.ts b/src/sync/__tests__/planner.test.ts
+index dbe9d38..72d1925 100644
+--- a/src/sync/__tests__/planner.test.ts
++++ b/src/sync/__tests__/planner.test.ts
+@@ -1,5 +1,6 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { brakeFor, computePlanId, plan } from '../planner.js';
++import { buildReport } from '../report.js';
+ import type { Action } from '../types.js';
+ import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
+ import { md5Digests, planInput } from './plan-input.js';
+@@ -40,6 +41,45 @@ describe('plan composition', () => {
+     ]);
+   });
+ 
++  it('reports OneNote, special and shared OneDrive items as ignored (spec §4.2)', () => {
++    const p = plan(
++      planInput({
++        ignored: [
++          { id: 'n1', path: 'Notes', reason: 'onenote', isFolder: false },
++          { id: 'v1', path: 'Personal Vault', reason: 'special', isFolder: false },
++          { id: 'x1', path: 'From Ann', reason: 'shared', isFolder: false },
++        ],
++      }),
++    );
++    expect(p.notes.map((n) => [n.code, n.path, n.message])).toEqual([
++      ['ignored', 'Notes', 'OneNote notebook, cannot be synced'],
++      ['ignored', 'Personal Vault', 'special item, cannot be synced'],
++      ['ignored', 'From Ann', 'shared item, out of scope'],
++    ]);
++    const report = buildReport('docs', p, { dryRun: true });
++    expect(report.warnings).toContainEqual({
++      path: 'Notes',
++      code: 'ignored',
++      message: 'OneNote notebook, cannot be synced',
++    });
++  });
++
++  it('a tracked file that became a OneNote item is unknown with that text', () => {
++    const p = plan(
++      planInput({
++        records: [record('n1', 'a.one')],
++        local: [localEntry('a.one')],
++        ignored: [{ id: 'n1', path: 'a.one', reason: 'onenote', isFolder: false }],
++      }),
++    );
++    expect(p.notes).toContainEqual(
++      expect.objectContaining({
++        code: 'unknown-state',
++        message: 'OneNote notebook, cannot be synced',
++      }),
++    );
++  });
++
+   it('reports native-unsupported and unrepresentable Drive files', () => {
+     const p = plan(
+       planInput({
+```
+
+`src/sync/__tests__/release.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/release.test.ts b/src/sync/__tests__/release.test.ts
+index 4876838..863a7f8 100644
+--- a/src/sync/__tests__/release.test.ts
++++ b/src/sync/__tests__/release.test.ts
+@@ -41,6 +41,25 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
+     expect(r.skipped.map((s) => s.path)).toEqual(['b.pdf', 'c.pdf']);
+     expect(r.skipped[1]?.reason).toMatch(/name it in paths/);
+   });
++  it('a file the remote reports no hash for is refused with that reason (OneDrive)', () => {
++    const r = sel(
++      {
++        records: [A],
++        local: [localEntry('a.pdf')],
++        remote: [remoteEntry('r1', 'a.pdf', { hash: null })],
++        remoteHashKind: 'quickXor',
++        remoteProvider: 'microsoft',
++      },
++      { paths: ['a.pdf'] },
++    );
++    expect(r.eligible).toEqual([]);
++    expect(r.skipped).toEqual([
++      {
++        path: 'a.pdf',
++        reason: 'OneDrive reports no hash for this file; it cannot be released safely',
++      },
++    ]);
++  });
+   it('binary needs L = record = Drive md5; native needs L = last export', () => {
+     const r = sel(
+       {
+```
+
+`src/sync/__tests__/remote-probe.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-probe.test.ts b/src/sync/__tests__/remote-probe.test.ts
+index efb1b9e..a5a4f9c 100644
+--- a/src/sync/__tests__/remote-probe.test.ts
++++ b/src/sync/__tests__/remote-probe.test.ts
+@@ -9,6 +9,7 @@ import {
+ import { createFakeDrive } from '../../files/__tests__/fakes.js';
+ import { GOOGLE_MIME } from '../../files/export-formats.js';
+ import { SYNC_FILE_FIELDS } from '../remote/google-remote.js';
++import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
+ import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
+ import type { RemoteScan } from '../types.js';
+ import { binary } from './drive-tree.js';
+@@ -43,6 +44,19 @@ function getter(files: Record<string, DriveFile | Error>): ItemGetter {
+ }
+ 
+ describe('probeRecord', () => {
++  it('a OneDrive item that became unsupported is unknown with its text (spec §4.2)', async () => {
++    const remote: ItemGetter = {
++      get: async () => ({
++        ...toRemoteItemFromGraph({ id: 'r', name: 'Notes', package: { type: 'oneNote' } }),
++        parentId: ROOT,
++      }),
++    };
++    expect(await probeRecord('r', scan(), remote)).toEqual({
++      state: 'unknown',
++      reason: 'OneNote notebook, cannot be synced',
++    });
++  });
++
+   it('a missing item is trashed only with deletion evidence (OneDrive sync spec §4.1)', async () => {
+     const get = getter({});
+     expect(await probeRecord('r', scan(), get)).toEqual({ state: 'unavailable' });
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts`
+
+Expected: FAIL. planner.test.ts: `expected [] to deeply equal [ [ 'ignored', 'Notes', … ], … ]`; the tracked OneNote reason is `renamed in Drive to a name that cannot be synced`; remote-probe.test.ts gets `is a Google file type that cannot be exported`; plan-remote-only.test.ts gets the `Drive trash` texts; release.test.ts gets `not in sync (changed locally or in Drive); run sync_run first`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/plan-remote-only.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-remote-only.ts b/src/sync/plan-remote-only.ts
+index 21f1fd9..3cb9280 100644
+--- a/src/sync/plan-remote-only.ts
++++ b/src/sync/plan-remote-only.ts
+@@ -31,6 +31,12 @@ export function planRemoteOnly(
+   R: RemoteResolution,
+ ): TrackedResult {
+   const { ctx, record, out, note, act } = s;
++  const bin =
++    ctx.input.remoteProvider === 'microsoft' ? 'the OneDrive recycle bin' : 'the Drive trash';
++  const purged =
++    ctx.input.remoteProvider === 'microsoft'
++      ? 'it is removed by OneDrive after 30 days'
++      : 'it is purged after 30 days';
+   const entry = L.kind === 'present' ? L.entry : null;
+   let lDigests: LocalDigests | null = null;
+   if (entry) {
+@@ -81,7 +87,7 @@ export function planRemoteOnly(
+       return note(
+         'remote-only-trashed',
+         'O2',
+-        'cannot restore: the only copy is in the Drive trash; restore it there first',
++        `cannot restore: the only copy is in ${bin}; restore it there first`,
+       );
+     }
+     if (R.kind === 'unavailable') {
+@@ -89,11 +95,7 @@ export function planRemoteOnly(
+     }
+   }
+   if (R.kind === 'trashed') {
+-    note(
+-      'remote-only-trashed',
+-      'O5',
+-      'the only copy is in the Drive trash; it is purged after 30 days',
+-    );
++    note('remote-only-trashed', 'O5', `the only copy is in ${bin}; ${purged}`);
+     return record.remoteTrashed
+       ? out
+       : act({
+```
+
+`src/sync/planner.ts` (modify):
+
+```diff
+diff --git a/src/sync/planner.ts b/src/sync/planner.ts
+index bcf7069..80b99b8 100644
+--- a/src/sync/planner.ts
++++ b/src/sync/planner.ts
+@@ -2,7 +2,15 @@ import { createHash } from 'node:crypto';
+ import { planTracked } from './plan-tracked.js';
+ import { planUntracked } from './plan-untracked.js';
+ import { buildContext, type PlanInput } from './resolve.js';
+-import type { Action, ActionKind, BrakeInfo, Note, Plan } from './types.js';
++import type { RemoteUnsupported } from './remote/sync-remote.js';
++import {
++  UNSUPPORTED_TEXT,
++  type Action,
++  type ActionKind,
++  type BrakeInfo,
++  type Note,
++  type Plan,
++} from './types.js';
+ 
+ export type { PlanInput } from './resolve.js';
+ 
+@@ -93,6 +101,14 @@ export function plan(input: PlanInput): Plan {
+         message:
+           'Google Forms, Sites, Apps Script and similar files cannot be exported; they are not synced',
+       });
++    } else if (UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] !== undefined) {
++      notes.push({
++        code: 'ignored',
++        path: ignored.path,
++        rule: 'ignored',
++        remoteId: ignored.id,
++        message: UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] ?? '',
++      });
+     } else if (ignored.reason === 'unrepresentable') {
+       notes.push({
+         code: 'unrepresentable',
+```
+
+`src/sync/release.ts` (modify):
+
+```diff
+diff --git a/src/sync/release.ts b/src/sync/release.ts
+index 441fab0..3fa3456 100644
+--- a/src/sync/release.ts
++++ b/src/sync/release.ts
+@@ -78,6 +78,9 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
+   if (L.kind === 'present') {
+     const st = localState(ctx, record, L.entry);
+     if (!st) return 'local file could not be hashed';
++    if (!st.changed && R.entry.native === null && R.entry.hash === null) {
++      return `${providerLabel(ctx.input.remoteProvider ?? 'google')} reports no hash for this file; it cannot be released safely`;
++    }
+     if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
+       return 'not in sync (changed locally or in Drive); run sync_run first';
+     }
+```
+
+`src/sync/remote-probe.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-probe.ts b/src/sync/remote-probe.ts
+index 4cb22ce..6afa7a1 100644
+--- a/src/sync/remote-probe.ts
++++ b/src/sync/remote-probe.ts
+@@ -3,7 +3,7 @@ import { isAbortError } from './errors.js';
+ import { baseName, isIgnoredName, isRepresentable } from './paths.js';
+ import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+ import { toRemoteEntry } from './remote-scanner.js';
+-import type { Probe, RemoteScan } from './types.js';
++import { UNSUPPORTED_TEXT, type Probe, type RemoteScan } from './types.js';
+ 
+ /** What a probe needs from the remote. */
+ export type ItemGetter = Pick<SyncRemote, 'get'>;
+@@ -59,7 +59,8 @@ export async function probeRecord(
+       return unknown('is no longer a regular file');
+     }
+     if (file.kind === 'unsupported') {
+-      return unknown('is a Google file type that cannot be exported');
++      const text = file.unsupported ? UNSUPPORTED_TEXT[file.unsupported] : undefined;
++      return unknown(text ?? 'is a Google file type that cannot be exported');
+     }
+     const entry = toRemoteEntry(file, parentKey, parent, [parent]);
+     if (!isRepresentable(baseName(entry.key))) {
+```
+
+`src/sync/resolve.ts` (modify):
+
+```diff
+diff --git a/src/sync/resolve.ts b/src/sync/resolve.ts
+index 701fa20..6dbf8c5 100644
+--- a/src/sync/resolve.ts
++++ b/src/sync/resolve.ts
+@@ -1,5 +1,5 @@
+ import { ancestorKeys, foldKey, isUnder } from './paths.js';
+-import type { HashKind, SyncRemote } from './remote/sync-remote.js';
++import type { HashKind, RemoteUnsupported, SyncRemote } from './remote/sync-remote.js';
+ import type {
+   LocalDigests,
+   LocalEntry,
+@@ -12,6 +12,7 @@ import type {
+   RemoteScan,
+   SyncRecord,
+ } from './types.js';
++import { UNSUPPORTED_TEXT } from './types.js';
+ 
+ export interface PlanInput {
+   pair: Pair;
+@@ -179,12 +180,13 @@ export function resolveRemote(ctx: PlanContext, record: SyncRecord): RemoteResol
+   if (scanned) return { kind: 'present', entry: scanned, moved: scanned.key !== record.path };
+   const ignored = ctx.ignoredById.get(record.remoteId);
+   if (ignored) {
++    const unsupported = UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported];
+     return {
+       kind: 'unknown',
+       reason:
+         ignored.reason === 'native-unsupported'
+           ? 'is a Google file type that cannot be exported'
+-          : 'renamed in Drive to a name that cannot be synced',
++          : (unsupported ?? 'renamed in Drive to a name that cannot be synced'),
+     };
+   }
+   const probe = ctx.input.probes.get(record.remoteId);
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index 241794d..92c3337 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -22,6 +22,7 @@ import {
+ } from './pair-admin.js';
+ import type { PairStore } from './pair-store.js';
+ import { GoogleSyncRemote } from './remote/google-remote.js';
++import { providerLabel } from './remote/remote-names.js';
+ import type { SyncRemote } from './remote/sync-remote.js';
+ import { absInside } from './paths.js';
+ import { plan as makePlan } from './planner.js';
+@@ -177,6 +178,7 @@ export class SyncService {
+       const file = await this.store.load(input.name);
+       await checkRoots(this.env, file.pair);
+       const { plan, remote, local, feed } = await this.buildPlan(file);
++      const syncRemote = await this.env.remoteFor(file.pair);
+       const name = file.pair.name;
+       // Spec §4.1: the run persists the feed (dry run or apply), cursor and evidence together.
+       // An apply's first executor save carries them; the other paths save them alone.
+@@ -228,14 +230,14 @@ export class SyncService {
+           dryRun: true,
+           aborted: {
+             reason: 'mass-delete',
+-            message: `Would move ${trashRemote} Drive file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
++            message: `Would move ${trashRemote} ${providerLabel(syncRemote.provider)} file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
+           },
+         });
+       }
+       await this.removeStaleParts(file.pair, local);
+       const executor = new Executor(
+         {
+-          remote: await this.env.remoteFor(file.pair),
++          remote: syncRemote,
+           digesters: this.env.digesters,
+           audit: this.deps.audit,
+           logger: this.log,
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index c96f97e..c7aac96 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -136,6 +136,13 @@ export interface RemoteEntry {
+ 
+ export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';
+ 
++/** Report texts of the OneDrive items that are never synced (OneDrive sync spec §4.2). */
++export const UNSUPPORTED_TEXT: Readonly<Partial<Record<RemoteUnsupported, string>>> = {
++  onenote: 'OneNote notebook, cannot be synced',
++  special: 'special item, cannot be synced',
++  shared: 'shared item, out of scope',
++};
++
+ export interface RemoteIgnored {
+   id: string;
+   /** Relative path when representable, else the raw name. */
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/plan-remote-only.ts src/sync/planner.ts src/sync/release.ts src/sync/remote-probe.ts src/sync/resolve.ts src/sync/sync-service.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1500 passed | 6 skipped (1506)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/plan-remote-only.ts src/sync/planner.ts src/sync/release.ts src/sync/remote-probe.ts src/sync/resolve.ts src/sync/sync-service.ts src/sync/types.ts
+git commit -F - <<'MSG'
+feat(sync): OneDrive ignored items, provider words and the no-hash release refusal
+
+OneNote notebooks, facet-less items (Personal Vault) and shared items are
+reported as ignored with the spec's texts, and a tracked record whose remote
+became one resolves to unknown with that text (scan and probe). Remote-only
+notes name the OneDrive recycle bin on OneDrive pairs; the mass-delete brake
+names the provider. sync_release refuses a file OneDrive reports no hash for.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 37: Tool descriptions mention OneDrive
+
+**Spec:** §7 (tool descriptions; googleExport is Google only). Commit `572dc65` on the reference branch.
+
+**Files:**
+- Modify: `src/cli/sync-commands.ts`
+- Modify: `src/mcp/sync-tools.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+No test: descriptions are not pinned by tests.
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Expected: nothing to run (descriptions are not pinned by tests).
+
+- [ ] **Step 3: Implement.**
+
+`src/cli/sync-commands.ts` (modify):
+
+```diff
+diff --git a/src/cli/sync-commands.ts b/src/cli/sync-commands.ts
+index 61ec1e6..b939b06 100644
+--- a/src/cli/sync-commands.ts
++++ b/src/cli/sync-commands.ts
+@@ -15,7 +15,7 @@ export interface SyncCliDeps {
+ export function registerSyncCommands(program: Command, deps: SyncCliDeps): void {
+   const sync = program
+     .command('sync')
+-    .description('Selective two-way sync between local and Drive folders');
++    .description('Selective two-way sync between local and Drive / OneDrive folders');
+ 
+   sync
+     .command('list')
+```
+
+`src/mcp/sync-tools.ts` (modify):
+
+```diff
+diff --git a/src/mcp/sync-tools.ts b/src/mcp/sync-tools.ts
+index f2327c8..bbd4be2 100644
+--- a/src/mcp/sync-tools.ts
++++ b/src/mcp/sync-tools.ts
+@@ -29,7 +29,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_create_pair',
+     {
+       description:
+-        'Create a selective two-way sync pair between a local folder and a Drive folder (synced on demand, never automatically). Pass remoteFolderId of an existing Drive folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. Next step: sync_scan.',
++        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. Next step: sync_scan.',
+       inputSchema: {
+         name,
+         localDir: z
+@@ -41,12 +41,12 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+           .string()
+           .min(1)
+           .optional()
+-          .describe('Creates a new Drive folder with this name'),
++          .describe('Creates a new Drive / OneDrive folder with this name'),
+         remoteParentId: z
+           .string()
+           .min(1)
+           .optional()
+-          .describe('Parent for remoteFolderName (default: My Drive)'),
++          .describe('Parent for remoteFolderName (default: My Drive / the OneDrive root)'),
+         googleExport: z
+           .object({
+             document: z.enum(EXPORT_FORMATS).optional(),
+@@ -56,7 +56,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+           })
+           .optional()
+           .describe(
+-            'Local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
++            'Google accounts only (rejected on OneDrive): local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
+           ),
+         account,
+       },
+@@ -78,7 +78,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_scan',
+     {
+       description:
+-        'Step 1 of choosing what to sync: lists the local files of a pair (path, size, modifiedTime, mimeType, and a short preview for text files) plus remoteCandidates (Drive files not yet synced). Changes nothing. Open PDFs/Office files with your own file-reading tool when the name and preview are not enough, propose a selection to the user (e.g. "the seafaring files"), confirm it with them, then call sync_select.',
++        'Step 1 of choosing what to sync: lists the local files of a pair (path, size, modifiedTime, mimeType, and a short preview for text files) plus remoteCandidates (Drive / OneDrive files not yet synced). Changes nothing. Open PDFs/Office files with your own file-reading tool when the name and preview are not enough, propose a selection to the user (e.g. "the seafaring files"), confirm it with them, then call sync_select.',
+       inputSchema: {
+         name,
+         onlyUnselected: z
+@@ -103,7 +103,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_select',
+     {
+       description:
+-        'Step 2, after the user confirmed: add paths to the pair selection (local files or Drive remoteCandidates; deduped by case/Unicode form) or remove them. remove stops syncing a path and puts it on the excluded list — no file is touched on either side. Rejected paths come back with reasons. Next step: sync_run (dry run).',
++        'Step 2, after the user confirmed: add paths to the pair selection (local files or remoteCandidates; deduped by case/Unicode form) or remove them. remove stops syncing a path and puts it on the excluded list — no file is touched on either side. Rejected paths come back with reasons. Next step: sync_run (dry run).',
+       inputSchema: { name, add: relPaths.optional(), remove: relPaths.optional() },
+     },
+     async (args) => respond(log, () => sync.select(args)),
+@@ -113,7 +113,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_run',
+     {
+       description:
+-        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
++        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash / OneDrive recycle bin or the system Trash / Recycle Bin, never permanent; on OneDrive a file counts as deleted only when the OneDrive change history reports it, otherwise it is only reported; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
+       inputSchema: {
+         name,
+         apply: z.boolean().optional().describe('Default false (dry run)'),
+@@ -146,7 +146,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_release',
+     {
+       description:
+-        'Move to Drive: remove the local copies of synced files and keep them in Drive only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
++        'Move to Drive / OneDrive: remove the local copies of synced files and keep them in the cloud only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
+       inputSchema: {
+         name,
+         paths: relPaths.optional(),
+@@ -161,7 +161,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
+     'sync_remove_pair',
+     {
+       description:
+-        'Remove a sync pair: deletes its saved state and the marker file. No local or Drive files are touched.',
++        'Remove a sync pair: deletes its saved state and the marker file. No local, Drive or OneDrive files are touched.',
+       inputSchema: { name },
+     },
+     async (args) => respond(log, () => sync.removePair(args)),
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Expected: nothing to run beyond Step 5.
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/cli/sync-commands.ts src/mcp/sync-tools.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1500 passed | 6 skipped (1506)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/cli/sync-commands.ts src/mcp/sync-tools.ts
+git commit -F - <<'MSG'
+docs(sync): sync tool descriptions mention OneDrive; googleExport is Google only
+
+sync_create_pair, sync_scan, sync_select, sync_run, sync_release,
+sync_remove_pair and the sync CLI group name OneDrive next to Drive;
+googleExport says it is rejected on OneDrive, and sync_run explains that a
+OneDrive file counts as deleted only with change-history evidence.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 38: Live OneDrive sync E2E
+
+**Spec:** §9 (live E2E file), §10 (points it checks: quickXor on children, token=latest, deleted facet, If-Match). The test is written, not run here; it skips without the env. Commit `534cd0d` on the reference branch.
+
+**Files:**
+- Test (create): `tests/e2e/onedrive-sync.e2e.test.ts`
+- Modify: `src/app.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`tests/e2e/onedrive-sync.e2e.test.ts` (create):
+
+```ts
+import { randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { buildApp } from '../../src/app.js';
+import { FileAuditLog } from '../../src/audit/audit-log.js';
+import { DriveClientFactory } from '../../src/drive/client-factory.js';
+import { PairStore } from '../../src/sync/pair-store.js';
+import { quickXor } from '../../src/sync/remote/quickxor.js';
+import type { SyncRemote } from '../../src/sync/remote/sync-remote.js';
+import { SyncService } from '../../src/sync/sync-service.js';
+import type { LocalTrash } from '../../src/sync/trash.js';
+import type { SyncReport } from '../../src/sync/types.js';
+
+/*
+ * Live OneDrive sync (OneDrive sync spec §9). MARVIN_E2E_MS_PERSONAL names a signed-in
+ * Microsoft account; MARVIN_E2E_MS_SECOND optionally repeats the run on a second one.
+ * Everything happens in a new folder of the drive root, which goes to the recycle bin at the
+ * end; local files live in a temp dir and the local "trash" is a temp folder.
+ */
+const ACCOUNTS: Array<[string, string | undefined]> = [
+  ['personal', process.env.MARVIN_E2E_MS_PERSONAL],
+  ['second', process.env.MARVIN_E2E_MS_SECOND],
+];
+const LONG_MS = 900_000;
+const BIG = 4 * 1024 * 1024 + 4321;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+async function setup(account: string) {
+  const app = buildApp();
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-od-sync-e2e-'));
+  const local = path.join(tmp, 'local');
+  const trashDir = path.join(tmp, 'trash');
+  await mkdir(local);
+  await mkdir(trashDir);
+  const trash: LocalTrash = {
+    trash: async (abs) => {
+      await rename(abs, path.join(trashDir, `${Date.now()}-${path.basename(abs)}`));
+    },
+  };
+  const sync = new SyncService({
+    runner: new DriveClientFactory(app.auth),
+    audit: new FileAuditLog(path.join(tmp, 'audit.jsonl')),
+    store: new PairStore({ dir: path.join(tmp, 'sync') }),
+    trash,
+    openOneDrive: app.openOneDrive,
+  });
+  const remote = (await app.openOneDrive(account)) as SyncRemote;
+  if (remote?.provider !== 'microsoft') throw new Error(`${account} is not a Microsoft account`);
+  const at = (...parts: string[]): string => path.join(local, ...parts);
+  return { app, tmp, local, trashDir, sync, remote, at };
+}
+
+describe.each(ACCOUNTS)('OneDrive sync E2E (%s)', (_kind, account) => {
+  it.runIf(account)(
+    'two-way sync, conflicts, deletions, release, names',
+    { timeout: LONG_MS },
+    async () => {
+      const alias = account as string;
+      const { app, tmp, local, trashDir, sync, remote, at } = await setup(alias);
+      // Windows cannot hold ':' in a local name; the name-rule check runs elsewhere.
+      const colon = process.platform !== 'win32';
+      const root = await remote.createFolder(remote.rootId, `marvin-sync-e2e-${Date.now()}`);
+      const byName = async (name: string) =>
+        (await remote.findChildren(root.id, name)).find((i) => i.name === name);
+      const apply = async (extra: { confirmRemoteTrash?: boolean } = {}): Promise<SyncReport> => {
+        const dry = await sync.run({ name: 'od' });
+        const done = await sync.run({ name: 'od', apply: true, planId: dry.planId, ...extra });
+        expect(done.failures).toEqual([]);
+        return done;
+      };
+      try {
+        const names = [
+          'edit-local.txt',
+          'edit-remote.txt',
+          'both.txt',
+          'del-local.txt',
+          'del-remote.txt',
+          'release.txt',
+        ];
+        for (const n of names) await writeFile(at(n), `${n} v1`);
+        const big = randomBytes(BIG);
+        await writeFile(at('big.bin'), big);
+        if (colon) await writeFile(at('a:b.txt'), 'colon');
+        await sync.createPair({
+          name: 'od',
+          localDir: local,
+          remoteFolderId: root.id,
+          account: alias,
+        });
+        expect((await sync.listPairs())[0]?.account).toBe(alias);
+
+        // First pair: everything uploads except the name OneDrive refuses.
+        await sync.select({
+          name: 'od',
+          add: [...names, 'big.bin', ...(colon ? ['a:b.txt'] : [])],
+        });
+        const first = await apply();
+        expect(first.actions['upload-new']?.sort()).toEqual([...names, 'big.bin'].sort());
+        if (colon) {
+          expect(first.warnings).toContainEqual(
+            expect.objectContaining({ path: 'a:b.txt', code: 'remote-name-invalid' }),
+          );
+        }
+
+        // QuickXorHash equals OneDrive's own value, for the small files and the session upload.
+        for (const n of ['edit-local.txt', 'big.bin']) {
+          const item = await byName(n);
+          expect(item?.hash).toEqual({ kind: 'quickXor', value: quickXor(await readFile(at(n))) });
+        }
+
+        // Nothing to do on the second run.
+        expect((await sync.run({ name: 'od' })).actions).toEqual({});
+
+        // Two-way changes and a conflict; the remote edits are Graph PUTs from the test.
+        const putRemote = async (name: string, text: string): Promise<void> => {
+          const item = await byName(name);
+          const file = path.join(tmp, `put-${Date.now()}.txt`);
+          await writeFile(file, text);
+          if (!item) throw new Error(`${name} missing on OneDrive`);
+          await remote.replaceContent(item, file);
+        };
+        await writeFile(at('edit-local.txt'), 'local v2');
+        await putRemote('edit-remote.txt', 'remote v2');
+        await writeFile(at('both.txt'), 'both local');
+        await putRemote('both.txt', 'both remote');
+        const changes = await apply();
+        expect(changes.actions['update-remote']).toEqual(['edit-local.txt']);
+        expect(changes.actions['download-replace']).toEqual(['edit-remote.txt']);
+        expect(changes.actions.conflict).toEqual(['both.txt']);
+        expect(await readFile(at('edit-remote.txt'), 'utf8')).toBe('remote v2');
+        expect(changes.conflicts[0]?.conflictCopy).toMatch(/^both \(Drive conflict .*\)\.txt$/);
+
+        // Local deletion waits for confirmation, then goes to the OneDrive recycle bin.
+        await rm(at('del-local.txt'));
+        const pending = await sync.run({ name: 'od' });
+        expect(pending.pendingConfirmation.map((p) => p.path)).toEqual(['del-local.txt']);
+        const deletedId = (await byName('del-local.txt'))?.id ?? '';
+        const confirmed = await apply({ confirmRemoteTrash: true });
+        expect(confirmed.actions['trash-remote']).toEqual(['del-local.txt']);
+        expect(await remote.get(deletedId)).toBeNull();
+
+        // A remote delete is applied through delta evidence (the feed may lag a little).
+        const remoteDel = await byName('del-remote.txt');
+        await app.files.delete({ account: alias, fileId: remoteDel?.id ?? '' });
+        let planned: SyncReport | undefined;
+        for (let i = 0; i < 12; i++) {
+          planned = await sync.run({ name: 'od' });
+          if (planned.actions['trash-local']) break;
+          await sleep(5000);
+        }
+        expect(planned?.actions['trash-local']).toEqual(['del-remote.txt']);
+        expect((await apply()).actions['trash-local']).toEqual(['del-remote.txt']);
+        expect((await readdir(trashDir)).some((n) => n.endsWith('del-remote.txt'))).toBe(true);
+
+        // Release to OneDrive only, then restore by selecting it again.
+        const released = await sync.release({ name: 'od', paths: ['release.txt'], apply: true });
+        expect(released.released.map((r) => r.path)).toEqual(['release.txt']);
+        await sync.select({ name: 'od', add: ['release.txt'] });
+        const restored = await apply();
+        expect(restored.actions['download-new']).toEqual(['release.txt']);
+        expect(await readFile(at('release.txt'), 'utf8')).toBe('release.txt v1');
+
+        // The large file comes back intact after a remote edit (session upload + download).
+        await writeFile(at('big.bin'), randomBytes(BIG));
+        expect((await apply()).actions['update-remote']).toEqual(['big.bin']);
+        const bigItem = await byName('big.bin');
+        expect(bigItem?.hash?.value).toBe(quickXor(await readFile(at('big.bin'))));
+      } finally {
+        await app.files.delete({ account: alias, fileId: root.id }).catch(() => undefined);
+        await rm(tmp, { recursive: true, force: true });
+      }
+    },
+  );
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Expected: `npx vitest run --config vitest.e2e.config.ts tests/e2e/onedrive-sync.e2e.test.ts` reports `2 skipped` without `MARVIN_E2E_MS_PERSONAL` / `MARVIN_E2E_MS_SECOND` (typecheck fails before `App.openOneDrive` exists).
+
+- [ ] **Step 3: Implement.**
+
+`src/app.ts` (modify):
+
+```diff
+diff --git a/src/app.ts b/src/app.ts
+index 29ca38b..50847b6 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -43,6 +43,8 @@ export interface App {
+   sheets: SheetsService;
+   slides: SlidesService;
+   sync: SyncService;
++  /** The OneDrive sync remote of a Microsoft account, null for others (also used by the E2E). */
++  openOneDrive: (accountRef: string | undefined) => Promise<SyncRemote | null>;
+   watch: WatchService;
+ }
+ 
+@@ -115,18 +117,19 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
+   const docs = new DocsService({ runner, audit });
+   const sheets = new SheetsService({ runner, audit });
+   const slides = new SlidesService({ runner, audit });
++  // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch keep
++  // refusing Microsoft accounts).
++  const openOneDrive = async (ref: string | undefined): Promise<SyncRemote | null> => {
++    const account = await auth.resolveAccount(ref);
++    if (!isMicrosoft(account)) return null;
++    return new OneDriveSyncRemote(graphClient(account), account.alias);
++  };
+   const sync = new SyncService({
+     runner,
+     audit,
+     store: new PairStore({ dir: paths.syncDir }),
+     trash: createLocalTrash(),
+-    // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch
+-    // keep refusing Microsoft accounts).
+-    openOneDrive: async (ref): Promise<SyncRemote | null> => {
+-      const account = await auth.resolveAccount(ref);
+-      if (!isMicrosoft(account)) return null;
+-      return new OneDriveSyncRemote(graphClient(account), account.alias);
+-    },
++    openOneDrive,
+   });
+   const watch = new WatchService({
+     store: new WatchStore({ dir: paths.watchDir }),
+@@ -137,5 +140,5 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
+     }),
+     intervalMs: pollIntervalMs(env),
+   });
+-  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, watch };
++  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, openOneDrive, watch };
+ }
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Expected: nothing to run beyond Step 5.
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/app.ts tests/e2e/onedrive-sync.e2e.test.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1500 passed | 6 skipped (1506)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/app.ts tests/e2e/onedrive-sync.e2e.test.ts
+git commit -F - <<'MSG'
+test(sync): live OneDrive sync E2E
+
+tests/e2e/onedrive-sync.e2e.test.ts runs on MARVIN_E2E_MS_PERSONAL (and
+MARVIN_E2E_MS_SECOND when set): first pair and two-way changes with Graph PUTs
+from the test, a conflict, local-deletion confirmation, a remote delete
+applied through delta evidence, release and restore, a file over 4 MiB,
+QuickXorHash equal to OneDrive's, and a ':' name reported remote-name-invalid.
+Skipped without the env. The app exposes openOneDrive for it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 39: quickXor adopt, conflict and release on a OneDrive pair
+
+**Spec:** §9 §3 tests (U2/B4 adopt by quickXor; release of a stat-unchanged file gets a quickXor digest). Commit `ab1416a` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/sync-service.onedrive.test.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/sync-service.onedrive.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.onedrive.test.ts b/src/sync/__tests__/sync-service.onedrive.test.ts
+index 1117bf5..e8625dc 100644
+--- a/src/sync/__tests__/sync-service.onedrive.test.ts
++++ b/src/sync/__tests__/sync-service.onedrive.test.ts
+@@ -112,6 +112,33 @@ describe('OneDrive pairs: basic two-way sync', () => {
+   });
+ });
+ 
++describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
++  it('U2 adopts an identical local file by quickXor (no transfer)', async () => {
++    od.addFile(docs.id, 'same.txt', 'same bytes', 'S');
++    await writeFile(at('same.txt'), 'same bytes');
++    await service().select({ name: 'docs', add: ['same.txt'] });
++    const report = await apply();
++    expect(report.actions.adopt).toEqual(['same.txt']);
++    const { records } = await store.load('docs');
++    expect(records[0]).toMatchObject({ remoteId: 'S', remoteHash: { kind: 'quickXor' } });
++    expect(records[0]?.localMd5).toMatch(/^[0-9a-f]{32}$/);
++  });
++
++  it('a different local file is a conflict, not an adopt', async () => {
++    od.addFile(docs.id, 'diff.txt', 'remote bytes', 'D');
++    await writeFile(at('diff.txt'), 'local bytes');
++    await service().select({ name: 'docs', add: ['diff.txt'] });
++    expect((await apply()).actions.conflict).toEqual(['diff.txt']);
++  });
++
++  it('a stat-unchanged tracked file is released with a quickXor digest', async () => {
++    await tracked();
++    const result = await service().release({ name: 'docs', paths: ['a.txt'], apply: true });
++    expect(result.released).toEqual([{ path: 'a.txt', status: 'released' }]);
++    expect(await readdir(trashDir)).toEqual(['a.txt']);
++  });
++});
++
+ describe('OneDrive deletion evidence (spec §4.1)', () => {
+   it('404 with feed evidence: B10 moves the unchanged local copy to the trash', async () => {
+     await tracked();
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS already (Tasks 28–36 cover it); the tests pin it end to end.
+
+- [ ] **Step 3: Implement.**
+
+Nothing beyond Step 1.
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/sync-service.onedrive.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/sync-service.onedrive.test.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  134 passed (134); Tests  1503 passed | 6 skipped (1509)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/sync-service.onedrive.test.ts
+git commit -F - <<'MSG'
+test(sync): quickXor adopt, conflict and release on a OneDrive pair
+
+End-to-end over the in-memory OneDrive: an identical local file is adopted by
+quickXor, a different one is a conflict, and a stat-unchanged tracked file is
+released with a quickXor digest (hashTargets).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### End of Chunk 3
+
+- [ ] Run the live OneDrive sync E2E (the user runs it): `MARVIN_E2E_MS_PERSONAL=ms-personal MARVIN_E2E_MS_SECOND=ms-work npm run test:e2e -- tests/e2e/onedrive-sync.e2e.test.ts`, and rerun the Google live sync E2E (`MARVIN_E2E_ACCOUNT=<alias> npm run test:e2e -- tests/e2e/sync.e2e.test.ts`).
 
 ## Chunk 4: Cloud folder guard and docs
 
