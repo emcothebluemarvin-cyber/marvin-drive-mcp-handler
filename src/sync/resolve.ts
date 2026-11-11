@@ -1,5 +1,5 @@
 import { ancestorKeys, foldKey, isUnder } from './paths.js';
-import type { HashKind } from './remote/sync-remote.js';
+import type { HashKind, SyncRemote } from './remote/sync-remote.js';
 import type {
   LocalDigests,
   LocalEntry,
@@ -24,6 +24,8 @@ export interface PlanInput {
   digests: ReadonlyMap<string, LocalDigests>;
   /** The pair remote's hash kind (local digests of this kind are compared with it). */
   remoteHashKind: HashKind;
+  /** The pair's provider, for remote name rules (OneDrive sync spec §4.3); default google. */
+  remoteProvider?: SyncRemote['provider'];
   /** sync_release's request (`all` or the given paths); null for scans and runs. */
   releaseNames: readonly string[] | 'all' | null;
   /** lstat of record keys that have no exact scan match (absent keys are omitted). */

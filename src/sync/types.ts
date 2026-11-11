@@ -231,6 +231,7 @@ export type NoteCode =
   | 'native-local-missing'
   | 'native-trashed-edited'
   | 'remote-only-trashed'
+  | 'remote-name-invalid'
   | 'ignored';
 
 export interface Note {

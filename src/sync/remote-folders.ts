@@ -26,6 +26,11 @@ export class RemoteFolders {
     for (const [id, key] of folders) this.folderIds.set(key, id);
   }
 
+  /** Folder names compare by fold key: case-insensitive volume, or OneDrive (spec §4.3). */
+  private get foldNames(): boolean {
+    return this.pair.caseInsensitive || this.deps.remote.provider === 'microsoft';
+  }
+
   async ensureAll(uploads: readonly Action[]): Promise<void> {
     const dirs = [...new Set(uploads.map((a) => parentKey(a.key)))].sort(
       (a, b) => a.split('/').length - b.split('/').length || (a < b ? -1 : 1),
@@ -43,7 +48,7 @@ export class RemoteFolders {
   async folderFor(dir: string): Promise<string> {
     const known =
       this.folderIds.get(dir) ??
-      (this.pair.caseInsensitive
+      (this.foldNames
         ? [...this.folderIds].find(([key]) => foldKey(key) === foldKey(dir))?.[1]
         : undefined);
     if (known) return known;
@@ -59,7 +64,7 @@ export class RemoteFolders {
   private async existingFolder(parentId: string, name: string): Promise<string | null> {
     // findChildren already matched the fold key; a case-sensitive volume needs the NFC name.
     const folders = await this.deps.remote.findChildren(parentId, name, 'folder');
-    const same = this.pair.caseInsensitive
+    const same = this.foldNames
       ? folders
       : folders.filter((f) => f.name.normalize('NFC') === name.normalize('NFC'));
     if (same.length > 1) {

@@ -1,5 +1,6 @@
 import { localMatchesRemote } from './content-compare.js';
 import { baseName, foldKey, parentKey } from './paths.js';
+import { uploadNameProblem } from './plan-shared.js';
 import {
   isBlocked,
   isExcluded,
@@ -157,6 +158,11 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
         const target = uploadKey(ctx, L.key);
         if (target === null) {
           note('ambiguous', 'U1', 'a Drive folder name differs only in case');
+          continue;
+        }
+        const bad = uploadNameProblem(ctx, target);
+        if (bad) {
+          note('remote-name-invalid', 'U1', bad.message, bad.path);
           continue;
         }
         out.actions.push({

@@ -105,6 +105,16 @@ export function plan(input: PlanInput): Plan {
     }
   }
 
+  // A folder name the remote refuses is reported once for its whole subtree (spec §4.3).
+  const reported = new Set<string>();
+  const deduped = notes.filter((n) => {
+    if (n.code !== 'remote-name-invalid') return true;
+    if (reported.has(n.path)) return false;
+    reported.add(n.path);
+    return true;
+  });
+  notes.splice(0, notes.length, ...deduped);
+
   actions.sort(byKindThenKey);
   const tracked = input.records.filter((r) => !r.remoteOnly).length;
   const baselineFiles = [

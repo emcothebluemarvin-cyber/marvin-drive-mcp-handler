@@ -1,5 +1,6 @@
 import { sameHashOrNone } from './content-compare.js';
 import { foldKey } from './paths.js';
+import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
 import { isExcluded, type PlanContext } from './resolve.js';
 import type {
   Action,
@@ -40,6 +41,29 @@ export interface ActionBase {
   localMd5: string | null;
   localDigests: LocalDigests | null;
   selection: SelectionChange;
+}
+
+/**
+ * Why `key` cannot be uploaded to the pair's remote (OneDrive sync spec §4.3): the file
+ * name, or a parent folder the executor would create (one with no scanned remote folder).
+ * `path` is that folder for a folder problem, so its subtree is reported once.
+ */
+export function uploadNameProblem(
+  ctx: PlanContext,
+  key: string,
+): { path: string; message: string } | null {
+  const provider = ctx.input.remoteProvider ?? 'google';
+  const existing = new Set(ctx.input.remote.folders.values());
+  const segments = key.split('/');
+  for (let i = 0; i < segments.length; i++) {
+    const path = segments.slice(0, i + 1).join('/');
+    if (i < segments.length - 1 && existing.has(path)) continue;
+    const problem = remoteNameProblem(provider, segments[i] ?? '');
+    if (problem) {
+      return { path, message: `cannot be uploaded to ${providerLabel(provider)}: ${problem}` };
+    }
+  }
+  return null;
 }
 
 export function makeScope(ctx: PlanContext, record: SyncRecord): TrackedScope {

@@ -240,6 +240,29 @@ describe('binary tracked records (spec §6.4)', () => {
     expect(a).toMatchObject({ kind: 'upload-new', rule: 'B11', rebaseFrom: 'r1' });
   });
 
+  it('B11 on OneDrive with a name OneDrive refuses → remote-name-invalid, no upload', () => {
+    const k = record('r1', 'a?.pdf');
+    const result = run(
+      {
+        local: [localEntry('a?.pdf', { mtimeMs: 2000, size: 12 })],
+        probes: [['r1', { state: 'trashed' }]],
+        md5s: [['a?.pdf', 'edit']],
+        remoteProvider: 'microsoft',
+      },
+      k,
+    );
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toEqual([
+      {
+        code: 'remote-name-invalid',
+        path: 'a?.pdf',
+        rule: 'B11',
+        message:
+          'cannot be uploaded to OneDrive: the name contains a character OneDrive does not allow (" * : < > ? / \\ |)',
+      },
+    ]);
+  });
+
   it('B11 after a crash adopts the identical re-upload instead of uploading twice', () => {
     const a = only({
       local: [L_EDITED],

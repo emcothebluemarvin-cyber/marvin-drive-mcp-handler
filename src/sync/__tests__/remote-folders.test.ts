@@ -66,3 +66,14 @@ describe('RemoteFolders on OneDrive', () => {
     expect(await made.folderFor('docs')).toBe('RACE');
   });
 });
+
+it('OneDrive compares folder names by fold key on a case-sensitive volume too', async () => {
+  const od = memoryOneDrive();
+  od.addFolder(od.rootId, 'Docs', 'D1');
+  const made = new RemoteFolders(
+    { remote: od.remote(), audit: createAudit(), logger: silentLogger() },
+    makePair({ caseInsensitive: false, remoteFolderId: od.rootId }),
+    new Map([[od.rootId, '']]),
+  );
+  expect(await made.folderFor('docs')).toBe('D1');
+});

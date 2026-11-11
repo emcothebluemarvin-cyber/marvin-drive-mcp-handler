@@ -114,6 +114,7 @@ export async function gatherInput(
     probes: new Map(),
     onDisk,
     remoteHashKind: syncRemote.hashKind,
+    remoteProvider: syncRemote.provider,
     releaseNames,
   };
   const { digests, failed } = await hashLocal(

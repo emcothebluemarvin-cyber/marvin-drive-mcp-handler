@@ -2,7 +2,13 @@ import { localMatchesRemote, remoteChanged, sameContent } from './content-compar
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
 import { planRemoteOnly } from './plan-remote-only.js';
-import { makeScope, needsRefresh, planMoved, type TrackedResult } from './plan-shared.js';
+import {
+  makeScope,
+  needsRefresh,
+  planMoved,
+  uploadNameProblem,
+  type TrackedResult,
+} from './plan-shared.js';
 import {
   isUnknownKey,
   localState,
@@ -105,6 +111,16 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
         'B11',
         'trashed in Drive, and a different Drive file now uses this name',
       );
+    }
+    const bad = uploadNameProblem(ctx, record.path);
+    if (bad) {
+      out.notes.push({
+        code: 'remote-name-invalid',
+        path: bad.path,
+        rule: 'B11',
+        message: bad.message,
+      });
+      return out;
     }
     return act({
       ...base,
