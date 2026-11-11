@@ -371,6 +371,25 @@ describe('remote names (OneDrive sync spec §4.3)', () => {
     ]);
   });
 
+  it('U1 on OneDrive: a path of 400 characters or more is a remote-name-invalid note', () => {
+    const key = `${'d'.repeat(200)}/${'f'.repeat(199)}`;
+    const result = run({
+      selection: [key],
+      local: [localEntry(key)],
+      remoteProvider: 'microsoft',
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toEqual([
+      {
+        code: 'remote-name-invalid',
+        path: key,
+        rule: 'U1',
+        message:
+          'cannot be uploaded to OneDrive: the path is 400 characters or longer (OneDrive allows fewer than 400)',
+      },
+    ]);
+  });
+
   it('a refused folder segment is reported once for its subtree', () => {
     const p = plan(
       planInput({

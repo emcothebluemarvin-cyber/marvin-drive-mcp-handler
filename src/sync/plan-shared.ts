@@ -1,6 +1,6 @@
 import { sameHashOrNone } from './content-compare.js';
 import { foldKey } from './paths.js';
-import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
+import { providerLabel, remoteNameProblem, remotePathProblem } from './remote/remote-names.js';
 import { isExcluded, type PlanContext } from './resolve.js';
 import type {
   Action,
@@ -67,6 +67,10 @@ export function uploadNameProblem(
     if (problem) {
       return { path, message: `cannot be uploaded to ${providerLabel(provider)}: ${problem}` };
     }
+  }
+  const tooLong = remotePathProblem(provider, key);
+  if (tooLong) {
+    return { path: key, message: `cannot be uploaded to ${providerLabel(provider)}: ${tooLong}` };
   }
   return null;
 }

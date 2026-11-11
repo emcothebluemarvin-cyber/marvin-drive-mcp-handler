@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { providerLabel, remoteNameProblem } from '../remote/remote-names.js';
+import { providerLabel, remoteNameProblem, remotePathProblem } from '../remote/remote-names.js';
 
 describe('remoteNameProblem', () => {
   it('Google accepts every name', () => {
@@ -49,8 +49,23 @@ describe('remoteNameProblem', () => {
     expect(remoteNameProblem('microsoft', 'é'.repeat(256))).toContain('255');
   });
 
+  it('the 255 limit counts UTF-16 units (the stricter count; Microsoft does not say)', () => {
+    const emoji = '\u{1F600}'; // one code point, two UTF-16 units
+    expect(remoteNameProblem('microsoft', emoji.repeat(127))).toBeNull();
+    expect(remoteNameProblem('microsoft', emoji.repeat(128))).toContain('255');
+  });
+
   it('labels the providers', () => {
     expect(providerLabel('google')).toBe('Drive');
     expect(providerLabel('microsoft')).toBe('OneDrive');
+  });
+});
+
+describe('remotePathProblem', () => {
+  it('OneDrive refuses a path of 400 characters or more; Google accepts any', () => {
+    const long = `${'d'.repeat(200)}/${'f'.repeat(199)}`; // 400
+    expect(remotePathProblem('microsoft', long.slice(1))).toBeNull();
+    expect(remotePathProblem('microsoft', long)).toContain('400');
+    expect(remotePathProblem('google', long)).toBeNull();
   });
 });
