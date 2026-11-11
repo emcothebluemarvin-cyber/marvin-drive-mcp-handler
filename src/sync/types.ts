@@ -4,10 +4,6 @@ import type { RemoteUnsupported } from './remote/sync-remote.js';
 /** Pair names: lower-case letters, digits and dashes (spec §3). */
 export const PAIR_NAME = /^[a-z0-9-]{1,40}$/;
 
-/** Drive fields every sync read requests (spec §4). */
-export const SYNC_FILE_FIELDS =
-  'id, name, mimeType, md5Checksum, size, modifiedTime, createdTime, parents, trashed, capabilities(canEdit, canTrash, canAddChildren)';
-
 export interface GoogleExportPrefs {
   document: ExportFormat;
   spreadsheet: ExportFormat;
