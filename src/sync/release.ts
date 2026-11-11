@@ -8,7 +8,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
 import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
-import { providerLabel } from './remote/remote-names.js';
+import { providerIn, providerLabel } from './remote/remote-names.js';
 import type { SyncRemote } from './remote/sync-remote.js';
 import {
   buildContext,
@@ -64,13 +64,16 @@ export function releaseStatus(kind: ReleaseCandidate['kind'], dryRun: boolean): 
 
 /** Spec §10 eligibility, or R0 (addendum §3.2) for an explicitly named, deleted file. */
 function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): ReleaseCandidate | string {
-  if (record.remoteOnly) return 'already in Drive only';
+  const provider = ctx.input.remoteProvider ?? 'google';
+  const label = providerLabel(provider);
+  const where = providerIn(provider);
+  if (record.remoteOnly) return `already in ${label} only`;
   if (isUnknownKey(ctx, record.path)) return 'inside a folder that could not be read';
   if (ctx.ambiguousFolds.has(foldKey(record.path))) return 'several files share this name';
   const R = resolveRemote(ctx, record);
   if (R.kind === 'unknown') return R.reason;
-  if (R.kind !== 'present') return `the Drive file is ${R.kind}`;
-  if (R.moved) return 'moved or renamed in Drive since the last sync; run sync_run first';
+  if (R.kind !== 'present') return `the ${label} file is ${R.kind}`;
+  if (R.moved) return `moved or renamed ${where} since the last sync; run sync_run first`;
   if ((record.native !== null) !== (R.entry.native !== null)) return TYPE_CHANGED;
   const L = resolveLocal(ctx, record.path);
   // Native: a Drive change since the last export does not block release. This is intentional
@@ -79,10 +82,10 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
     const st = localState(ctx, record, L.entry);
     if (!st) return 'local file could not be hashed';
     if (!st.changed && R.entry.native === null && R.entry.hash === null) {
-      return `${providerLabel(ctx.input.remoteProvider ?? 'google')} reports no hash for this file; it cannot be released safely`;
+      return `${label} reports no hash for this file; it cannot be released safely`;
     }
     if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
-      return 'not in sync (changed locally or in Drive); run sync_run first';
+      return `not in sync (changed locally or ${where}); run sync_run first`;
     }
     return { record, remote: R.entry, kind: 'present', localName: L.entry.name };
   }
@@ -90,9 +93,9 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
   // matches resolve to `unknown` / `ambiguous` and are refused here.
   if (L.kind === 'unknown') return L.reason;
   if (L.kind === 'ambiguous') return 'a local file with a similar name exists';
-  if (!explicit) return 'deleted locally; name it in paths to keep it in Drive only';
+  if (!explicit) return `deleted locally; name it in paths to keep it in ${label} only`;
   if (remoteChanged(record, R.entry).changed) {
-    return 'changed in Drive since the last sync; run sync_run first';
+    return `changed ${where} since the last sync; run sync_run first`;
   }
   return { record, remote: R.entry, kind: 'deleted', localName: null };
 }

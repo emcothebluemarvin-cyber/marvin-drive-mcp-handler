@@ -471,6 +471,9 @@ describe('Executor', () => {
   it('numbers conflict copies and skips the upload when the copy fails', async () => {
     expect(conflictName('a.pdf', NOW, 1)).toBe('a (Drive conflict 2026-11-03 10.15) 2.pdf');
     expect(conflictName('README', NOW, 0)).toBe('README (Drive conflict 2026-11-03 10.15)');
+    expect(conflictName('a.pdf', NOW, 0, 'microsoft')).toBe(
+      'a (OneDrive conflict 2026-11-03 10.15).pdf',
+    );
     const l = await put('a.pdf', 'local edit');
     serve('something else');
     const out = await executor(pairFile([record('r1', 'a.pdf')])).run([

@@ -60,6 +60,40 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
       },
     ]);
   });
+  it('refusal texts name OneDrive on a OneDrive pair (Google texts unchanged)', () => {
+    const od = { remoteHashKind: 'quickXor' as const, remoteProvider: 'microsoft' as const };
+    const hash = { kind: 'quickXor' as const, value: 'QX-remote' };
+    const notInSync = sel(
+      {
+        records: [record('r1', 'a.pdf', { remoteHash: hash })],
+        local: [localEntry('a.pdf')],
+        remote: [remoteEntry('r1', 'a.pdf', { hash })],
+        digests: [['a.pdf', { md5: 'md5-r1', remote: { kind: 'quickXor', value: 'QX-local' } }]],
+        ...od,
+      },
+      { paths: ['a.pdf'] },
+    );
+    expect(notInSync.skipped[0]?.reason).toBe(
+      'not in sync (changed locally or on OneDrive); run sync_run first',
+    );
+    const remoteOnly = sel(
+      { records: [record('r1', 'a.pdf', { remoteOnly: true })], ...od },
+      { paths: ['a.pdf'] },
+    );
+    expect(remoteOnly.skipped[0]?.reason).toBe('already in OneDrive only');
+    const moved = sel(
+      { records: [A], local: [localEntry('a.pdf')], remote: [remoteEntry('r1', 'b.pdf')], ...od },
+      { paths: ['a.pdf'] },
+    );
+    expect(moved.skipped[0]?.reason).toBe(
+      'moved or renamed on OneDrive since the last sync; run sync_run first',
+    );
+    const google = sel(
+      { records: [record('r1', 'a.pdf', { remoteOnly: true })] },
+      { paths: ['a.pdf'] },
+    );
+    expect(google.skipped[0]?.reason).toBe('already in Drive only');
+  });
   it('binary needs L = record = Drive md5; native needs L = last export', () => {
     const r = sel(
       {

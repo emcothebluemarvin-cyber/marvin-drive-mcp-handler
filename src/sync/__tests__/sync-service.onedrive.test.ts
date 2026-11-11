@@ -128,7 +128,9 @@ describe('OneDrive pairs: quickXor content comparison (spec §3)', () => {
     od.addFile(docs.id, 'diff.txt', 'remote bytes', 'D');
     await writeFile(at('diff.txt'), 'local bytes');
     await service().select({ name: 'docs', add: ['diff.txt'] });
-    expect((await apply()).actions.conflict).toEqual(['diff.txt']);
+    const report = await apply();
+    expect(report.actions.conflict).toEqual(['diff.txt']);
+    expect(report.conflicts[0]?.conflictCopy).toMatch(/^diff \(OneDrive conflict .+\)\.txt$/);
   });
 
   it('a stat-unchanged tracked file is released with a quickXor digest', async () => {

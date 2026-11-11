@@ -36,3 +36,8 @@ export function remoteNameProblem(provider: SyncRemote['provider'], name: string
 export function providerLabel(provider: SyncRemote['provider']): string {
   return provider === 'microsoft' ? 'OneDrive' : 'Drive';
 }
+
+/** "in Drive" / "on OneDrive", for "changed <where> since …" texts. */
+export function providerIn(provider: SyncRemote['provider']): string {
+  return provider === 'microsoft' ? 'on OneDrive' : 'in Drive';
+}

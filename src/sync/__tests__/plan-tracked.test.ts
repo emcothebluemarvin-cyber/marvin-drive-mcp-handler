@@ -403,6 +403,45 @@ describe('review regressions', () => {
     expect(result.notes[0]).toMatchObject({ code: 'collision', rule: 'B11' });
   });
 
+  it('B11 collision and weak-compare texts name OneDrive on a OneDrive pair', () => {
+    const collision = run({
+      local: [L_EDITED],
+      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['a.pdf', 'edit']],
+      remoteProvider: 'microsoft',
+    });
+    expect(collision.notes[0]?.message).toBe(
+      'deleted on OneDrive, and a different OneDrive file now uses this name',
+    );
+    const google = run({
+      local: [L_EDITED],
+      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['a.pdf', 'edit']],
+    });
+    expect(google.notes[0]?.message).toBe(
+      'trashed in Drive, and a different Drive file now uses this name',
+    );
+    const weak = run(
+      {
+        local: [L],
+        remote: [remoteEntry('r1', 'a.pdf', { md5: null })],
+        remoteProvider: 'microsoft',
+      },
+      { ...K, remoteHash: null },
+    );
+    expect(weak.notes[0]).toMatchObject({
+      code: 'weak-compare',
+      message: 'OneDrive reports no hash; compared size and modifiedTime',
+    });
+    const weakGoogle = run(
+      { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
+      { ...K, remoteHash: null },
+    );
+    expect(weakGoogle.notes[0]?.message).toBe('Drive has no md5; compared size and modifiedTime');
+  });
+
   it('resumes a move that crashed after unlink: adopts the file already at the target', () => {
     const result = run({
       local: [localEntry('b.pdf', { ino: 7, ctimeMs: 5 })],

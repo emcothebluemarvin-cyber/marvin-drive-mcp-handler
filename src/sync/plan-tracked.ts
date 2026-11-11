@@ -18,6 +18,7 @@ import {
   resolveRemote,
   type PlanContext,
 } from './resolve.js';
+import { providerLabel } from './remote/remote-names.js';
 import type { LocalDigests, SyncRecord } from './types.js';
 
 export type { TrackedResult } from './plan-shared.js';
@@ -111,7 +112,9 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       return note(
         'collision',
         'B11',
-        'trashed in Drive, and a different Drive file now uses this name',
+        ctx.input.remoteProvider === 'microsoft'
+          ? 'deleted on OneDrive, and a different OneDrive file now uses this name'
+          : 'trashed in Drive, and a different Drive file now uses this name',
       );
     }
     // The same folder-spelling rule as a U1 upload: reuse a remote folder that differs only
@@ -154,7 +157,13 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
 
   const remote = R.entry;
   const rs = remoteChanged(record, remote);
-  if (rs.weak) note('weak-compare', 'R', 'Drive has no md5; compared size and modifiedTime');
+  if (rs.weak) {
+    const why =
+      ctx.input.remoteProvider === 'microsoft'
+        ? `${providerLabel('microsoft')} reports no hash`
+        : 'Drive has no md5';
+    note('weak-compare', 'R', `${why}; compared size and modifiedTime`);
+  }
 
   if (!R.moved) {
     if (entry) {

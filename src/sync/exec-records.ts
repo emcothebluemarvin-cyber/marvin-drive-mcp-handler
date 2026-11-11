@@ -1,6 +1,7 @@
 import { ValidationError } from '../errors.js';
 import { foldKey } from './paths.js';
-import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { ContentHash, RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import type { StatExpect } from './transfer.js';
 import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
 
@@ -85,9 +86,17 @@ function stamped(base: string, label: string, at: Date, attempt: number): string
   return `${stem} (${label} ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
 }
 
-/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
-export function conflictName(base: string, at: Date, attempt: number): string {
-  return stamped(base, 'Drive conflict', at, attempt);
+/**
+ * `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time);
+ * "OneDrive conflict" on a OneDrive pair.
+ */
+export function conflictName(
+  base: string,
+  at: Date,
+  attempt: number,
+  provider: SyncRemote['provider'] = 'google',
+): string {
+  return stamped(base, `${providerLabel(provider)} conflict`, at, attempt);
 }
 
 /** `<stem> (local edit YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.6 N5). */

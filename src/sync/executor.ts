@@ -500,10 +500,15 @@ export class Executor {
     const at = this.deps.clock();
     const base = path.basename(abs);
     const copy = await this.deps.remote.download(remote.id, (open) =>
-      placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
-        ...this.check(remote),
-        maxAttempts: MAX_CONFLICT_NAMES,
-      }),
+      placeExclusive(
+        path.dirname(abs),
+        (i) => conflictName(base, at, i, this.deps.remote.provider),
+        open,
+        {
+          ...this.check(remote),
+          maxAttempts: MAX_CONFLICT_NAMES,
+        },
+      ),
     );
     const conflictCopy = path.relative(this.pair.localDir, copy.path).split(path.sep).join('/');
     await this.audit('sync_conflict', action, remote.id);
