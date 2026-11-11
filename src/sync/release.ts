@@ -77,7 +77,7 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
   if (L.kind === 'present') {
     const st = localState(ctx, record, L.entry);
     if (!st) return 'local file could not be hashed';
-    if (st.changed || !localMatchesRemote(st.md5, record, R.entry)) {
+    if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
       return 'not in sync (changed locally or in Drive); run sync_run first';
     }
     return { record, remote: R.entry, kind: 'present', localName: L.entry.name };
@@ -189,7 +189,8 @@ async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
     if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
     throw err;
   });
-  if (md5 !== c.record.localMd5 || !localMatchesRemote(md5, c.record, c.remote)) {
+  const digests = { md5, remote: { kind: 'md5' as const, value: md5 } };
+  if (md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
     throw new TargetChangedError(`${key} changed locally since the scan`);
   }
 }

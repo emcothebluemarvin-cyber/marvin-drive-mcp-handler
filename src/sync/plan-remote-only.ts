@@ -2,7 +2,7 @@ import { localMatchesRemote, remoteChanged, sameHashOrNone } from './content-com
 import { foldKey } from './paths.js';
 import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
 import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
-import type { RemoteEntry, SyncRecord } from './types.js';
+import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
 
 /**
  * Remote-side record fields that differ from R (O3/O4/O6 record refresh). A native's
@@ -32,16 +32,23 @@ export function planRemoteOnly(
 ): TrackedResult {
   const { ctx, record, out, note, act } = s;
   const entry = L.kind === 'present' ? L.entry : null;
-  let lMd5: string | null = null;
+  let lDigests: LocalDigests | null = null;
   if (entry) {
     const st = localState(ctx, record, entry);
     if (!st) return note('unknown-state', 'unknown', 'local file could not be hashed');
-    lMd5 = st.md5;
+    lDigests = st.digests;
   }
-  const base: ActionBase = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
+  const base: ActionBase = {
+    key: record.path,
+    local: entry,
+    localMd5: lDigests?.md5 ?? null,
+    localDigests: lDigests,
+    selection: {},
+  };
   const untrack = { remove: [record.path], exclude: [record.path] };
   const present = R.kind === 'present' ? R.entry : null;
-  const same = present !== null && lMd5 !== null && localMatchesRemote(lMd5, record, present);
+  const same =
+    present !== null && lDigests !== null && localMatchesRemote(lDigests, record, present);
   // L is the unmodified last export but the Doc changed since: re-export over it (like N4).
   const stale = same && present.native !== null && remoteChanged(record, present).changed;
   const back = (rule: 'O0' | 'O8', remote: RemoteEntry): TrackedResult =>
@@ -63,6 +70,7 @@ export function planRemoteOnly(
         key: target,
         local: null,
         localMd5: null,
+        localDigests: null,
         kind: present.native ? 'export-new' : 'download-new',
         rule: 'O1',
         remote: present,

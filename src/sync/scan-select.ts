@@ -101,13 +101,26 @@ export async function gatherInput(
     pair.localDir,
     onDiskProbeKeys({ pair, records, local, remote }),
   );
-  const base = { pair, records, local, remote, probes: new Map(), onDisk };
-  const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
+  const syncRemote = env.remoteFor(pair);
+  const base = {
+    pair,
+    records,
+    local,
+    remote,
+    probes: new Map(),
+    onDisk,
+    remoteHashKind: syncRemote.hashKind,
+  };
+  const { digests, failed } = await hashLocal(
+    pair.localDir,
+    hashTargets(base),
+    syncRemote.hashKind,
+  );
   for (const name of failed) local.unknownSubtrees.push(toKey(name));
   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
   const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
-  const probes = await probeRecords(missing, remote, env.remoteFor(pair));
-  return { input: { ...base, probes, md5s }, local, remote };
+  const probes = await probeRecords(missing, remote, syncRemote);
+  return { input: { ...base, probes, digests }, local, remote };
 }
 
 /** sync_scan: local files (with text previews) and remote candidates for Claude to choose from. */

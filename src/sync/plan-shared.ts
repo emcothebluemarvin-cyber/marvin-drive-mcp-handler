@@ -4,6 +4,7 @@ import { isExcluded, type PlanContext } from './resolve.js';
 import type {
   Action,
   ActionKind,
+  LocalDigests,
   LocalEntry,
   Note,
   NoteCode,
@@ -37,6 +38,7 @@ export interface ActionBase {
   key: string;
   local: LocalEntry | null;
   localMd5: string | null;
+  localDigests: LocalDigests | null;
   selection: SelectionChange;
 }
 
@@ -115,15 +117,16 @@ export function planMoved(
   const [moved] = blockers;
   if (!entry && !rChanged && blockers.length === 1 && moved) {
     // Resume after a crash between the local move and persistence: the file is already there.
-    const md5 = ctx.input.md5s.get(moved.name);
-    if (md5 === record.localMd5) {
+    const digests = ctx.input.digests.get(moved.name);
+    if (digests !== undefined && digests.md5 === record.localMd5) {
       return act({
         ...base,
         key: target,
         kind: 'adopt',
         rule: rule('B7-resume'),
         local: moved,
-        localMd5: md5,
+        localMd5: digests.md5,
+        localDigests: digests,
         remote,
         selection: { remove: [record.path], add: [target] },
       });

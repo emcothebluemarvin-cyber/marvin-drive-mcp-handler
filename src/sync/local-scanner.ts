@@ -5,7 +5,49 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { ValidationError, hasErrorCode } from '../errors.js';
 import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
-import type { LocalScan, OnDiskProbe } from './types.js';
+import type { HashKind } from './remote/sync-remote.js';
+import type { LocalDigests, LocalScan, OnDiskProbe } from './types.js';
+
+/** An incremental digest of one hash kind. */
+export interface Digester {
+  update(chunk: Buffer): void;
+  digest(): string;
+}
+
+/** Makes a digester for a remote's hash kind (injectable; quickXor plugs in here). */
+export type DigesterFactory = (kind: HashKind) => Digester;
+
+/** md5 only; other kinds are added with their implementation. */
+export const defaultDigesters: DigesterFactory = (kind) => {
+  if (kind !== 'md5') throw new ValidationError(`No ${kind} digest is available in this build`);
+  const hash = createHash('md5');
+  return {
+    update: (chunk): void => {
+      hash.update(chunk);
+    },
+    digest: (): string => hash.digest('hex'),
+  };
+};
+
+/** md5 and, when `kind` is not md5, the digest of `kind`, in one read (spec §3.1). */
+export async function hashFileDigests(
+  abs: string,
+  kind: HashKind,
+  digesters: DigesterFactory = defaultDigesters,
+): Promise<LocalDigests> {
+  const md5 = createHash('md5');
+  const other = kind === 'md5' ? null : digesters(kind);
+  for await (const chunk of createReadStream(abs)) {
+    const buf = chunk as Buffer;
+    md5.update(buf);
+    other?.update(buf);
+  }
+  const value = md5.digest('hex');
+  return {
+    md5: value,
+    remote: other ? { kind, value: other.digest() } : { kind: 'md5', value },
+  };
+}
 
 export interface LocalScanOptions {
   /** On-disk relative directory to restrict the scan to (sync_scan `subdir`). */
@@ -144,19 +186,21 @@ export async function md5File(abs: string): Promise<string> {
   return hash.digest('hex');
 }
 
-/** Hashes the given on-disk relative names; failures are returned, not thrown. */
+/** Digests of the given on-disk relative names; failures are returned, not thrown. */
 export async function hashLocal(
   root: string,
   names: readonly string[],
-): Promise<{ md5s: Map<string, string>; failed: string[] }> {
-  const md5s = new Map<string, string>();
+  kind: HashKind,
+  digesters: DigesterFactory = defaultDigesters,
+): Promise<{ digests: Map<string, LocalDigests>; failed: string[] }> {
+  const digests = new Map<string, LocalDigests>();
   const failed: string[] = [];
   for (const name of names) {
     try {
-      md5s.set(name, await md5File(absInside(root, name)));
+      digests.set(name, await hashFileDigests(absInside(root, name), kind, digesters));
     } catch {
       failed.push(name);
     }
   }
-  return { md5s, failed };
+  return { digests, failed };
 }

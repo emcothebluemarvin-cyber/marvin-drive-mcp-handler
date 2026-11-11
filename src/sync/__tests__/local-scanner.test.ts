@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
-import { hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
+import { hashFileDigests, hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 const isRoot = process.getuid?.() === 0;
@@ -116,8 +116,29 @@ describe('hashing', () => {
     await writeFile(path.join(root, 'a.txt'), 'hello');
     const expected = createHash('md5').update('hello').digest('hex');
     expect(await md5File(path.join(root, 'a.txt'))).toBe(expected);
-    const { md5s, failed } = await hashLocal(root, ['a.txt', 'gone.txt']);
-    expect(md5s.get('a.txt')).toBe(expected);
+    const { digests, failed } = await hashLocal(root, ['a.txt', 'gone.txt'], 'md5');
+    expect(digests.get('a.txt')).toEqual({
+      md5: expected,
+      remote: { kind: 'md5', value: expected },
+    });
     expect(failed).toEqual(['gone.txt']);
+  });
+
+  it('computes the remote kind next to md5 in one read, with an injected digester', async () => {
+    await writeFile(path.join(root, 'a.txt'), 'hello');
+    const expected = createHash('md5').update('hello').digest('hex');
+    const seen: string[] = [];
+    const stub = (kind: string) => ({
+      update: (chunk: Buffer) => void seen.push(`${kind}:${chunk.toString()}`),
+      digest: () => 'QX-STUB',
+    });
+    expect(await hashFileDigests(path.join(root, 'a.txt'), 'quickXor', stub)).toEqual({
+      md5: expected,
+      remote: { kind: 'quickXor', value: 'QX-STUB' },
+    });
+    expect(seen).toEqual(['quickXor:hello']);
+    await expect(hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).rejects.toThrow(
+      'No quickXor digest',
+    );
   });
 });

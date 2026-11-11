@@ -97,6 +97,16 @@ export interface OnDiskProbe {
   ino: number;
 }
 
+/**
+ * A local file's digests (OneDrive sync spec §3.1): its md5, and the digest of the remote's
+ * hash kind (the same md5 on Google). `remote` is null only when it was not computed: a
+ * stat-unchanged tracked file on a remote whose kind is not md5 (§3.1 "Stat-unchanged").
+ */
+export interface LocalDigests {
+  md5: string;
+  remote: ContentHash | null;
+}
+
 /** Export settings of a Google-native Drive file (addendum §4.1). */
 export interface NativeInfo {
   mimeType: string;
@@ -182,6 +192,8 @@ export interface Action {
   record: SyncRecord | null;
   local: LocalEntry | null;
   localMd5: string | null;
+  /** The planned local content (md5 and the remote's kind); null when no local file is read. */
+  localDigests?: LocalDigests | null;
   remote: RemoteEntry | null;
   selection: SelectionChange;
   /** move-local: rename in place (case-only change on a case-insensitive volume). */

@@ -1,5 +1,7 @@
 import { ancestorKeys, foldKey, isUnder } from './paths.js';
+import type { HashKind } from './remote/sync-remote.js';
 import type {
+  LocalDigests,
   LocalEntry,
   LocalScan,
   OnDiskProbe,
@@ -18,8 +20,10 @@ export interface PlanInput {
   remote: RemoteScan;
   /** Probe results for records missing from the remote scan (spec §6.2). */
   probes: ReadonlyMap<string, Probe>;
-  /** md5 by on-disk relative name, for the names `hashTargets` asked for. */
-  md5s: ReadonlyMap<string, string>;
+  /** Digests by on-disk relative name, for the names `hashTargets` asked for. */
+  digests: ReadonlyMap<string, LocalDigests>;
+  /** The pair remote's hash kind (local digests of this kind are compared with it). */
+  remoteHashKind: HashKind;
   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
   onDisk: ReadonlyMap<string, OnDiskProbe>;
 }
@@ -204,11 +208,19 @@ export function localState(
   ctx: PlanContext,
   record: SyncRecord,
   entry: LocalEntry,
-): { changed: boolean; md5: string } | null {
-  if (statMatches(entry, record)) return { changed: false, md5: record.localMd5 };
-  const md5 = ctx.input.md5s.get(entry.name);
-  if (md5 === undefined) return null;
-  return { changed: md5 !== record.localMd5, md5 };
+): { changed: boolean; digests: LocalDigests } | null {
+  const hashed = ctx.input.digests.get(entry.name);
+  if (statMatches(entry, record)) {
+    // Not re-hashed for change detection: the record md5 stands (spec §3.1).
+    const md5 = record.localMd5;
+    const remote =
+      ctx.input.remoteHashKind === 'md5'
+        ? { kind: 'md5' as const, value: md5 }
+        : (hashed?.remote ?? null);
+    return { changed: false, digests: { md5, remote } };
+  }
+  if (hashed === undefined) return null;
+  return { changed: hashed.md5 !== record.localMd5, digests: hashed };
 }
 
 /**
@@ -236,8 +248,8 @@ export function onDiskProbeKeys(
  * files whose stat differs from the record, selected files not yet recorded, and a
  * local file already at a vanished record's Drive-move target (crash after a move).
  */
-export function hashTargets(input: Omit<PlanInput, 'md5s'>): string[] {
-  const ctx = buildContext({ ...input, md5s: new Map() });
+export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
+  const ctx = buildContext({ ...input, digests: new Map() });
   const names = new Set<string>();
   const recordFolds = new Set<string>();
   for (const record of input.records) {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brakeFor, computePlanId, plan } from '../planner.js';
 import type { Action } from '../types.js';
 import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
-import { planInput } from './plan-input.js';
+import { md5Digests, planInput } from './plan-input.js';
 
 function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -197,9 +197,9 @@ describe('planId (spec §5)', () => {
 
   it('changes when content changes', () => {
     const changed = input();
-    const md5s = new Map(changed.md5s);
-    md5s.set('a.pdf', 'local-2');
-    expect(plan({ ...changed, md5s }).planId).not.toBe(plan(input()).planId);
+    const digests = new Map(changed.digests);
+    digests.set('a.pdf', md5Digests('local-2'));
+    expect(plan({ ...changed, digests }).planId).not.toBe(plan(input()).planId);
   });
 });
 

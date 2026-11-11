@@ -1,4 +1,4 @@
-import { localMatchesRemote, md5Value, remoteChanged } from './content-compare.js';
+import { localMatchesRemote, remoteChanged, sameContent } from './content-compare.js';
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
 import { planRemoteOnly } from './plan-remote-only.js';
@@ -10,7 +10,7 @@ import {
   resolveRemote,
   type PlanContext,
 } from './resolve.js';
-import type { SyncRecord } from './types.js';
+import type { LocalDigests, SyncRecord } from './types.js';
 
 export type { TrackedResult } from './plan-shared.js';
 
@@ -50,14 +50,20 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
 
   const entry = L.kind === 'present' ? L.entry : null;
   let lChanged = false;
-  let lMd5: string | null = null;
+  let lDigests: LocalDigests | null = null;
   if (entry) {
     const ls = localState(ctx, record, entry);
     if (!ls) return note('unknown-state', 'unknown', 'local file could not be hashed');
     lChanged = ls.changed;
-    lMd5 = ls.md5;
+    lDigests = ls.digests;
   }
-  const base = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
+  const base = {
+    key: record.path,
+    local: entry,
+    localMd5: lDigests?.md5 ?? null,
+    localDigests: lDigests,
+    selection: {},
+  };
   // (d)
   if (record.native) return planNative(s, base, R, lChanged);
 
@@ -84,7 +90,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
     const others = (ctx.remoteByFold.get(foldKey(record.path)) ?? []).filter(
       (r) => !ctx.trackedIds.has(r.id),
     );
-    const reuploaded = others.find((r) => lMd5 !== null && md5Value(r.hash) === lMd5);
+    const reuploaded = others.find((r) => lDigests !== null && sameContent(lDigests, r.hash));
     if (reuploaded)
       return act({
         ...base,
@@ -141,7 +147,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       }
       if (rs.changed && !lChanged)
         return act({ ...base, kind: 'download-replace', rule: 'B3', remote });
-      if (lMd5 !== null && localMatchesRemote(lMd5, null, remote))
+      if (lDigests !== null && localMatchesRemote(lDigests, null, remote))
         return act({ ...base, kind: 'adopt', rule: 'B4', remote });
       if (!remote.canEdit)
         note('remote-readonly', 'B4', 'no edit permission; kept a conflict copy only');

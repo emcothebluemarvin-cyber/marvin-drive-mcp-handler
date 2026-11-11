@@ -8,7 +8,7 @@ import {
   resolveRemote,
 } from '../resolve.js';
 import { localEntry, record, remoteEntry } from './fixtures.js';
-import { planInput } from './plan-input.js';
+import { md5Digests, planInput } from './plan-input.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 
@@ -109,12 +109,34 @@ describe('content state', () => {
   it('local: unchanged by stat, else by md5; null when not hashed', () => {
     const k = record('r1', 'a.pdf');
     const ctx = buildContext(planInput({ md5s: [['b.pdf', 'md5-r1']] }));
-    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({ changed: false, md5: 'md5-r1' });
+    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: md5Digests('md5-r1'),
+    });
     expect(localState(ctx, k, localEntry('b.pdf', { mtimeMs: 5 }))).toEqual({
       changed: false,
-      md5: 'md5-r1',
+      digests: md5Digests('md5-r1'),
     });
     expect(localState(ctx, k, localEntry('a.pdf', { mtimeMs: 5 }))).toBeNull();
+  });
+  it('local on a non-md5 remote: stat-unchanged keeps the record md5, remote digest only if hashed', () => {
+    const k = record('r1', 'a.pdf');
+    const qx = { kind: 'quickXor' as const, value: 'QX' };
+    const plain = buildContext(planInput({ remoteHashKind: 'quickXor' }));
+    expect(localState(plain, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: { md5: 'md5-r1', remote: null },
+    });
+    const hashed = buildContext(
+      planInput({
+        remoteHashKind: 'quickXor',
+        digests: [['a.pdf', { md5: 'md5-r1', remote: qx }]],
+      }),
+    );
+    expect(localState(hashed, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: { md5: 'md5-r1', remote: qx },
+    });
   });
 });
 

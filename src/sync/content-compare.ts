@@ -1,6 +1,6 @@
 import { ValidationError } from '../errors.js';
 import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
-import type { RemoteEntry, SyncRecord } from './types.js';
+import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
 
 /** The item's md5, or null when it reports none (or another hash kind). */
 export function md5Of(item: RemoteItem): string | null {
@@ -49,17 +49,26 @@ export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem):
 }
 
 /**
- * L equals R: binary by Drive md5 (record unused: U2/B4 adopt); native by the md5 of the
- * last export (record required — untracked natives with a local file are U0b).
+ * L's content vs a remote hash (spec §3.2): null when the remote reports none, the local
+ * digest of its kind was not computed, or the kinds differ.
+ */
+export function sameContent(local: LocalDigests, remote: ContentHash | null): boolean | null {
+  return sameHash(local.remote, remote);
+}
+
+/**
+ * L equals R: binary by the remote hash, never by a weaker fallback (record unused: U2/B4
+ * adopt, release); native by the md5 of the last export (record required — untracked
+ * natives with a local file are U0b).
  */
 export function localMatchesRemote(
-  localMd5: string,
+  local: LocalDigests,
   record: SyncRecord | null,
   entry: RemoteEntry,
 ): boolean {
-  if (entry.native === null) return md5Value(entry.hash) === localMd5;
+  if (entry.native === null) return sameContent(local, entry.hash) === true;
   if (record === null) {
     throw new ValidationError(`Internal: comparing ${entry.key} needs its record`);
   }
-  return localMd5 === record.localMd5;
+  return local.md5 === record.localMd5;
 }
