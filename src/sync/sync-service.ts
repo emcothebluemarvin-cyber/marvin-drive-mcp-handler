@@ -89,7 +89,6 @@ export class SyncService {
     this.log = deps.logger ?? defaultLogger;
     this.clock = deps.clock ?? ((): Date => new Date());
     this.env = {
-      ops: this.ops,
       audit: deps.audit,
       log: this.log,
       clock: this.clock,

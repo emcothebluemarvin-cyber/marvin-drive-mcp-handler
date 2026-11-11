@@ -3,11 +3,8 @@ import { constants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { NotFoundError, ValidationError } from '../errors.js';
 import { expandHome } from '../files/destination.js';
-import { GOOGLE_MIME } from '../files/export-formats.js';
 import type { Logger } from '../logger.js';
 import { SyncRootError } from './errors.js';
 import {
@@ -19,18 +16,11 @@ import {
   type PairStore,
 } from './pair-store.js';
 import { validateGoogleExport } from './remote/google-remote.js';
-import type { SyncRemote } from './remote/sync-remote.js';
-import {
-  PAIR_NAME,
-  SYNC_FILE_FIELDS,
-  type GoogleExportPrefs,
-  type Pair,
-  type PairFile,
-} from './types.js';
+import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+import { PAIR_NAME, type GoogleExportPrefs, type Pair, type PairFile } from './types.js';
 
 /** What the split service modules share (one per SyncService). */
 export interface SyncEnv {
-  ops: OperationRunner;
   audit: AuditSink;
   log: Logger;
   clock: () => Date;
@@ -90,11 +80,11 @@ export function summarize(file: PairFile): PairSummary {
   };
 }
 
-/** Why a Drive folder cannot be a pair root, or null (spec §5 step 2). */
-export function remoteRootProblem(file: DriveFile): string | null {
-  if (file.mimeType !== GOOGLE_MIME.folder) return 'is not a folder';
-  if (file.trashed) return 'is in the Drive trash';
-  if (file.capabilities?.canAddChildren === false) return 'does not allow adding files';
+/** Why a remote folder cannot be a pair root, or null (spec §5 step 2). */
+export function remoteRootProblem(item: RemoteItem): string | null {
+  if (item.kind !== 'folder') return 'is not a folder';
+  if (item.trashed) return 'is in the Drive trash';
+  if (!item.canAddChildren) return 'does not allow adding files';
   return null;
 }
 
@@ -134,7 +124,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
     await writeMarker(localDir, input.name, id);
     let remote: { folderId: string; alias: string };
     try {
-      remote = await resolveRemoteRoot(env, input);
+      remote = await resolveRemoteRoot(env, input, googleExport);
       checkOverlap(existing, { name: input.name, localDir, remoteFolderId: remote.folderId });
     } catch (err) {
       await removeMarker(localDir, input.name);
@@ -163,32 +153,34 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
   });
 }
 
-function resolveRemoteRoot(
+async function resolveRemoteRoot(
   env: SyncEnv,
   input: CreatePairInput,
+  googleExport: GoogleExportPrefs,
 ): Promise<{ folderId: string; alias: string }> {
+  const remote = await env.openRemote(input.account, googleExport);
   const folderId = input.remoteFolderId;
   if (folderId) {
-    return env.ops.exec(input.account, 'idempotent', folderId, async (ctx) => {
-      const root = await ctx.drive.getFile(folderId, SYNC_FILE_FIELDS);
-      const problem = remoteRootProblem(root);
-      if (problem) throw new ValidationError(`Drive folder ${folderId} ${problem}`);
-      return { folderId, alias: ctx.account.alias };
-    });
+    const root = await remote.read(folderId);
+    const problem = remoteRootProblem(root);
+    if (problem) throw new ValidationError(`Drive folder ${folderId} ${problem}`);
+    return { folderId, alias: remote.account };
   }
-  const parentId = input.remoteParentId ?? 'root';
-  return env.ops.exec(input.account, 'create', input.remoteParentId, async (ctx) => {
-    const folder = await ctx.drive.createFile({
-      requestBody: {
-        name: input.remoteFolderName ?? '',
-        mimeType: GOOGLE_MIME.folder,
-        parents: [parentId],
-      },
-      fields: 'id, name',
+  const parentId = input.remoteParentId ?? remote.rootId;
+  const folder = await remote.createFolder(parentId, input.remoteFolderName ?? '');
+  const details = { parentId, pair: input.name };
+  try {
+    await env.audit.record({
+      account: remote.account,
+      op: 'create_folder',
+      fileId: folder.id,
+      ...(folder.name ? { name: folder.name } : {}),
+      details,
     });
-    await env.ops.audit(ctx, 'create_folder', folder, { parentId, pair: input.name });
-    return { folderId: folder.id ?? '', alias: ctx.account.alias };
-  });
+  } catch (err) {
+    env.log.warn('Audit log write failed', { op: 'create_folder', fileId: folder.id, error: err });
+  }
+  return { folderId: folder.id, alias: remote.account };
 }
 
 export async function listPairs(env: SyncEnv): Promise<PairSummary[]> {
@@ -260,11 +252,9 @@ export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
   if ((await probeCaseInsensitive(pair.localDir, pair.name)) !== pair.caseInsensitive) {
     throw new SyncRootError(`Case sensitivity of ${pair.localDir} changed; ${hint}`);
   }
-  let root: DriveFile;
+  let root: RemoteItem;
   try {
-    root = await env.ops.exec(pair.account, 'idempotent', pair.remoteFolderId, (ctx) =>
-      ctx.drive.getFile(pair.remoteFolderId, SYNC_FILE_FIELDS),
-    );
+    root = await env.remoteFor(pair).read(pair.remoteFolderId);
   } catch (err) {
     if (err instanceof NotFoundError) {
       throw new SyncRootError(`The Drive folder ${pair.remoteFolderId} no longer exists`, {
