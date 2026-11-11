@@ -43,6 +43,11 @@ export interface ActionBase {
   selection: SelectionChange;
 }
 
+/** The note when a parent folder matches a remote folder only by case (uploadKey null). */
+export function caseOnlyFolderMessage(ctx: PlanContext): string {
+  return `a ${providerLabel(ctx.input.remoteProvider ?? 'google')} folder name differs only in case`;
+}
+
 /**
  * Why `key` cannot be uploaded to the pair's remote (OneDrive sync spec §4.3): the file
  * name, or a parent folder the executor would create (one with no scanned remote folder).

@@ -1,6 +1,6 @@
 import { localMatchesRemote } from './content-compare.js';
 import { baseName, foldKey, parentKey } from './paths.js';
-import { uploadNameProblem } from './plan-shared.js';
+import { caseOnlyFolderMessage, uploadNameProblem } from './plan-shared.js';
 import {
   isBlocked,
   isExcluded,
@@ -157,7 +157,7 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
       if (L && !R) {
         const target = uploadKey(ctx, L.key);
         if (target === null) {
-          note('ambiguous', 'U1', 'a Drive folder name differs only in case');
+          note('ambiguous', 'U1', caseOnlyFolderMessage(ctx));
           continue;
         }
         const bad = uploadNameProblem(ctx, target);

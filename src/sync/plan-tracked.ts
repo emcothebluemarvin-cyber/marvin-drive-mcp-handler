@@ -2,7 +2,9 @@ import { localMatchesRemote, remoteChanged, sameContent } from './content-compar
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
 import { planRemoteOnly } from './plan-remote-only.js';
+import { uploadKey } from './plan-untracked.js';
 import {
+  caseOnlyFolderMessage,
   makeScope,
   needsRefresh,
   planMoved,
@@ -112,7 +114,11 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
         'trashed in Drive, and a different Drive file now uses this name',
       );
     }
-    const bad = uploadNameProblem(ctx, record.path);
+    // The same folder-spelling rule as a U1 upload: reuse a remote folder that differs only
+    // in case on a case-insensitive volume, refuse it on a case-sensitive one.
+    const target = uploadKey(ctx, record.path);
+    if (target === null) return note('ambiguous', 'B11', caseOnlyFolderMessage(ctx));
+    const bad = uploadNameProblem(ctx, target);
     if (bad) {
       out.notes.push({
         code: 'remote-name-invalid',
@@ -126,8 +132,10 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       ...base,
       kind: 'upload-new',
       rule: 'B11',
+      key: target,
       remote: null,
       rebaseFrom: record.remoteId,
+      selection: target === record.path ? {} : { remove: [record.path], add: [target] },
     });
   }
   if (R.kind === 'moved-out') {

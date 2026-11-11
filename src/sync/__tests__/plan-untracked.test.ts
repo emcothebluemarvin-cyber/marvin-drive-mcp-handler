@@ -277,7 +277,11 @@ describe('review regressions', () => {
       md5s: [['docs/a.pdf', 'm']],
     });
     expect(result.actions).toEqual([]);
-    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
+    expect(result.notes[0]).toMatchObject({
+      code: 'ambiguous',
+      rule: 'U1',
+      message: 'a Drive folder name differs only in case',
+    });
   });
 
   it('U8 counts ctime: a copied file with an old mtime is still a candidate', () => {
@@ -402,7 +406,11 @@ describe('remote names (OneDrive sync spec §4.3)', () => {
       remoteProvider: 'microsoft',
     });
     expect(result.actions).toEqual([]);
-    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
+    expect(result.notes[0]).toMatchObject({
+      code: 'ambiguous',
+      rule: 'U1',
+      message: 'a OneDrive folder name differs only in case',
+    });
   });
 
   it('on a case-insensitive volume the remote spelling is reused on OneDrive', () => {

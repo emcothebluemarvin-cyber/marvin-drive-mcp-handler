@@ -263,6 +263,43 @@ describe('binary tracked records (spec §6.4)', () => {
     ]);
   });
 
+  describe('B11 re-upload follows the uploadKey case rule', () => {
+    const KD = record('r1', 'docs/a.pdf');
+    const opts = (o: InputOptions = {}): InputOptions => ({
+      local: [localEntry('docs/a.pdf', { mtimeMs: 2000, size: 12 })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['docs/a.pdf', 'edit']],
+      folders: [['F-Docs', 'Docs']],
+      ...o,
+    });
+
+    it('case-sensitive volume: a case-only folder mismatch is ambiguous, nothing uploads', () => {
+      const result = run(opts({ pair: { caseInsensitive: false } }), KD);
+      expect(result.actions).toEqual([]);
+      expect(result.notes).toEqual([
+        {
+          code: 'ambiguous',
+          path: 'docs/a.pdf',
+          rule: 'B11',
+          remoteId: 'r1',
+          message: 'a Drive folder name differs only in case',
+        },
+      ]);
+      const od = run(opts({ pair: { caseInsensitive: false }, remoteProvider: 'microsoft' }), KD);
+      expect(od.notes[0]?.message).toBe('a OneDrive folder name differs only in case');
+    });
+
+    it('case-insensitive volume: the remote folder spelling is reused', () => {
+      expect(only(opts(), KD)).toMatchObject({
+        kind: 'upload-new',
+        rule: 'B11',
+        key: 'Docs/a.pdf',
+        rebaseFrom: 'r1',
+        selection: { remove: ['docs/a.pdf'], add: ['Docs/a.pdf'] },
+      });
+    });
+  });
+
   it('B11 after a crash adopts the identical re-upload instead of uploading twice', () => {
     const a = only({
       local: [L_EDITED],
