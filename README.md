@@ -42,16 +42,16 @@ An address can be both a personal and a work account, so a Microsoft account is 
 
 Differences on OneDrive:
 
-| Tool                                                | Difference                                                                                             |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `drive_list`                                        | `includeTrashed` is not available                                                                      |
-| `drive_search`                                      | `query` is required; `rawQuery`, `mimeType` and `modifiedAfter` are not available                      |
-| `drive_download`                                    | `exportFormat` is not available; OneNote packages cannot be downloaded                                 |
-| `drive_upload`                                      | `convertToGoogle` is not available. An existing name fails, or Claude Code asks you Overwrite / Cancel |
-| `drive_create_folder`, `drive_rename`, `drive_move` | A name conflict is an error                                                                            |
-| `drive_copy`                                        | Folders can be copied; a name or a target folder is required; a name conflict is an error              |
-| `drive_delete`                                      | Moves to the recycle bin; `permanent` is not available                                                 |
-| `drive_restore`                                     | Personal accounts only; on work or school accounts use the recycle bin on the OneDrive website         |
+| Tool                                                | Difference                                                                                                                  |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `drive_list`                                        | `includeTrashed` is not available                                                                                           |
+| `drive_search`                                      | `query` is required; `rawQuery`, `mimeType` and `modifiedAfter` are not available; new files can take over 30 min to appear |
+| `drive_download`                                    | `exportFormat` is not available; OneNote packages cannot be downloaded                                                      |
+| `drive_upload`                                      | `convertToGoogle` is not available. An existing name fails, or Claude Code asks you Overwrite / Cancel                      |
+| `drive_create_folder`, `drive_rename`, `drive_move` | A name conflict is an error                                                                                                 |
+| `drive_copy`                                        | Folders can be copied; a name or a target folder is required; a name conflict is an error                                   |
+| `drive_delete`                                      | Moves to the recycle bin; `permanent` is not available                                                                      |
+| `drive_restore`                                     | Personal accounts only; on work or school accounts use the recycle bin on the OneDrive website                              |
 
 `auth remove` deletes the token on this machine; Microsoft has no per-token revoke for this kind of app.
 

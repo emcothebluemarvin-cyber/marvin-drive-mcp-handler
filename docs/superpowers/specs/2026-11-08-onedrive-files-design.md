@@ -338,7 +338,7 @@ Error mapping:
 - All existing tests stay green.
 - Live E2E `tests/e2e/onedrive.e2e.test.ts`, opt-in with `MARVIN_E2E_MS_PERSONAL` and
   `MARVIN_E2E_MS_WORK`. Each set account runs: create folder, upload empty, small and over 10 MiB,
-  list and page, search (polls for index lag), download and compare, rename, move (including to
+  list and page, search (against an item that existed before the run: new items on personal OneDrive stayed unindexed for over 30 min), download and compare, rename, move (including to
   root), copy, delete, restore (personal only). Conflict cases assert that the original content or
   the target is unchanged: upload without `confirmReplace`, rename, move, copy, and overwrite with a
   stale eTag. Cleanup sends the test folder to the recycle bin.
