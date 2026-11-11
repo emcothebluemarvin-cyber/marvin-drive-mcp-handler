@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
 import { hashFileDigests, hashLocal, probeOnDisk, scanLocal } from '../local-scanner.js';
+import { quickXor } from '../remote/quickxor.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 const isRoot = process.getuid?.() === 0;
@@ -136,8 +137,9 @@ describe('hashing', () => {
       remote: { kind: 'quickXor', value: 'QX-STUB' },
     });
     expect(seen).toEqual(['quickXor:hello']);
-    await expect(hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).rejects.toThrow(
-      'No quickXor digest',
-    );
+    expect(await hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).toEqual({
+      md5: expected,
+      remote: { kind: 'quickXor', value: quickXor(Buffer.from('hello')) },
+    });
   });
 });

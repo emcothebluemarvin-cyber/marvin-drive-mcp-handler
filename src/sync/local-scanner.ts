@@ -4,6 +4,7 @@ import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ValidationError, hasErrorCode } from '../errors.js';
 import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
+import { QuickXorHash } from './remote/quickxor.js';
 import type { HashKind } from './remote/sync-remote.js';
 import type { LocalDigests, LocalScan, OnDiskProbe } from './types.js';
 
@@ -16,9 +17,17 @@ export interface Digester {
 /** Makes a digester for a remote's hash kind (injectable; quickXor plugs in here). */
 export type DigesterFactory = (kind: HashKind) => Digester;
 
-/** md5 only; other kinds are added with their implementation. */
+/** md5 (hex) and QuickXorHash (base64, OneDrive). */
 export const defaultDigesters: DigesterFactory = (kind) => {
-  if (kind !== 'md5') throw new ValidationError(`No ${kind} digest is available in this build`);
+  if (kind === 'quickXor') {
+    const qx = new QuickXorHash();
+    return {
+      update: (chunk): void => {
+        qx.update(chunk);
+      },
+      digest: (): string => qx.digest(),
+    };
+  }
   const hash = createHash('md5');
   return {
     update: (chunk): void => {
