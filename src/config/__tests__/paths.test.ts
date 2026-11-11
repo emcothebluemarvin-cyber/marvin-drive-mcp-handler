@@ -15,6 +15,7 @@ describe('resolvePaths', () => {
       pendingLogins: path.join(dir, 'pending-logins.json'),
       audit: path.join(dir, 'audit.jsonl'),
       syncDir: path.join(dir, 'sync'),
+      watchDir: path.join(dir, 'watch'),
       downloadsDir: path.join(os.homedir(), 'Downloads', 'marvin-drive'),
     });
   });
@@ -33,5 +34,6 @@ describe('resolvePaths', () => {
     expect(p.configDir).toBe(dir);
     expect(p.accounts).toBe(path.join(dir, 'accounts.json'));
     expect(p.syncDir).toBe(path.join(dir, 'sync'));
+    expect(p.watchDir).toBe(path.join(dir, 'watch'));
   });
 });

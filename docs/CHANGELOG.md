@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Drive watch: `drive_watch` / `drive_changes` MCP tools (34 tools in total) and CLI `marvin-drive watch add|remove|list|delivery` and `marvin-drive changes`. Watched files and folders are polled through the Drive Changes API; Claude learns who changed what and when (diffs for Docs, Sheets and Slides, and new comments when the file also changed; comment-only changes are not detected yet) and only informs. Delivery by a `UserPromptSubmit` hook (`changes --hook`, default) or by Claude Code channel push (`--dangerously-load-development-channels server:marvin-drive`).
+- New dependency: `diff` (jsdiff, BSD-3) for line diffs. `MARVIN_WATCH_POLL_SECONDS` sets the poll interval (default 30, between 15 and 3600).
+- The MCP server declares the experimental `claude/channel` capability and server instructions that tell Claude to treat change notifications as third-party data.
 - Sync Phase B: Google Docs/Sheets/Slides/Drawings sync as read-only exports (rules N1–N9), with per-pair `googleExport` formats (validated at `sync_create_pair`), the 10 MB `exportLinks` fallback and `native-too-large` reporting.
 - `sync_release` / `marvin-drive sync release`: keep files in Drive only; local copies go to the OS trash after re-verification; `sync_select add` restores them (rules O0–O8). Locally deleted files can be released by name (R0). Applied runs list `releasable` files.
 - `sync_run` `confirmRemoteTrash` / `--confirm-remote-trash` and the report field `pendingConfirmation`.
@@ -14,6 +17,8 @@
 - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
+- The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).
+- `src/cli/main.ts` is a small entry that loads the rest of the CLI lazily, so the hook path starts fast; the former entry is `src/cli/program.ts`.
 - Sync: deleting a tracked file locally no longer trashes its Drive copy automatically; it waits in `pendingConfirmation` until confirmed (`confirm-needs-mass-delete` warns when the confirmed run would also need `allowMassDelete`).
 - Sync: Google files are no longer reported `native-skipped`; unsupported Google types are reported `native-unsupported`. Pair files gain `nativeBaselineDone` (old files load as `false`): the first applied run after the upgrade baselines existing Google files as candidates instead of exporting them.
 - `sync_scan` reads the local folder once instead of twice.

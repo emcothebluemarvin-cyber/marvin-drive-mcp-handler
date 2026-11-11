@@ -1,19 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import {
-  chmod,
-  link,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-} from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { ValidationError, hasErrorCode } from '../errors.js';
+import { acquireExclusive, pidLockIsStale, processAlive } from '../core/file-lock.js';
 import { EXPORT_FORMATS } from '../files/export-formats.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { PAIR_NAME, type Pair, type PairFile } from './types.js';
@@ -69,22 +59,11 @@ const pairFileSchema = z.object({
   records: z.array(recordSchema),
 });
 
-const STALE_UNREADABLE_LOCK_MS = 60_000;
-
 export interface PairStoreOptions {
   dir: string;
   isAlive?: (pid: number) => boolean;
   now?: () => Date;
   logger?: Logger;
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return hasErrorCode(err, 'EPERM');
-  }
 }
 
 /** Pair files under `<configDir>/sync` (spec §3, §10): atomic writes, 0600 files, 0700 dir. */
@@ -189,49 +168,25 @@ export class PairStore {
   }
 
   /**
-   * `<name>.lock` via O_EXCL with `{ pid, startedAt }`; returns the release function.
-   * A stale lock is moved aside under a unique name and re-checked, so two processes
-   * breaking the same stale lock cannot both end up holding it.
+   * `<name>.lock` via O_EXCL with `{ pid, startedAt, token }`; returns the release function.
+   * Stale-lock breaking and own-lock release live in `src/core/file-lock.ts`.
    */
   async lock(name: string): Promise<() => Promise<void>> {
     await this.ensureDir();
     this.file(name); // validates the name
     const lockFile = path.join(this.opts.dir, `${name}.lock`);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const content = JSON.stringify({
+    return acquireExclusive(lockFile, {
+      content: () =>
+        JSON.stringify({
           pid: process.pid,
           startedAt: this.now().toISOString(),
           token: randomUUID(),
-        });
-        const handle = await open(lockFile, 'wx', 0o600);
-        try {
-          await handle.writeFile(content);
-        } finally {
-          await handle.close();
-        }
-        if (!(await this.holds(lockFile, content))) {
-          throw new ValidationError(`sync is busy for ${name}`);
-        }
-        return async () => {
-          // Release only our own lock (a stale-lock breaker may have replaced it).
-          if (await this.holds(lockFile, content)) await rm(lockFile, { force: true });
-          else this.log.warn('Sync lock was taken over; not removing it', { name });
-        };
-      } catch (err) {
-        if (!hasErrorCode(err, 'EEXIST')) throw err;
-        const raw = await readFile(lockFile, 'utf8').catch((readErr: unknown) => {
-          if (hasErrorCode(readErr, 'ENOENT')) return null;
-          throw readErr;
-        });
-        if (raw === null) continue; // released meanwhile
-        if (!(await this.isStale(lockFile, raw)) || !(await this.breakStale(lockFile, raw))) {
-          throw new ValidationError(`sync is busy for ${name}`);
-        }
-        this.log.warn('Breaking a stale sync lock', { name });
-      }
-    }
-    throw new ValidationError(`sync is busy for ${name}`);
+        }),
+      isStale: (raw) => pidLockIsStale(lockFile, raw, this.isAlive, this.now),
+      busyMessage: `sync is busy for ${name}`,
+      onBreak: () => this.log.warn('Breaking a stale sync lock', { name }),
+      onLostRelease: () => this.log.warn('Sync lock was taken over; not removing it', { name }),
+    });
   }
 
   async withLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
@@ -240,53 +195,6 @@ export class PairStore {
       return await fn();
     } finally {
       await release();
-    }
-  }
-
-  private async holds(lockFile: string, content: string): Promise<boolean> {
-    try {
-      return (await readFile(lockFile, 'utf8')) === content;
-    } catch (err) {
-      if (hasErrorCode(err, 'ENOENT')) return false;
-      throw err;
-    }
-  }
-
-  private async isStale(lockFile: string, raw: string): Promise<boolean> {
-    try {
-      const holder = JSON.parse(raw) as { pid?: unknown };
-      if (typeof holder.pid === 'number') return !this.isAlive(holder.pid);
-    } catch {
-      // partial or corrupt content: decided by age below
-    }
-    // Unreadable/partial lock: stale only once it is old (a writer may be mid-create).
-    try {
-      const info = await stat(lockFile);
-      return this.now().getTime() - info.mtimeMs > STALE_UNREADABLE_LOCK_MS;
-    } catch (err) {
-      if (hasErrorCode(err, 'ENOENT')) return true;
-      throw err;
-    }
-  }
-
-  /** Moves the stale lock aside; false (and restored) if it was replaced by a fresh one. */
-  private async breakStale(lockFile: string, raw: string): Promise<boolean> {
-    const aside = `${lockFile}.${randomUUID()}.stale`;
-    try {
-      await rename(lockFile, aside);
-    } catch (err) {
-      if (hasErrorCode(err, 'ENOENT')) return true; // someone else broke it; retry O_EXCL
-      throw err;
-    }
-    try {
-      if ((await readFile(aside, 'utf8')) === raw) return true;
-      // A fresh lock was taken after our staleness check: put it back untouched.
-      await link(aside, lockFile).catch((err: unknown) => {
-        if (!hasErrorCode(err, 'EEXIST')) throw err;
-      });
-      return false;
-    } finally {
-      await rm(aside, { force: true });
     }
   }
 }

@@ -22,6 +22,9 @@ import { PairStore } from './sync/pair-store.js';
 import { SyncService } from './sync/sync-service.js';
 import { createLocalTrash } from './sync/trash.js';
 import { FileService } from './files/file-service.js';
+import { createGoogleWatchProvider } from './watch/google/provider.js';
+import { WatchService, pollIntervalMs } from './watch/watch-service.js';
+import { WatchStore } from './watch/watch-store.js';
 
 export interface App {
   paths: Paths;
@@ -31,6 +34,7 @@ export interface App {
   sheets: SheetsService;
   slides: SlidesService;
   sync: SyncService;
+  watch: WatchService;
 }
 
 export interface BuildAppOptions {
@@ -79,5 +83,14 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
     store: new PairStore({ dir: paths.syncDir }),
     trash: createLocalTrash(),
   });
-  return { paths, auth, files, docs, sheets, slides, sync };
+  const watch = new WatchService({
+    store: new WatchStore({ dir: paths.watchDir }),
+    provider: createGoogleWatchProvider({
+      runner,
+      audit,
+      resolveAccount: (ref) => auth.resolveAccount(ref),
+    }),
+    intervalMs: pollIntervalMs(env),
+  });
+  return { paths, auth, files, docs, sheets, slides, sync, watch };
 }

@@ -25,6 +25,7 @@ import {
   type FakeSheets,
 } from '../../files/__tests__/fakes.js';
 import { createMcpServer } from '../server.js';
+import { stubWatchApi } from '../../watch/__tests__/fakes.js';
 
 let drive: FakeDrive;
 let docs: FakeDocs;
@@ -55,6 +56,7 @@ beforeEach(async () => {
       store: new PairStore({ dir: '/tmp/unused-sync' }),
       trash: refuseTrash,
     }),
+    watch: stubWatchApi(),
     auth: { status: async () => [] },
     version: '0.0.0-test',
     logger: silentLogger(),

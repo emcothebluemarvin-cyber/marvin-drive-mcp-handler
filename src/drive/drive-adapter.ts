@@ -4,6 +4,10 @@ import { google, type Auth, type drive_v3 } from 'googleapis';
 
 export type DriveFile = drive_v3.Schema$File;
 export type DriveFileList = drive_v3.Schema$FileList;
+export type DriveChangeList = drive_v3.Schema$ChangeList;
+export type DriveChange = drive_v3.Schema$Change;
+export type DriveCommentList = drive_v3.Schema$CommentList;
+export type DriveComment = drive_v3.Schema$Comment;
 
 export interface ListParams {
   q: string;
@@ -36,6 +40,21 @@ export interface DriveAdapter {
   }): Promise<DriveFile>;
   copyFile(params: { fileId: string; requestBody: DriveFile; fields: string }): Promise<DriveFile>;
   deleteFile(fileId: string): Promise<void>;
+  /** changes.getStartPageToken across all drives (Drive watch, spec §5.1). */
+  getStartPageToken(): Promise<string>;
+  /** One page of changes.list (spaces drive, all drives, removed included). */
+  listChanges(params: {
+    pageToken: string;
+    pageSize: number;
+    fields: string;
+  }): Promise<DriveChangeList>;
+  /** comments.list without deleted comments (spec §6). */
+  listComments(params: {
+    fileId: string;
+    startModifiedTime: string;
+    pageSize: number;
+    fields: string;
+  }): Promise<DriveCommentList>;
 }
 
 /** Only https URLs on google.com / googleapis.com (and subdomains) may receive the bearer token. */
@@ -139,6 +158,37 @@ export function createDriveAdapter(auth: Auth.OAuth2Client): DriveAdapter {
 
     async deleteFile(fileId) {
       await drive.files.delete({ fileId, ...allDrives });
+    },
+
+    async getStartPageToken() {
+      const res = await drive.changes.getStartPageToken({ ...allDrives });
+      const token = res.data.startPageToken;
+      if (!token) throw new Error('Drive returned no start page token');
+      return token;
+    },
+
+    async listChanges({ pageToken, pageSize, fields }) {
+      const res = await drive.changes.list({
+        pageToken,
+        pageSize,
+        fields,
+        spaces: 'drive',
+        includeItemsFromAllDrives: true,
+        includeRemoved: true,
+        ...allDrives,
+      });
+      return res.data;
+    },
+
+    async listComments({ fileId, startModifiedTime, pageSize, fields }) {
+      const res = await drive.comments.list({
+        fileId,
+        startModifiedTime,
+        pageSize,
+        fields,
+        includeDeleted: false,
+      });
+      return res.data;
     },
   };
   return adapter;

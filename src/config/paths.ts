@@ -9,6 +9,7 @@ export interface Paths {
   pendingLogins: string;
   audit: string;
   syncDir: string;
+  watchDir: string;
   downloadsDir: string;
 }
 
@@ -24,6 +25,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env): Paths {
     pendingLogins: path.join(configDir, 'pending-logins.json'),
     audit: path.join(configDir, 'audit.jsonl'),
     syncDir: path.join(configDir, 'sync'),
+    watchDir: path.join(configDir, 'watch'),
     downloadsDir: path.join(os.homedir(), 'Downloads', 'marvin-drive'),
   };
 }

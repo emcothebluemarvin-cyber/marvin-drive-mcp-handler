@@ -35,6 +35,9 @@ export function createFakeDrive(): FakeDrive {
     updateFile: strict('updateFile'),
     copyFile: strict('copyFile'),
     deleteFile: strict('deleteFile'),
+    getStartPageToken: strict('getStartPageToken'),
+    listChanges: strict('listChanges'),
+    listComments: strict('listComments'),
   };
 }
 
@@ -58,6 +61,7 @@ export function createFakeSheets(): FakeSheets {
   return {
     getSpreadsheet: strictFn<SheetsAdapter['getSpreadsheet']>('getSpreadsheet'),
     getValues: strictFn<SheetsAdapter['getValues']>('getValues'),
+    batchGetValues: strictFn<SheetsAdapter['batchGetValues']>('batchGetValues'),
     updateValues: strictFn<SheetsAdapter['updateValues']>('updateValues'),
     appendValues: strictFn<SheetsAdapter['appendValues']>('appendValues'),
     batchUpdate: strictFn<SheetsAdapter['batchUpdate']>('sheets.batchUpdate'),
