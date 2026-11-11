@@ -1,19 +1,12 @@
-import type { DriveFile } from '../drive/drive-adapter.js';
-import { AppError, NotFoundError, PermissionDeniedError } from '../errors.js';
-import { GOOGLE_MIME } from '../files/export-formats.js';
+import { AppError } from '../errors.js';
 import { isAbortError } from './errors.js';
 import { baseName, isIgnoredName, isRepresentable } from './paths.js';
-import { classifyRemote, toRemoteItem } from './remote/google-remote.js';
+import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import { toRemoteEntry } from './remote-scanner.js';
-import {
-  DEFAULT_GOOGLE_EXPORT,
-  SYNC_FILE_FIELDS,
-  type GoogleExportPrefs,
-  type Probe,
-  type RemoteScan,
-} from './types.js';
+import type { Probe, RemoteScan } from './types.js';
 
-export type FileGetter = (fileId: string, fields: string) => Promise<DriveFile>;
+/** What a probe needs from the remote. */
+export type ItemGetter = Pick<SyncRemote, 'get'>;
 
 const MAX_DEPTH = 32;
 
@@ -21,11 +14,9 @@ function unknown(reason: string): Probe {
   return { state: 'unknown', reason };
 }
 
-function failure(err: unknown, what: string): Probe {
+/** A failed read other than 404/403 (those make `get` return null). */
+function failure(err: unknown): Probe {
   if (isAbortError(err)) throw err;
-  if (err instanceof NotFoundError || err instanceof PermissionDeniedError) {
-    return what === 'file' ? { state: 'unavailable' } : unknown('a parent folder cannot be read');
-  }
   return unknown(err instanceof AppError ? err.message : 'probe failed');
 }
 
@@ -33,33 +24,32 @@ function failure(err: unknown, what: string): Probe {
 export async function probeRecord(
   remoteId: string,
   scan: RemoteScan,
-  get: FileGetter,
-  prefs: GoogleExportPrefs = DEFAULT_GOOGLE_EXPORT,
+  remote: ItemGetter,
 ): Promise<Probe> {
-  let file: DriveFile;
+  let file: RemoteItem | null;
   try {
-    file = await get(remoteId, SYNC_FILE_FIELDS);
+    file = await remote.get(remoteId);
   } catch (err) {
-    return failure(err, 'file');
+    return failure(err);
   }
+  if (file === null) return { state: 'unavailable' };
   if (file.trashed) return { state: 'trashed' };
-  const parent = file.parents?.[0];
+  const parent = file.parentId;
   if (!parent) return { state: 'moved-out' };
   if (scan.unknownFolderIds.includes(parent)) return unknown('inside an ambiguous Drive folder');
   const parentKey = scan.folders.get(parent);
   if (parentKey !== undefined) {
-    const name = file.name ?? '';
-    const mime = file.mimeType ?? '';
+    const name = file.name;
     if (!isRepresentable(name) || isIgnoredName(name)) {
       return unknown('renamed in Drive to a name that cannot be synced');
     }
-    if (mime === GOOGLE_MIME.shortcut || mime === GOOGLE_MIME.folder) {
+    if (file.kind === 'folder' || file.unsupported === 'shortcut') {
       return unknown('is no longer a regular file');
     }
-    const kind = classifyRemote(file, prefs);
-    if (kind.kind === 'unsupported')
+    if (file.kind === 'unsupported') {
       return unknown('is a Google file type that cannot be exported');
-    const entry = toRemoteEntry(toRemoteItem(file, prefs), parentKey, parent, [parent]);
+    }
+    const entry = toRemoteEntry(file, parentKey, parent, [parent]);
     if (!isRepresentable(baseName(entry.key))) {
       return unknown('renamed in Drive to a name that cannot be synced');
     }
@@ -67,13 +57,14 @@ export async function probeRecord(
   }
   let current = parent;
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
-    let folder: DriveFile;
+    let folder: RemoteItem | null;
     try {
-      folder = await get(current, 'id, parents');
+      folder = await remote.get(current);
     } catch (err) {
-      return failure(err, 'folder');
+      return failure(err);
     }
-    const up = folder.parents?.[0];
+    if (folder === null) return unknown('a parent folder cannot be read');
+    const up = folder.parentId;
     if (!up) return { state: 'moved-out' };
     if (scan.folders.has(up) || scan.unknownFolderIds.includes(up)) {
       return unknown('inside a Drive folder that was not scanned');
@@ -87,10 +78,9 @@ export async function probeRecord(
 export async function probeRecords(
   remoteIds: readonly string[],
   scan: RemoteScan,
-  get: FileGetter,
-  prefs: GoogleExportPrefs = DEFAULT_GOOGLE_EXPORT,
+  remote: ItemGetter,
 ): Promise<Map<string, Probe>> {
   const probes = new Map<string, Probe>();
-  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, get, prefs));
+  for (const id of remoteIds) probes.set(id, await probeRecord(id, scan, remote));
   return probes;
 }

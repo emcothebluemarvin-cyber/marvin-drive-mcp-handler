@@ -6,10 +6,12 @@ import {
   PermissionDeniedError,
   QuotaExceededError,
 } from '../../errors.js';
+import { createFakeDrive } from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { probeRecord, probeRecords, type FileGetter } from '../remote-probe.js';
+import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
 import type { RemoteScan } from '../types.js';
 import { binary } from './drive-tree.js';
+import { googleRemoteOver } from './fake-remote.js';
 
 const ROOT = 'root';
 
@@ -27,13 +29,16 @@ function scan(overrides: Partial<RemoteScan> = {}): RemoteScan {
   };
 }
 
-function getter(files: Record<string, DriveFile | Error>): FileGetter {
-  return async (id) => {
+/** A GoogleSyncRemote whose Drive serves `files` (missing ids are 404). */
+function getter(files: Record<string, DriveFile | Error>): ItemGetter {
+  const drive = createFakeDrive();
+  drive.getFile.mockImplementation(async (id) => {
     const f = files[id];
     if (f === undefined) throw new NotFoundError(id);
     if (f instanceof Error) throw f;
     return f;
-  };
+  });
+  return googleRemoteOver(drive);
 }
 
 describe('probeRecord', () => {

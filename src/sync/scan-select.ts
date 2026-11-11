@@ -106,13 +106,7 @@ export async function gatherInput(
   for (const name of failed) local.unknownSubtrees.push(toKey(name));
   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
   const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
-  const probes = await probeRecords(
-    missing,
-    remote,
-    (id, fields) =>
-      env.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
-    pair.googleExport,
-  );
+  const probes = await probeRecords(missing, remote, env.remoteFor(pair));
   return { input: { ...base, probes, md5s }, local, remote };
 }
 
