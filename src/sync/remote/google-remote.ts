@@ -130,6 +130,12 @@ export function toRemoteItem(file: DriveFile, prefs: GoogleExportPrefs): RemoteI
 }
 
 /**
+ * What `exportNative` needs from a `readNative` (the export links), shared by every
+ * GoogleSyncRemote so a source stays usable whichever instance exports it.
+ */
+const NATIVE_FILES = new WeakMap<NativeSource, { id: string; file: DriveFile }>();
+
+/**
  * SyncRemote over the Drive adapter (OneDrive sync spec §2.2). Every call goes through the
  * OperationRunner with the operation kind and target the engine used before the port.
  */
@@ -137,7 +143,6 @@ export class GoogleSyncRemote implements SyncRemote {
   readonly provider = 'google';
   readonly hashKind = 'md5';
   readonly rootId = 'root';
-  private readonly nativeFiles = new WeakMap<NativeSource, { id: string; file: DriveFile }>();
 
   constructor(
     private readonly ops: OperationRunner,
@@ -285,17 +290,17 @@ export class GoogleSyncRemote implements SyncRemote {
       ctx.drive.getFile(id, SYNC_EXPORT_FIELDS),
     );
     const source: NativeSource = { item: this.item(file) };
-    this.nativeFiles.set(source, { id, file });
+    NATIVE_FILES.set(source, { id, file });
     return source;
   }
 
-  exportNative<T>(
+  async exportNative<T>(
     source: NativeSource,
     plan: ExportPlan,
     consume: (open: OpenStream) => Promise<T>,
   ): Promise<T> {
-    const read = this.nativeFiles.get(source);
-    if (!read) throw new ValidationError('Internal: export source was not read by this remote');
+    const read = NATIVE_FILES.get(source);
+    if (!read) throw new ValidationError('Internal: export source was not read by readNative');
     return this.ops.exec(this.account, 'idempotent', read.id, (ctx) =>
       consume(() => openExport(ctx.drive, read.file, plan, this.ops.log)),
     );

@@ -199,6 +199,22 @@ describe('GoogleSyncRemote writes and content (pinned)', () => {
     expect(drive.downloadMedia.mock.calls).toEqual([['r1'], ['r1']]);
   });
 
+  it('a NativeSource read by one remote instance exports through another', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockResolvedValueOnce({ id: 'g1', name: 'Plan', mimeType: GOOGLE_MIME.document });
+    drive.exportMedia.mockResolvedValueOnce(Readable.from([Buffer.from('doc')]));
+    const source = await googleRemoteOver(drive).readNative('g1');
+    const plan = { format: 'docx' as const, extension: 'docx', mimeType: DOCX_MIME };
+    const stream = await googleRemoteOver(drive).exportNative(source, plan, (open) => open());
+    let out = '';
+    for await (const chunk of stream) out += String(chunk);
+    expect(out).toBe('doc');
+    const forged = { item: source.item };
+    await expect(googleRemoteOver(drive).exportNative(forged, plan, (o) => o())).rejects.toThrow(
+      'export source was not read',
+    );
+  });
+
   it('readNative reads the export fields; exportNative exports with them', async () => {
     const drive = createFakeDrive();
     drive.getFile.mockResolvedValueOnce({
