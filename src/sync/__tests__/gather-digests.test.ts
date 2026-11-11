@@ -72,6 +72,7 @@ describe('gatherInput on a non-md5 remote (spec §3.1 stat-unchanged files)', ()
       remoteFor: async () => remote,
       openRemote: async () => remote,
       digesters: stubDigester,
+      cloudFolders: async () => [],
     };
     const plain = await gatherInput(env, file);
     expect(plain.input.digests.size).toBe(0);

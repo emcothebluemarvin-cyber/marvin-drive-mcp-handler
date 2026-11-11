@@ -8,7 +8,8 @@ export function formatPairs(pairs: readonly PairSummary[]): string {
     .map((p) => {
       const c = p.counts;
       const last = p.lastAppliedRunAt ?? 'never';
-      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
+      const warning = p.warning ? `\n  warning: ${p.warning}` : '';
+      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}${warning}`;
     })
     .join('\n');
 }

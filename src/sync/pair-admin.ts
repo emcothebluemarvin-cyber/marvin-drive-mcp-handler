@@ -7,6 +7,7 @@ import { NotFoundError, ValidationError } from '../errors.js';
 import { expandHome } from '../files/destination.js';
 import type { Logger } from '../logger.js';
 import type { DigesterFactory } from './local-scanner.js';
+import { cloudFolderCheck, type CloudFolder } from './cloud-folders.js';
 import { SyncRootError } from './errors.js';
 import {
   checkOverlap,
@@ -36,7 +37,12 @@ export interface SyncEnv {
   openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
   /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
   digesters: DigesterFactory;
+  /** Cloud desktop client folders on this machine (OneDrive sync spec §6). */
+  cloudFolders: () => Promise<CloudFolder[]>;
 }
+
+/** Volumes of a new folder fold case by default here (the marker probe comes later). */
+const DEFAULT_CI = process.platform === 'darwin' || process.platform === 'win32';
 
 export interface CreatePairInput {
   name: string;
@@ -63,6 +69,8 @@ export interface PairSummary {
   };
   createdAt: string;
   lastAppliedRunAt: string | null;
+  /** Set when localDir is inside (or contains) a cloud desktop client's folder (spec §6). */
+  warning?: string;
 }
 
 export function summarize(file: PairFile): PairSummary {
@@ -117,6 +125,8 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
   }
   const googleExport = validateGoogleExport(input.googleExport ?? {});
   const localDir = await resolveLocalDir(input.localDir);
+  const inCloud = await cloudFolderCheck(localDir, DEFAULT_CI, env.cloudFolders);
+  if (inCloud) throw new ValidationError(inCloud);
   return env.store.withLock(input.name, async () => {
     const existing = (await env.store.list()).map((f) => f.pair);
     checkOverlap(existing, {
@@ -225,7 +235,15 @@ async function resolveRemoteRoot(
 }
 
 export async function listPairs(env: SyncEnv): Promise<PairSummary[]> {
-  return (await env.store.list()).map(summarize);
+  const folders = await env.cloudFolders();
+  const out: PairSummary[] = [];
+  for (const file of await env.store.list()) {
+    const summary = summarize(file);
+    const { localDir, caseInsensitive } = file.pair;
+    const warning = await cloudFolderCheck(localDir, caseInsensitive, async () => folders);
+    out.push(warning ? { ...summary, warning } : summary);
+  }
+  return out;
 }
 
 export async function removePair(
@@ -262,6 +280,8 @@ export async function repairMarker(
     const info = await stat(pair.localDir).catch(() => null);
     if (!info?.isDirectory())
       throw new ValidationError(`${pair.localDir} is not an available folder`);
+    const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
+    if (inCloud) throw new ValidationError(inCloud);
     if (!(await confirm(pair))) {
       return { repaired: false, localDir: pair.localDir, caseInsensitive: pair.caseInsensitive };
     }
@@ -275,6 +295,9 @@ export async function repairMarker(
 /** Spec §5 step 2: any failure aborts the whole run. */
 export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
   const hint = `run: marvin-drive sync repair-marker ${pair.name}`;
+  // Spec §6: a pair inside a cloud desktop folder is never synced (it is left untouched).
+  const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
+  if (inCloud) throw new SyncRootError(inCloud);
   const info = await stat(pair.localDir).catch(() => null);
   if (!info?.isDirectory()) {
     throw new SyncRootError(`${pair.localDir} is not available (unmounted, moved or deleted?)`);

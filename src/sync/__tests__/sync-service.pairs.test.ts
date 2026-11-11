@@ -1,9 +1,11 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ValidationError } from '../../errors.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
+import type { CloudFolder } from '../cloud-folders.js';
+import { SyncRootError } from '../errors.js';
 import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
 import { record, refuseTrash } from './fixtures.js';
@@ -449,5 +451,57 @@ describe('Microsoft pairs (OneDrive sync spec §4.1, §4.4)', () => {
       ms.createPair({ name: 'docs', localDir: local, remoteFolderId: 'nope', account: 'ms' }),
     ).rejects.toThrow('OneDrive folder nope not found on OneDrive');
     expect(await readdir(local)).toEqual([]);
+  });
+});
+
+describe('cloud desktop folder guard (OneDrive sync spec §6)', () => {
+  const withCloud = (folders: () => Promise<CloudFolder[]>): SyncService =>
+    new SyncService({
+      runner: createRunner(mem.drive),
+      audit,
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      trash: refuseTrash,
+      clock: () => new Date('2026-11-03T12:00:00.000Z'),
+      cloudFolders: folders,
+    });
+  const message = (dir: string, client: string): string =>
+    `${dir} is synced by the ${client} desktop app; pick a folder outside it so the two do not sync the same files`;
+
+  it('refuses a localDir inside a OneDrive folder; nothing is written', async () => {
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [{ path: path.dirname(real), client: 'OneDrive' }]);
+    await expect(
+      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
+    ).rejects.toThrow(new ValidationError(message(real, 'OneDrive')));
+    expect(await readdir(local)).toEqual([]);
+    expect(await store.exists('docs')).toBe(false);
+  });
+
+  it('refuses a localDir that contains a Google Drive folder', async () => {
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [
+      { path: path.join(real, 'My Drive'), client: 'Google Drive' },
+    ]);
+    await expect(
+      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
+    ).rejects.toThrow(message(real, 'Google Drive'));
+  });
+
+  it('an existing pair inside one: listed with a warning; run and repair-marker refuse', async () => {
+    await createDocs();
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [{ path: real, client: 'OneDrive' }]);
+    expect(await guarded.listPairs()).toEqual([
+      expect.objectContaining({ name: 'docs', warning: message(real, 'OneDrive') }),
+    ]);
+    expect((await sync.listPairs())[0]).not.toHaveProperty('warning');
+    await expect(guarded.run({ name: 'docs' })).rejects.toThrow(
+      new SyncRootError(message(real, 'OneDrive')),
+    );
+    await expect(guarded.repairMarker('docs', async () => true)).rejects.toThrow(
+      message(real, 'OneDrive'),
+    );
   });
 });

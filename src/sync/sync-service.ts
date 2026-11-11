@@ -8,6 +8,7 @@ import {
   storeFeed,
   type FeedRead,
 } from './deletion-evidence.js';
+import { findCloudFolders, type CloudFolder } from './cloud-folders.js';
 import { Executor } from './executor.js';
 import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
 import {
@@ -70,6 +71,8 @@ export interface SyncServiceDeps extends OperationDeps {
   openOneDrive?: (accountRef: string | undefined) => Promise<SyncRemote | null>;
   /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
   digesters?: DigesterFactory;
+  /** Cloud desktop client folders (default: detected on this machine, spec §6). */
+  cloudFolders?: () => Promise<CloudFolder[]>;
 }
 
 export interface RunInput {
@@ -112,6 +115,7 @@ export class SyncService {
       openRemote: async (ref, prefs): Promise<SyncRemote> =>
         (await deps.openOneDrive?.(ref)) ?? GoogleSyncRemote.open(this.ops, ref, prefs),
       digesters: deps.digesters ?? defaultDigesters,
+      cloudFolders: deps.cloudFolders ?? ((): Promise<CloudFolder[]> => findCloudFolders()),
     };
   }
 

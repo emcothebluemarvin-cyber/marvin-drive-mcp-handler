@@ -29,7 +29,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_create_pair',
     {
       description:
-        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. Next step: sync_scan.',
+        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. A localDir inside (or containing) a OneDrive or Google Drive desktop app folder is refused. Next step: sync_scan.',
       inputSchema: {
         name,
         localDir: z
@@ -68,7 +68,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_list_pairs',
     {
       description:
-        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run.',
+        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run. A pair whose folder is inside (or contains) a OneDrive or Google Drive desktop app folder has a warning and cannot be synced; remove it and pick a folder outside.',
       inputSchema: {},
     },
     async () => respond(log, () => sync.listPairs()),
