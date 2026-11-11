@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NotFoundError, ReauthRequiredError } from '../../errors.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { childrenQuery, scanRemote } from '../remote-scanner.js';
+import { childrenQuery, exportKey, scanRemote } from '../remote-scanner.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder, treeLister } from './drive-tree.js';
 
@@ -11,6 +11,14 @@ const NFD = 'şartname.pdf'.normalize('NFD');
 describe('childrenQuery', () => {
   it('escapes the folder id', () => {
     expect(childrenQuery("a'b")).toBe("'a\\'b' in parents and trashed = false");
+  });
+});
+
+describe('exportKey', () => {
+  it('adds the extension unless present, NFC, under the parent key', () => {
+    expect(exportKey('', 'Plan', 'docx')).toBe('Plan.docx');
+    expect(exportKey('a/b', 'Report.DOCX', 'docx')).toBe('a/b/Report.DOCX');
+    expect(exportKey('', 'şartname'.normalize('NFD'), 'docx')).toBe('şartname.docx');
   });
 });
 

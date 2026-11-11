@@ -3,7 +3,7 @@ import { AppError, NotFoundError, PermissionDeniedError } from '../errors.js';
 import { GOOGLE_MIME } from '../files/export-formats.js';
 import { isAbortError } from './errors.js';
 import { baseName, isIgnoredName, isRepresentable } from './paths.js';
-import { classifyRemote } from './remote-kinds.js';
+import { classifyRemote } from './remote/google-remote.js';
 import { toRemoteEntry } from './remote-scanner.js';
 import {
   DEFAULT_GOOGLE_EXPORT,

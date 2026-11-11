@@ -17,7 +17,7 @@ import {
   writeMarker,
   type PairStore,
 } from './pair-store.js';
-import { validateGoogleExport } from './remote-kinds.js';
+import { validateGoogleExport } from './remote/google-remote.js';
 import {
   PAIR_NAME,
   SYNC_FILE_FIELDS,

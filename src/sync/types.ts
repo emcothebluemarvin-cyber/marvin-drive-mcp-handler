@@ -1,4 +1,5 @@
 import type { ExportFormat } from '../files/export-formats.js';
+import type { RemoteUnsupported } from './remote/sync-remote.js';
 
 /** Pair names: lower-case letters, digits and dashes (spec §3). */
 export const PAIR_NAME = /^[a-z0-9-]{1,40}$/;
@@ -121,8 +122,7 @@ export interface RemoteEntry {
   native: NativeInfo | null;
 }
 
-export type RemoteIgnoreReason =
-  'native-unsupported' | 'shortcut' | 'unrepresentable' | 'ignored-name';
+export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';
 
 export interface RemoteIgnored {
   id: string;

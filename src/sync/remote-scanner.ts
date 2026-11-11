@@ -2,8 +2,9 @@ import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
 import { GOOGLE_MIME } from '../files/export-formats.js';
 import { escapeQueryValue } from '../files/query.js';
 import { isAbortError } from './errors.js';
+import { ensureExtension } from '../files/filename.js';
 import { baseName, foldKey, isIgnoredName, isRepresentable } from './paths.js';
-import { classifyRemote, exportKey, type RemoteKind } from './remote-kinds.js';
+import { classifyRemote, type RemoteKind } from './remote/google-remote.js';
 import {
   DEFAULT_GOOGLE_EXPORT,
   SYNC_FILE_FIELDS,
@@ -23,6 +24,12 @@ export type FolderLister = (
 
 export function childrenQuery(folderId: string): string {
   return `'${escapeQueryValue(folderId)}' in parents and trashed = false`;
+}
+
+/** Local key of a native file's export: Drive name + extension unless present (NFC). */
+export function exportKey(parentKey: string, remoteName: string, extension: string): string {
+  const name = ensureExtension(remoteName.normalize('NFC'), extension);
+  return parentKey === '' ? name : `${parentKey}/${name}`;
 }
 
 function joinKey(parent: string, name: string): string {
@@ -78,7 +85,7 @@ async function listAll(list: FolderLister, folderId: string): Promise<DriveFile[
 /**
  * Breadth-first walk of the pair's Drive folder (spec §4 remote-scanner). Duplicate
  * folder names and failed listings become unknown subtrees. Google-native files are
- * classified by remote-kinds and keyed by their export name; shortcuts, natives that
+ * classified by the Google remote and keyed by their export name; shortcuts, natives that
  * cannot be exported, unrepresentable and dot/part names are ignored and reported.
  */
 export async function scanRemote(
