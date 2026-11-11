@@ -95,6 +95,19 @@ describe('placeExclusive', () => {
     expect(await leftovers()).toEqual([]);
   });
 
+  it('a digester that cannot be created leaves no temp file behind', async () => {
+    const digesters = (): never => {
+      throw new Error('no quickXor here');
+    };
+    await expect(
+      placeExclusive(dir, () => 'a.pdf', source('hello'), {
+        expected: { kind: 'quickXor', value: 'QX' },
+        digesters,
+      }),
+    ).rejects.toThrow('no quickXor here');
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   it('falls back to exists-check + rename where hard links are unsupported', async () => {
     const noLink = async (): Promise<void> => {
       throw Object.assign(new Error('nope'), { code: 'ENOTSUP' });

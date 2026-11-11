@@ -59,14 +59,15 @@ async function writeTemp(
   what: string,
   check: DownloadCheck,
 ): Promise<{ tmp: string; md5: string; size: number }> {
-  const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
-  const handle = await open(tmp, 'wx', 0o644);
+  // Digesters first: one that throws must not leave an open handle or a temp file.
   const hash = createHash('md5');
   const expected = check.expected ?? null;
   const other =
     expected !== null && expected.kind !== 'md5'
       ? (check.digesters ?? defaultDigesters)(expected.kind)
       : null;
+  const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
+  const handle = await open(tmp, 'wx', 0o644);
   let size = 0;
   try {
     for await (const chunk of source) {
