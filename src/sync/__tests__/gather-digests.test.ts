@@ -69,9 +69,8 @@ describe('gatherInput on a non-md5 remote (spec §3.1 stat-unchanged files)', ()
       log: silentLogger(),
       clock: () => new Date('2026-11-03T12:00:00.000Z'),
       store: new PairStore({ dir: path.join(dir, '.store'), logger: silentLogger() }),
-      remoteFor: () => remote,
+      remoteFor: async () => remote,
       openRemote: async () => remote,
-      assertSupportedAccount: async () => {},
       digesters: stubDigester,
     };
     const plain = await gatherInput(env, file);

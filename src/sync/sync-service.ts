@@ -56,8 +56,11 @@ export interface SyncServiceDeps extends OperationDeps {
   /** Moves local files to the OS trash (the app passes `createLocalTrash()`; tests pass a fake, never the real trash). */
   trash: LocalTrash;
   clock?: () => Date;
-  /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
-  assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
+  /**
+   * Opens the OneDrive remote of a Microsoft account, or null for any other account (the
+   * app wires it; without it every pair is a Google pair).
+   */
+  openOneDrive?: (accountRef: string | undefined) => Promise<SyncRemote | null>;
   /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
   digesters?: DigesterFactory;
 }
@@ -96,11 +99,11 @@ export class SyncService {
       log: this.log,
       clock: this.clock,
       store: deps.store,
-      remoteFor: (pair): SyncRemote =>
+      remoteFor: async (pair): Promise<SyncRemote> =>
+        (await deps.openOneDrive?.(pair.account)) ??
         new GoogleSyncRemote(this.ops, pair.account, pair.googleExport),
-      openRemote: (ref, prefs): Promise<SyncRemote> => GoogleSyncRemote.open(this.ops, ref, prefs),
-      assertSupportedAccount:
-        deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
+      openRemote: async (ref, prefs): Promise<SyncRemote> =>
+        (await deps.openOneDrive?.(ref)) ?? GoogleSyncRemote.open(this.ops, ref, prefs),
       digesters: deps.digesters ?? defaultDigesters,
     };
   }
@@ -208,7 +211,7 @@ export class SyncService {
       await this.removeStaleParts(file.pair, local);
       const executor = new Executor(
         {
-          remote: this.env.remoteFor(file.pair),
+          remote: await this.env.remoteFor(file.pair),
           digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,
@@ -286,7 +289,7 @@ export class SyncService {
       }
       const done = await applyRelease(
         {
-          remote: this.env.remoteFor(file.pair),
+          remote: await this.env.remoteFor(file.pair),
           digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,

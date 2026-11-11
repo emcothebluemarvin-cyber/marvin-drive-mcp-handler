@@ -75,8 +75,8 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
 }
 
 /** Breadth-first scan of the pair's remote folder (no local work). */
-export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
-  return scanRemote(pair.remoteFolderId, env.remoteFor(pair));
+export async function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
+  return scanRemote(pair.remoteFolderId, await env.remoteFor(pair));
 }
 
 export async function scanBoth(
@@ -102,7 +102,7 @@ export async function gatherInput(
     pair.localDir,
     onDiskProbeKeys({ pair, records, local, remote }),
   );
-  const syncRemote = env.remoteFor(pair);
+  const syncRemote = await env.remoteFor(pair);
   const base = {
     pair,
     records,
