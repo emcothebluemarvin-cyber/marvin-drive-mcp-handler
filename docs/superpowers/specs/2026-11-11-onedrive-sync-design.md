@@ -268,8 +268,8 @@ leads to `trashed`.
 - **Pair creation** (Microsoft): `remoteCursor = feed.start()` with `?token=latest`, so nothing is
   enumerated. If that call fails, `sync_create_pair` fails with the Graph error and creates
   nothing (no marker, no pair file). The user simply retries.
-- **Every scan** (`sync_scan`, dry run, apply) reads the feed from the stored cursor. A read only
-  plans; it never writes the pair file. Evidence for planning:
+- **Every scan** (`sync_scan`, dry run, apply) reads the feed from the stored cursor. Reading never
+  writes; persisting follows the rule below. Evidence for planning:
   `E = (remoteDeletedIds ∪ deletedIds) − ids seen present in this scan or probe`. A record also
   counts as evidenced when its `remoteParentId` is in `E`, because the children of a deleted
   folder may not be listed one by one.
@@ -465,7 +465,7 @@ The README gets:
 - Rule tests for §4.1:
   - 404 with evidence → B10/B12
   - 404 without evidence → B14, nothing trashed
-  - a dry run does not move the cursor
+  - a dry run moves the cursor and carries the evidence forward; its apply still sees it
   - evidence survives an apply that skipped the record
   - an expired cursor warns and does not apply deletions
   - moved-out stays moved-out
