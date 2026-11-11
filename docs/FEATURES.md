@@ -64,8 +64,22 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ GraphClient: token only to graph.microsoft.com, retry rules, resumable upload sessions, copy monitor
 - ✅ `drive_upload` name conflicts ask Overwrite / Cancel through MCP elicitation; rename, move and copy conflicts are errors
 - ✅ Microsoft accounts are rejected on the Google-only tools (content, sync, watch)
-- ⬜ Live E2E (`MARVIN_E2E_MS_PERSONAL`, `MARVIN_E2E_MS_WORK`): written, not run live yet. Personal: not live-tested. Work/school: not live-tested
-- ⬜ Overwrite / Cancel dialog answered after more than 60 s in Claude Code: manual check, not done yet
+- ✅ Live E2E (`MARVIN_E2E_MS_PERSONAL`, `MARVIN_E2E_MS_WORK`), 2026-11-11: personal passed on two personal accounts. Work/school: not live-tested (no work account signed in yet)
+- ✅ Overwrite / Cancel dialog in Claude Code, 2026-11-11: Overwrite answered after about 5 min succeeded with the new content; Cancel returned `cancelled: true`, reason `user`, file unchanged
+- Search: new items on personal OneDrive stayed out of the search index for over 30 minutes; the E2E checks search with an item that existed before the run
+
+Spec §10 results:
+
+| §10 point | Personal | Work |
+|---|---|---|
+| Entra accepts any port for a registered `http://localhost` | confirmed | not live-tested |
+| `PATCH` rename and move return 409 on a name conflict | not live-tested (the §5.1 preflight stops first) | not live-tested |
+| `copy` without a conflict parameter fails on a name conflict | confirmed | not live-tested |
+| `PUT` of an empty file honours `conflictBehavior=fail` | not live-tested (needs a hand-made race) | not live-tested |
+| `If-Match` is honoured on `createUploadSession` and on `PUT items/{id}/content` | confirmed | not live-tested |
+| `@odata.nextLink` has one of the two path shapes of §7.1 | confirmed | not live-tested |
+| A work account in another tenant can consent to an unverified app | n/a | not live-tested |
+| `elicitInput` works on the protocol revision Claude Code negotiates | confirmed | n/a (same client) |
 
 ## Later
 - ⬜ OneDrive: sync, change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
