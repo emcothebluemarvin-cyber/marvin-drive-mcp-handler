@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { AuditSink } from '../audit/audit-log.js';
 import type { OperationRunner } from '../core/operation.js';
 import type { DriveFile } from '../drive/drive-adapter.js';
 import { NotFoundError, ValidationError } from '../errors.js';
@@ -18,6 +19,7 @@ import {
   type PairStore,
 } from './pair-store.js';
 import { validateGoogleExport } from './remote/google-remote.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import {
   PAIR_NAME,
   SYNC_FILE_FIELDS,
@@ -29,9 +31,14 @@ import {
 /** What the split service modules share (one per SyncService). */
 export interface SyncEnv {
   ops: OperationRunner;
+  audit: AuditSink;
   log: Logger;
   clock: () => Date;
   store: PairStore;
+  /** The remote of an existing pair (its account alias and export settings). */
+  remoteFor: (pair: Pair) => SyncRemote;
+  /** The remote for an account reference (alias, email or default) before a pair exists. */
+  openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
   /** Throws when the account cannot be synced, before anything touches the user's folder. */
   assertSupportedAccount: (ref: string | undefined) => Promise<void>;
 }

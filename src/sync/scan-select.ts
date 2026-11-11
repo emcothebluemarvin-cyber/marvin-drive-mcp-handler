@@ -13,7 +13,7 @@ import {
   validateRelPath,
 } from './paths.js';
 import { probeRecords } from './remote-probe.js';
-import { SYNC_LIST_FIELDS, SYNC_PAGE_SIZE, childrenQuery, scanRemote } from './remote-scanner.js';
+import { scanRemote } from './remote-scanner.js';
 import { hashTargets, onDiskProbeKeys, type PlanInput } from './resolve.js';
 import type { LocalScan, Pair, PairFile, RemoteScan } from './types.js';
 
@@ -74,21 +74,9 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
   }
 }
 
-/** Breadth-first scan of the pair's Drive folder (no local work). */
+/** Breadth-first scan of the pair's remote folder (no local work). */
 export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
-  return scanRemote(
-    pair.remoteFolderId,
-    (folderId, pageToken) =>
-      env.ops.exec(pair.account, 'idempotent', folderId, (ctx) =>
-        ctx.drive.listFiles({
-          q: childrenQuery(folderId),
-          pageSize: SYNC_PAGE_SIZE,
-          ...(pageToken ? { pageToken } : {}),
-          fields: SYNC_LIST_FIELDS,
-        }),
-      ),
-    pair.googleExport,
-  );
+  return scanRemote(pair.remoteFolderId, env.remoteFor(pair));
 }
 
 export async function scanBoth(

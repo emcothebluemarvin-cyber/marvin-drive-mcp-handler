@@ -31,7 +31,7 @@ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-ex
 import { md5File } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
-import { SYNC_LIST_FIELDS } from './remote-scanner.js';
+import { SYNC_LIST_FIELDS } from './remote/google-remote.js';
 import {
   downloadReplace,
   moveLocal,

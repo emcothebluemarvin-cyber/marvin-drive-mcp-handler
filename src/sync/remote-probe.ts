@@ -3,7 +3,7 @@ import { AppError, NotFoundError, PermissionDeniedError } from '../errors.js';
 import { GOOGLE_MIME } from '../files/export-formats.js';
 import { isAbortError } from './errors.js';
 import { baseName, isIgnoredName, isRepresentable } from './paths.js';
-import { classifyRemote } from './remote/google-remote.js';
+import { classifyRemote, toRemoteItem } from './remote/google-remote.js';
 import { toRemoteEntry } from './remote-scanner.js';
 import {
   DEFAULT_GOOGLE_EXPORT,
@@ -59,7 +59,7 @@ export async function probeRecord(
     const kind = classifyRemote(file, prefs);
     if (kind.kind === 'unsupported')
       return unknown('is a Google file type that cannot be exported');
-    const entry = toRemoteEntry(file, parentKey, parent, [parent], kind);
+    const entry = toRemoteEntry(toRemoteItem(file, prefs), parentKey, parent, [parent]);
     if (!isRepresentable(baseName(entry.key))) {
       return unknown('renamed in Drive to a name that cannot be synced');
     }

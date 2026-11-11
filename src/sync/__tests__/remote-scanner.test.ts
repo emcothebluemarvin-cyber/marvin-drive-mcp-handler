@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { NotFoundError, ReauthRequiredError } from '../../errors.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { childrenQuery, exportKey, scanRemote } from '../remote-scanner.js';
+import { childrenQuery } from '../remote/google-remote.js';
+import { exportKey, scanRemote } from '../remote-scanner.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder, treeLister } from './drive-tree.js';
 
@@ -90,13 +91,20 @@ describe('scanRemote', () => {
   it('keys Google-native files by their export name; unsupported types are ignored', async () => {
     const scan = await scanRemote(
       ROOT,
-      treeLister([
-        { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
-        { id: 's', name: 'Budget', mimeType: GOOGLE_MIME.spreadsheet, parents: [ROOT] },
-        { id: 'f', name: 'Survey', mimeType: 'application/vnd.google-apps.form', parents: [ROOT] },
-        { id: 'l', name: 'x'.repeat(252), mimeType: GOOGLE_MIME.document, parents: [ROOT] },
-      ]),
-      { ...DEFAULT_GOOGLE_EXPORT, spreadsheet: 'csv' },
+      treeLister(
+        [
+          { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+          { id: 's', name: 'Budget', mimeType: GOOGLE_MIME.spreadsheet, parents: [ROOT] },
+          {
+            id: 'f',
+            name: 'Survey',
+            mimeType: 'application/vnd.google-apps.form',
+            parents: [ROOT],
+          },
+          { id: 'l', name: 'x'.repeat(252), mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+        ],
+        { prefs: { ...DEFAULT_GOOGLE_EXPORT, spreadsheet: 'csv' } },
+      ),
     );
     expect(
       scan.entries.map((e) => [e.id, e.key, e.name, e.md5, e.size, e.native?.exportFormat]),

@@ -14,6 +14,8 @@ import {
   type SyncEnv,
 } from './pair-admin.js';
 import type { PairStore } from './pair-store.js';
+import { GoogleSyncRemote } from './remote/google-remote.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import { absInside } from './paths.js';
 import { plan as makePlan } from './planner.js';
 import { buildReport, type ReportOptions } from './report.js';
@@ -88,9 +90,13 @@ export class SyncService {
     this.clock = deps.clock ?? ((): Date => new Date());
     this.env = {
       ops: this.ops,
+      audit: deps.audit,
       log: this.log,
       clock: this.clock,
       store: deps.store,
+      remoteFor: (pair): SyncRemote =>
+        new GoogleSyncRemote(this.ops, pair.account, pair.googleExport),
+      openRemote: (ref, prefs): Promise<SyncRemote> => GoogleSyncRemote.open(this.ops, ref, prefs),
       assertSupportedAccount:
         deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
     };
