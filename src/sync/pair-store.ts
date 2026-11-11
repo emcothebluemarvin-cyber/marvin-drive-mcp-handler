@@ -74,9 +74,13 @@ const pairFileV1Schema = z.object({
 });
 
 /** Reads a stored pair file; version 1 is migrated in memory and saved as version 2. */
-function parsePairFile(json: unknown): ReturnType<typeof pairFileSchema.safeParse> {
+function parsePairFile(
+  json: unknown,
+): { success: true; data: PairFile } | { success: false; error: z.ZodError } {
+  if ((json as { version?: unknown } | null)?.version !== 1) return pairFileSchema.safeParse(json);
+  // A version-1 file is reported against the version-1 schema, not as a version mismatch.
   const v1 = pairFileV1Schema.safeParse(json);
-  if (!v1.success) return pairFileSchema.safeParse(json);
+  if (!v1.success) return v1;
   return pairFileSchema.safeParse({
     ...v1.data,
     version: 2,

@@ -91,6 +91,20 @@ describe('PairStore', () => {
     });
   });
 
+  it('reports an invalid version-1 file against the version-1 schema', async () => {
+    const file = makePairFile({}, [record('r1', 'a.pdf')]);
+    const v1 = {
+      ...file,
+      version: 1,
+      records: file.records.map(({ remoteHash: _hash, ...r }) => ({ ...r, remoteMd5: 42 })),
+    };
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
+    const load = store().load('docs');
+    await expect(load).rejects.toThrow('remoteMd5');
+    await expect(load).rejects.not.toThrow('version');
+  });
+
   it('refuses a pair file from a newer version with an update hint', async () => {
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...makePairFile(), version: 3 }));
