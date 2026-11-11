@@ -1,6 +1,7 @@
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { ValidationError } from '../errors.js';
+import { md5Of } from './content-compare.js';
 import { foldKey } from './paths.js';
+import type { RemoteItem } from './remote/sync-remote.js';
 import type { StatExpect } from './transfer.js';
 import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
 
@@ -34,14 +35,15 @@ export function fromEntry(e: RemoteEntry): RemoteFields {
   };
 }
 
-export function fromDrive(f: DriveFile, fallbackParent: string): RemoteFields {
+/** Record fields from an upload's result; `fallbackParent` when the remote names none. */
+export function fromRemote(item: RemoteItem, fallbackParent: string): RemoteFields {
   return {
-    id: f.id ?? '',
-    name: f.name ?? '',
-    parentId: f.parents?.[0] ?? fallbackParent,
-    md5: f.md5Checksum ?? null,
-    size: f.size ? Number(f.size) : null,
-    modifiedTime: f.modifiedTime ?? '',
+    id: item.id,
+    name: item.name,
+    parentId: item.parentId ?? fallbackParent,
+    md5: md5Of(item),
+    size: item.size,
+    modifiedTime: item.modifiedTime,
     // Uploads are binary files.
     native: null,
   };

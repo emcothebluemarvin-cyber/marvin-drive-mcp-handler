@@ -4,18 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createFakeDrive } from '../../files/__tests__/fakes.js';
 import { ChecksumMismatchError, CollisionError, TargetChangedError } from '../errors.js';
 import {
   downloadReplace,
   moveLocal,
   placeExclusive,
   syncDir,
-  updateContent,
-  uploadNew,
   type StatExpect,
 } from '../transfer.js';
-import { SYNC_FILE_FIELDS } from '../types.js';
 
 const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
 const source = (s: string) => async (): Promise<Readable> => Readable.from([Buffer.from(s)]);
@@ -168,33 +164,6 @@ describe('moveLocal', () => {
       }),
     ).rejects.toBeInstanceOf(TargetChangedError);
     expect((await readdir(dir)).sort()).toEqual(['a.pdf', 'b.pdf']);
-  });
-});
-
-describe('Drive transfers', () => {
-  it('uploadNew creates the file with media and sync fields', async () => {
-    const drive = createFakeDrive();
-    drive.createFile.mockResolvedValueOnce({ id: 'n1' });
-    const abs = path.join(dir, 'a.pdf');
-    await writeFile(abs, 'x');
-    await expect(uploadNew(drive, { abs, name: 'a.pdf', parentId: 'P' })).resolves.toEqual({
-      id: 'n1',
-    });
-    const call = drive.createFile.mock.calls[0]?.[0];
-    expect(call?.requestBody).toEqual({ name: 'a.pdf', parents: ['P'] });
-    expect(call?.media?.mimeType).toBe('application/pdf');
-    expect(call?.fields).toBe(SYNC_FILE_FIELDS);
-  });
-
-  it('updateContent sends new media for the same fileId', async () => {
-    const drive = createFakeDrive();
-    drive.updateFile.mockResolvedValueOnce({ id: 'r1' });
-    const abs = path.join(dir, 'a.txt');
-    await writeFile(abs, 'x');
-    await updateContent(drive, { fileId: 'r1', abs });
-    const call = drive.updateFile.mock.calls[0]?.[0];
-    expect(call).toMatchObject({ fileId: 'r1', fields: SYNC_FILE_FIELDS });
-    expect(call?.media?.mimeType).toBe('text/plain');
   });
 });
 

@@ -1,14 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { link as fsLink, lstat, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import type { DriveAdapter, DriveFile } from '../drive/drive-adapter.js';
 import { hasErrorCode } from '../errors.js';
-import { uploadMimeType } from '../files/upload-mime.js';
 import { ChecksumMismatchError, CollisionError, TargetChangedError } from './errors.js';
 import { PART_SUFFIX } from './paths.js';
-import { SYNC_FILE_FIELDS } from './types.js';
 import { renameReplacing } from '../files/rename-replacing.js';
 
 export type LinkFn = (existingPath: string, newPath: string) => Promise<void>;
@@ -217,39 +213,4 @@ export async function moveLocal(
     }
   }
   await unlink(from);
-}
-
-export async function uploadNew(
-  drive: DriveAdapter,
-  input: { abs: string; name: string; parentId: string },
-): Promise<DriveFile> {
-  const body = createReadStream(input.abs);
-  try {
-    return await drive.createFile({
-      requestBody: { name: input.name, parents: [input.parentId] },
-      media: { mimeType: uploadMimeType(input.abs), body },
-      fields: SYNC_FILE_FIELDS,
-    });
-  } catch (err) {
-    body.destroy();
-    throw err;
-  }
-}
-
-/** New content for the same fileId (Drive keeps a revision). */
-export async function updateContent(
-  drive: DriveAdapter,
-  input: { fileId: string; abs: string },
-): Promise<DriveFile> {
-  const body = createReadStream(input.abs);
-  try {
-    return await drive.updateFile({
-      fileId: input.fileId,
-      media: { mimeType: uploadMimeType(input.abs), body },
-      fields: SYNC_FILE_FIELDS,
-    });
-  } catch (err) {
-    body.destroy();
-    throw err;
-  }
 }

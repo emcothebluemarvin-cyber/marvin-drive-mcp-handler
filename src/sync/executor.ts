@@ -2,11 +2,9 @@ import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
-import { escapeQueryValue } from '../files/query.js';
 import type { Logger } from '../logger.js';
-import { remoteUnchangedSince } from './content-compare.js';
+import { md5Of, remoteUnchangedSince } from './content-compare.js';
 import {
   CollisionError,
   LocalEditKeptError,
@@ -19,8 +17,8 @@ import {
   applySelection,
   conflictName,
   dropRecord,
-  fromDrive,
   fromEntry,
+  fromRemote,
   makeRecord,
   need,
   putRecord,
@@ -31,15 +29,8 @@ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-ex
 import { md5File } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
-import { SYNC_LIST_FIELDS } from './remote/google-remote.js';
 import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
-import {
-  downloadReplace,
-  moveLocal,
-  placeExclusive,
-  updateContent,
-  uploadNew,
-} from './transfer.js';
+import { downloadReplace, moveLocal, placeExclusive } from './transfer.js';
 import type { LocalTrash } from './trash.js';
 import {
   type Action,
@@ -292,18 +283,16 @@ export class Executor {
     const parentId = await this.folders.folderFor(parentKey(action.key));
     const abs = absInside(this.pair.localDir, local.name);
     const name = baseName(action.key);
-    let uploaded: DriveFile;
+    let uploaded: RemoteItem;
     try {
-      uploaded = await this.deps.ops.exec(this.pair.account, 'create', parentId, (ctx) =>
-        uploadNew(ctx.drive, { abs, name, parentId }),
-      );
+      uploaded = await this.deps.remote.uploadNew(parentId, name, abs);
     } catch (err) {
       if (isAbortError(err)) throw err;
       const adopted = await this.findDuplicateUpload(parentId, name, planned);
       if (!adopted) throw err;
       uploaded = adopted;
     }
-    const remote = fromDrive(uploaded, parentId);
+    const remote = fromRemote(uploaded, parentId);
     const warning =
       remote.md5 !== null && remote.md5 !== planned ? 'changed-during-upload' : undefined;
     await this.commit(action, () =>
@@ -322,19 +311,16 @@ export class Executor {
     parentId: string,
     name: string,
     md5: string,
-  ): Promise<DriveFile | null> {
-    const q = `'${escapeQueryValue(parentId)}' in parents and trashed = false and name = '${escapeQueryValue(name)}'`;
+  ): Promise<RemoteItem | null> {
     try {
-      const list = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
-        ctx.drive.listFiles({ q, pageSize: 100, fields: SYNC_LIST_FIELDS }),
-      );
+      const list = await this.deps.remote.findChildren(parentId, name);
       const now = this.deps.clock().getTime();
       return (
-        (list.files ?? []).find(
+        list.find(
           (f) =>
-            f.md5Checksum === md5 &&
+            md5Of(f) === md5 &&
             f.name === name &&
-            Math.abs(now - Date.parse(f.createdTime ?? '')) <= DUPLICATE_WINDOW_MS,
+            Math.abs(now - Date.parse(f.createdTime)) <= DUPLICATE_WINDOW_MS,
         ) ?? null
       );
     } catch (err) {
@@ -347,12 +333,10 @@ export class Executor {
     const local = need(action.local, 'local');
     const planned = need(action.localMd5, 'local md5');
     const remote = need(action.remote, 'remote');
-    await this.verifyRemote(remote);
+    const current = await this.verifyRemote(remote);
     const abs = absInside(this.pair.localDir, local.name);
-    const updated = await this.deps.ops.exec(this.pair.account, 'mutate', remote.id, (ctx) =>
-      updateContent(ctx.drive, { fileId: remote.id, abs }),
-    );
-    const fields = fromDrive(updated, remote.parentId);
+    const updated = await this.deps.remote.replaceContent(current, abs);
+    const fields = fromRemote(updated, remote.parentId);
     const warning =
       fields.md5 !== null && fields.md5 !== planned ? 'changed-during-upload' : undefined;
     await this.commit(action, () =>
@@ -483,11 +467,9 @@ export class Executor {
       );
       return { conflictCopy };
     }
-    await this.verifyRemote(remote);
-    const updated = await this.deps.ops.exec(this.pair.account, 'mutate', remote.id, (ctx) =>
-      updateContent(ctx.drive, { fileId: remote.id, abs }),
-    );
-    const fields = fromDrive(updated, remote.parentId);
+    const current = await this.verifyRemote(remote);
+    const updated = await this.deps.remote.replaceContent(current, abs);
+    const fields = fromRemote(updated, remote.parentId);
     await this.commit(action, () =>
       putRecord(
         this.file,
