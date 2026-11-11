@@ -43,6 +43,8 @@ export interface App {
   sheets: SheetsService;
   slides: SlidesService;
   sync: SyncService;
+  /** The OneDrive sync remote of a Microsoft account, null for others (also used by the E2E). */
+  openOneDrive: (accountRef: string | undefined) => Promise<SyncRemote | null>;
   watch: WatchService;
 }
 
@@ -115,18 +117,19 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
   const docs = new DocsService({ runner, audit });
   const sheets = new SheetsService({ runner, audit });
   const slides = new SlidesService({ runner, audit });
+  // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch keep
+  // refusing Microsoft accounts).
+  const openOneDrive = async (ref: string | undefined): Promise<SyncRemote | null> => {
+    const account = await auth.resolveAccount(ref);
+    if (!isMicrosoft(account)) return null;
+    return new OneDriveSyncRemote(graphClient(account), account.alias);
+  };
   const sync = new SyncService({
     runner,
     audit,
     store: new PairStore({ dir: paths.syncDir }),
     trash: createLocalTrash(),
-    // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch
-    // keep refusing Microsoft accounts).
-    openOneDrive: async (ref): Promise<SyncRemote | null> => {
-      const account = await auth.resolveAccount(ref);
-      if (!isMicrosoft(account)) return null;
-      return new OneDriveSyncRemote(graphClient(account), account.alias);
-    },
+    openOneDrive,
   });
   const watch = new WatchService({
     store: new WatchStore({ dir: paths.watchDir }),
@@ -137,5 +140,5 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
     }),
     intervalMs: pollIntervalMs(env),
   });
-  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, watch };
+  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, openOneDrive, watch };
 }
