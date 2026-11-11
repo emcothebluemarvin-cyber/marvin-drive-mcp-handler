@@ -8,6 +8,7 @@ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from '.
 import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
+import { providerLabel } from './remote/remote-names.js';
 import type { SyncRemote } from './remote/sync-remote.js';
 import {
   buildContext,
@@ -171,7 +172,9 @@ const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
 
 /** R must still be present-same: not trashed, content unchanged, same name and parent. */
 async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<void> {
-  const current = await deps.remote.read(planned.id);
+  const label = providerLabel(deps.remote.provider);
+  const current = await deps.remote.get(planned.id);
+  if (current === null) throw new TargetChangedError(`${planned.key} not found on ${label}`);
   if (
     current.trashed ||
     !remoteUnchangedSince(planned, current) ||
@@ -179,7 +182,7 @@ async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<vo
     (current.parentId ?? '') !== planned.parentId
   ) {
     throw new TargetChangedError(
-      `${planned.key} changed, moved or was trashed in Drive since the scan`,
+      `${planned.key} changed, moved or was trashed in ${label} since the scan`,
     );
   }
 }

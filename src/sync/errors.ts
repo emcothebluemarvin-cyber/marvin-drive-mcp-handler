@@ -2,6 +2,7 @@ import type { HashKind } from './remote/sync-remote.js';
 import {
   ApiDisabledError,
   AppError,
+  OneDriveFullError,
   QuotaExceededError,
   RateLimitError,
   ReauthRequiredError,
@@ -61,13 +62,17 @@ export class PersistenceError extends AppError {
   readonly code = 'SYNC_PERSISTENCE';
 }
 
-/** Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). */
+/**
+ * Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). Both
+ * providers raise ReauthRequiredError; OneDriveFullError is OneDrive's full storage (§5).
+ */
 export function isAbortError(err: unknown): boolean {
   return (
     err instanceof ReauthRequiredError ||
     err instanceof QuotaExceededError ||
     err instanceof ApiDisabledError ||
     err instanceof RateLimitError ||
+    err instanceof OneDriveFullError ||
     err instanceof PersistenceError
   );
 }

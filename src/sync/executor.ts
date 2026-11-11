@@ -1,7 +1,13 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
-import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
+import {
+  AppError,
+  ExportTooLargeError,
+  FileLockedError,
+  NameConflictError,
+  hasErrorCode,
+} from '../errors.js';
 import type { Logger } from '../logger.js';
 import { remoteUnchangedSince, sameContent } from './content-compare.js';
 import {
@@ -30,6 +36,7 @@ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-ex
 import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
+import { providerLabel } from './remote/remote-names.js';
 import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import { downloadReplace, moveLocal, placeExclusive, type DownloadCheck } from './transfer.js';
 import type { LocalTrash } from './trash.js';
@@ -70,6 +77,16 @@ export interface ExecutorDeps {
   trash: LocalTrash;
   /** Local digests of the remote's hash kind (default: built-in digesters). */
   digesters?: DigesterFactory;
+  /** OneDrive deletion evidence of this run (spec §4.1); empty on Google. */
+  evidence?: ReadonlySet<string>;
+}
+
+/** Outcomes that skip an action with a message instead of failing it (OneDrive sync spec §5). */
+function skipMessage(err: unknown, label: string): string | null {
+  if (err instanceof TargetChangedError) return err.message;
+  if (err instanceof NameConflictError) return `a file with this name appeared on ${label}`;
+  if (err instanceof FileLockedError) return `open in an Office app on ${label}; try again later`;
+  return null;
 }
 
 /** Executes a plan in spec §7 order, persisting the pair file after every success. */
@@ -114,8 +131,9 @@ export class Executor {
           // N5: whatever went wrong after the local edit was moved aside, name the kept copy.
           const kept = caught instanceof LocalEditKeptError ? { conflictCopy: caught.kept } : {};
           const err = caught instanceof LocalEditKeptError ? caught.original : caught;
-          if (err instanceof TargetChangedError) {
-            outcomes.push({ ...base, ...kept, status: 'skipped', message: err.message });
+          const skip = skipMessage(err, this.label);
+          if (skip !== null) {
+            outcomes.push({ ...base, ...kept, status: 'skipped', message: skip });
           } else if (err instanceof ExportTooLargeError) {
             outcomes.push({
               ...base,
@@ -235,11 +253,22 @@ export class Executor {
     return { name, md5, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
   }
 
-  /** Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7). */
+  /** "Drive" or "OneDrive", for messages. */
+  private get label(): string {
+    return providerLabel(this.deps.remote.provider);
+  }
+
+  /**
+   * Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7);
+   * an item that is gone (404/403) is skipped too (OneDrive sync spec §5).
+   */
   private async verifyRemote(planned: RemoteEntry): Promise<RemoteItem> {
-    const current = await this.deps.remote.read(planned.id);
+    const current = await this.deps.remote.get(planned.id);
+    if (current === null) {
+      throw new TargetChangedError(`${planned.key} is gone from ${this.label} since planning`);
+    }
     if (current.trashed || !remoteUnchangedSince(planned, current)) {
-      throw new TargetChangedError(`${planned.key} changed in Drive since planning`);
+      throw new TargetChangedError(`${planned.key} changed in ${this.label} since planning`);
     }
     return current;
   }
@@ -519,10 +548,19 @@ export class Executor {
       },
     );
     if (back) throw new TargetChangedError(`${action.key} exists locally again`);
-    const current = await this.deps.remote.read(remote.id);
-    if (!current.trashed) {
+    const current = await this.deps.remote.get(remote.id);
+    if (current === null) {
+      // Already gone: with deletion evidence it is deleted (drop the record); without, it
+      // may only be unreachable, so nothing is touched (OneDrive sync spec §4.1, §5).
+      const evidence = this.deps.evidence;
+      if (!evidence?.has(remote.id) && !evidence?.has(record.remoteParentId)) {
+        throw new TargetChangedError(`${action.key} is gone from ${this.label} since planning`);
+      }
+    } else if (!current.trashed) {
       if (!remoteUnchangedSince(remote, current) || (current.parentId ?? '') !== remote.parentId) {
-        throw new TargetChangedError(`${action.key} changed or moved in Drive since planning`);
+        throw new TargetChangedError(
+          `${action.key} changed or moved in ${this.label} since planning`,
+        );
       }
       await this.deps.remote.trash(current);
     }

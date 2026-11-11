@@ -242,6 +242,7 @@ export class SyncService {
           clock: this.clock,
           save: (f): Promise<void> => this.store.save(f),
           trash: this.deps.trash,
+          ...(feed ? { evidence: feed.evidence } : {}),
         },
         file,
         remote.folders,

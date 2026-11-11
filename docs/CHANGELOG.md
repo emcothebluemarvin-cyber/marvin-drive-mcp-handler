@@ -18,6 +18,7 @@
 - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
+- Sync (both providers): an action whose remote item is gone since planning is now `skipped` ("gone from Drive since planning") instead of `failed`; a name taken meanwhile (`NAME_CONFLICT`) and a file locked by Office (`FILE_LOCKED`) are skipped too. A full OneDrive (`ONEDRIVE_FULL`) stops the run like an expired session (`REAUTH_REQUIRED`, which already stopped Google runs) and Drive's full storage.
 - Sync pair files move to version 2 (content hashes with their kind; OneDrive deletion cursor and evidence). A version-1 file is read and upgraded on the first save; after that, older marvin-drive versions refuse it ("this pair was saved by a newer marvin-drive; update it"). To roll back, keep the new version or re-create the pairs.
 - Tool descriptions are provider-neutral and mark Google-only parameters. Accounts are shown with their provider in `auth list`.
 - The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).

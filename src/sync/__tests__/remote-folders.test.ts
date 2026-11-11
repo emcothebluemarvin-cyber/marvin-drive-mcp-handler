@@ -5,6 +5,7 @@ import { RemoteFolders } from '../remote-folders.js';
 import { googleRemoteOver } from './fake-remote.js';
 import { ROOT_ID, makePair } from './fixtures.js';
 import { memoryDrive } from './memory-drive.js';
+import { memoryOneDrive } from './memory-onedrive.js';
 
 function folders(caseInsensitive: boolean) {
   const mem = memoryDrive(ROOT_ID);
@@ -45,5 +46,23 @@ describe('RemoteFolders through SyncRemote', () => {
     mem.addFolder('d2', 'docs', ROOT_ID);
     await expect(made.folderFor('docs')).rejects.toThrow(ValidationError);
     await expect(made.folderFor('docs')).rejects.toThrow('Several Drive folders named "docs"');
+  });
+});
+
+describe('RemoteFolders on OneDrive', () => {
+  it('a 409 on createFolder reuses the one folder that appeared meanwhile', async () => {
+    const od = memoryOneDrive();
+    const remote = od.remote();
+    const create = remote.createFolder.bind(remote);
+    remote.createFolder = async (parentId, name) => {
+      od.addFolder(parentId, name, 'RACE'); // another client created it first
+      return create(parentId, name);
+    };
+    const made = new RemoteFolders(
+      { remote, audit: createAudit(), logger: silentLogger() },
+      makePair({ caseInsensitive: true, remoteFolderId: od.rootId }),
+      new Map([[od.rootId, '']]),
+    );
+    expect(await made.folderFor('docs')).toBe('RACE');
   });
 });

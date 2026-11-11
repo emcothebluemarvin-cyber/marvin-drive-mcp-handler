@@ -1,8 +1,9 @@
 import type { AuditSink } from '../audit/audit-log.js';
-import { ValidationError } from '../errors.js';
+import { NameConflictError, ValidationError } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { isAbortError, messageOf } from './errors.js';
 import { baseName, foldKey, parentKey } from './paths.js';
+import { providerLabel } from './remote/remote-names.js';
 import type { SyncRemote } from './remote/sync-remote.js';
 import type { Action, Pair } from './types.js';
 
@@ -54,20 +55,36 @@ export class RemoteFolders {
     return id;
   }
 
-  /** Reuses exactly one non-trashed same-name folder; several → refuse (spec §4). */
-  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
+  /** The one existing folder named `name`, null for none; several → refuse (spec §4). */
+  private async existingFolder(parentId: string, name: string): Promise<string | null> {
     // findChildren already matched the fold key; a case-sensitive volume needs the NFC name.
     const folders = await this.deps.remote.findChildren(parentId, name, 'folder');
     const same = this.pair.caseInsensitive
       ? folders
       : folders.filter((f) => f.name.normalize('NFC') === name.normalize('NFC'));
-    if (same.length > 1)
+    if (same.length > 1) {
+      const label = providerLabel(this.deps.remote.provider);
       throw new ValidationError(
-        `Several Drive folders named "${name}"; resolve the duplicate first`,
+        `Several ${label} folders named "${name}"; resolve the duplicate first`,
       );
-    const existing = same[0]?.id;
+    }
+    return same[0]?.id ?? null;
+  }
+
+  /** Reuses exactly one non-trashed same-name folder, else creates it. */
+  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
+    const existing = await this.existingFolder(parentId, name);
     if (existing) return existing;
-    const created = await this.deps.remote.createFolder(parentId, name);
+    let created;
+    try {
+      created = await this.deps.remote.createFolder(parentId, name);
+    } catch (err) {
+      // OneDrive (spec §5): the name was taken meanwhile; look again, reuse exactly one.
+      if (!(err instanceof NameConflictError)) throw err;
+      const appeared = await this.existingFolder(parentId, name);
+      if (appeared) return appeared;
+      throw err;
+    }
     const id = created.id;
     if (!id) throw new ValidationError('Internal: folder id missing for sync action');
     try {
