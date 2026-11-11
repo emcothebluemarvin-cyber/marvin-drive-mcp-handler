@@ -1,10 +1,16 @@
 import { randomBytes, randomInt } from 'node:crypto';
-import { createServer, type Server, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer } from 'node:http';
 import { Auth } from 'googleapis';
 import { AppError, AuthFlowError, ValidationError } from '../errors.js';
-import { logger } from '../logger.js';
-import { CALLBACK_PAGE_HEADERS, renderCallbackPage, type CallbackPage } from './callback-page.js';
+import {
+  listen,
+  parseRedirectUrl,
+  waitForCallback,
+  waitForPaste,
+  withDeadline,
+  type Callback,
+  type ManualLogin,
+} from './loopback.js';
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 export const OAUTH_SCOPES = [DRIVE_SCOPE, 'openid', 'email'] as const;
@@ -45,161 +51,12 @@ export interface LoginFlowOptions {
    * The loopback callback keeps working too (SSH tunnel); whichever arrives first wins.
    * `readLine` resolves null when input is closed and must stop when `signal` aborts.
    */
-  manual?: { readLine: (prompt: string, signal: AbortSignal) => Promise<string | null> };
+  manual?: ManualLogin;
 }
 
 export interface LoginResult {
   email: string;
   refreshToken: string;
-}
-
-/**
- * Writes a callback page. Resolves once it is flushed — or as soon as the browser is gone
- * (closed tab): Node never calls the `end` callback on a destroyed socket, so 'close' also settles.
- * Never throws and never writes twice.
- */
-function sendPage(res: ServerResponse, status: number, page: CallbackPage): Promise<void> {
-  return new Promise((resolve) => {
-    if (res.destroyed || res.headersSent) {
-      resolve();
-      return;
-    }
-    res.once('close', () => resolve());
-    try {
-      res.writeHead(status, CALLBACK_PAGE_HEADERS).end(renderCallbackPage(page), () => resolve());
-    } catch (err) {
-      logger.warn('Could not send the login result page', { error: err });
-      resolve();
-    }
-  });
-}
-
-/** Rejects with AuthFlowError if `work` does not settle within `ms`. */
-async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new AuthFlowError(
-          `Login did not finish within ${Math.round(ms / 1000)} s while contacting Google. Check your connection and try again.`,
-        ),
-      );
-    }, ms);
-    timer.unref();
-  });
-  try {
-    return await Promise.race([work, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-interface Callback {
-  code: string;
-  /** Answers the browser request that delivered the code (held open until the login finishes). */
-  respond: (status: number, page: CallbackPage) => Promise<void>;
-}
-
-function waitForCallback(server: Server, state: string, timeoutMs: number): Promise<Callback> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new AuthFlowError(`Login timed out after ${Math.round(timeoutMs / 1000)} s`));
-    }, timeoutMs);
-    timer.unref();
-
-    let settled = false;
-    server.on('request', (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname !== '/') {
-        res.writeHead(404).end();
-        return;
-      }
-      if (settled) {
-        void sendPage(res, 200, { kind: 'finished' });
-        return;
-      }
-      const params = url.searchParams;
-      if (params.get('state') !== state) {
-        void sendPage(res, 400, { kind: 'stale' });
-        return;
-      }
-      const fail = (message: string): void => {
-        settled = true;
-        clearTimeout(timer);
-        // Reject only after the page is flushed; the caller closes all connections next.
-        void sendPage(res, 400, { kind: 'failure', message }).then(() => {
-          reject(new AuthFlowError(message));
-        });
-      };
-
-      const error = params.get('error');
-      if (error) {
-        return fail(
-          error === 'access_denied'
-            ? 'Access was denied in the browser'
-            : `Google returned an error: ${error}`,
-        );
-      }
-      const code = params.get('code');
-      if (!code) return fail('Callback did not include an authorization code');
-
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, respond: (status, page) => sendPage(res, status, page) });
-    });
-  });
-}
-
-const PASTE_PROMPT = 'Paste the full URL from the address bar: ';
-
-/** Parses a pasted redirect URL (or just its query string). */
-function parsePasted(input: string): URLSearchParams | null {
-  const text = input.trim();
-  if (!text) return null;
-  try {
-    const url = text.includes('://')
-      ? new URL(text)
-      : new URL(`http://127.0.0.1/?${text.replace(/^\?/, '')}`);
-    return url.searchParams;
-  } catch {
-    return null;
-  }
-}
-
-/** Reads pasted redirect URLs until one carries a code for this attempt. Never settles on EOF. */
-async function waitForPaste(
-  manual: NonNullable<LoginFlowOptions['manual']>,
-  state: string,
-  print: (message: string) => void,
-  signal: AbortSignal,
-): Promise<Callback> {
-  for (;;) {
-    const line = await manual.readLine(PASTE_PROMPT, signal);
-    if (line === null) return new Promise<never>(() => {}); // stdin closed: rely on the callback
-    const params = parsePasted(line);
-    if (!params || (!params.has('code') && !params.has('error'))) {
-      print('That does not look like the redirect URL (it contains "code=" and "state=").');
-      continue;
-    }
-    if (params.get('state') !== state) {
-      print('That URL belongs to a different login attempt; use the URL printed above.');
-      continue;
-    }
-    const error = params.get('error');
-    if (error) {
-      throw new AuthFlowError(
-        error === 'access_denied'
-          ? 'Access was denied in the browser'
-          : `Google returned an error: ${error}`,
-      );
-    }
-    const code = params.get('code');
-    if (!code) {
-      print('That URL has no authorization code; paste the full URL.');
-      continue;
-    }
-    return { code, respond: async (): Promise<void> => {} };
-  }
 }
 
 async function exchangeAndVerify(
@@ -227,17 +84,6 @@ async function exchangeAndVerify(
     );
   }
   return { email: payload.email.toLowerCase(), refreshToken: tokens.refresh_token };
-}
-
-async function listen(server: Server): Promise<number> {
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-  return (server.address() as AddressInfo).port;
 }
 
 /** The Google consent URL: offline access (refresh token), PKCE S256, our scopes. */
@@ -276,7 +122,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
     const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
     const timeoutMs =
       opts.timeoutMs ?? (opts.manual ? DEFAULT_MANUAL_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
-    const callbackPromise = waitForCallback(server, state, timeoutMs);
+    const callbackPromise = waitForCallback(server, state, timeoutMs, 'Google');
     callbackPromise.catch(() => undefined); // awaited below; prevents an unhandled rejection if we throw first
 
     const authUrl = buildAuthUrl(client, state, codeChallenge, opts.loginHint);
@@ -287,7 +133,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
           `Google then redirects to ${redirectUri}/?…, which usually fails to load on that device — ` +
           'that is expected. Copy the full URL from the address bar and paste it here.',
       );
-      const pasted = waitForPaste(opts.manual, state, opts.print, pasteAbort.signal);
+      const pasted = waitForPaste(opts.manual, state, opts.print, pasteAbort.signal, 'Google');
       pasted.catch(() => undefined); // awaited via the race below
       incoming = Promise.race([callbackPromise, pasted]);
     } else {
@@ -304,6 +150,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginResult>
       const result = await withDeadline(
         exchangeAndVerify(client, code, codeVerifier, opts.clientId),
         opts.finishTimeoutMs ?? DEFAULT_FINISH_TIMEOUT_MS,
+        'Google',
       );
       await opts.onVerified?.(result);
       await respond(200, { kind: 'success', email: result.email });
@@ -369,32 +216,13 @@ export async function startTwoStepLogin(
   };
 }
 
-/** The state and code of a redirect URL (or its query string); throws on anything else. */
-export function parseRedirectUrl(input: string): { state: string; code: string } {
-  const params = parsePasted(input);
-  if (!params || !params.has('state') || (!params.has('code') && !params.has('error'))) {
-    throw new ValidationError(
-      'That does not look like the redirect URL; it contains "state=" and "code=". Quote it in the shell.',
-    );
-  }
-  const error = params.get('error');
-  if (error) {
-    throw new AuthFlowError(
-      error === 'access_denied'
-        ? 'Access was denied in the browser'
-        : `Google returned an error: ${error}`,
-    );
-  }
-  return { state: params.get('state') ?? '', code: params.get('code') ?? '' };
-}
-
 /** Step 2: exchanges the code from the redirect URL with the stored PKCE verifier. */
 export async function finishTwoStepLogin(
   opts: TwoStepOptions,
   pending: { state: string; codeVerifier: string; redirectUri: string },
   redirectUrl: string,
 ): Promise<LoginResult> {
-  const { state, code } = parseRedirectUrl(redirectUrl);
+  const { state, code } = parseRedirectUrl(redirectUrl, 'Google');
   if (state !== pending.state) {
     throw new AuthFlowError('That redirect URL belongs to a different login attempt.');
   }
@@ -403,5 +231,6 @@ export async function finishTwoStepLogin(
   return withDeadline(
     exchangeAndVerify(client, code, pending.codeVerifier, opts.clientId),
     opts.finishTimeoutMs ?? DEFAULT_FINISH_TIMEOUT_MS,
+    'Google',
   );
 }

@@ -2,13 +2,20 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Auth } from 'googleapis';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { AccountRegistry } from '../../config/account-registry.js';
-import { AuthFlowError, ReauthRequiredError, ValidationError } from '../../errors.js';
+import {
+  AuthFlowError,
+  ConfigError,
+  ProviderNotSupportedError,
+  ReauthRequiredError,
+  ValidationError,
+} from '../../errors.js';
 import { createLogger } from '../../logger.js';
 import { AuthService, type AuthServiceDeps } from '../auth-service.js';
 import type { LoginResult } from '../login-flow.js';
-import { PendingLoginStore } from '../pending-login.js';
+import { PendingLoginStore, type PendingLogin } from '../pending-login.js';
+import type { ProviderAuth } from '../provider-auth.js';
 import { InMemoryTokenStore } from '../token-store.js';
 
 const CREDS = { clientId: 'cid.apps.googleusercontent.com', clientSecret: 'secret' };
@@ -151,6 +158,21 @@ describe('AuthService.removeAccount token failures', () => {
   });
 });
 
+describe('AuthService.accountFor', () => {
+  it('rejects a shared address, unlike the Google-only lookup', async () => {
+    login.mockImplementationOnce(answer(signIn('same@example.com')));
+    await service.addAccount('g');
+    await registry.add({
+      alias: 'ms',
+      email: 'same@example.com',
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+    await expect(service.accountFor('same@example.com')).rejects.toThrow(/use an alias/);
+    await expect(service.accountFor('ms')).resolves.toMatchObject({ provider: 'microsoft' });
+  });
+});
+
 describe('AuthService.authorize', () => {
   it('throws ReauthRequiredError when no token is stored', async () => {
     await registry.add({ alias: 'emco', email: 'emco@example.com' });
@@ -178,10 +200,17 @@ describe('AuthService.status', () => {
 
   it('reports token presence without network calls by default', async () => {
     await expect(service.status()).resolves.toEqual([
-      { alias: 'emco', email: 'emco@example.com', isDefault: true, status: 'ok' },
+      {
+        alias: 'emco',
+        email: 'emco@example.com',
+        provider: 'google',
+        isDefault: true,
+        status: 'ok',
+      },
       {
         alias: 'notoken',
         email: 'notoken@example.com',
+        provider: 'google',
         isDefault: false,
         status: 'reauth_required',
       },
@@ -300,5 +329,181 @@ describe('two-step login', () => {
     finish.mockResolvedValueOnce(signIn('w@example.com', 'rt-new'));
     await two.finishRelogin('work', redirect('st2'));
     expect(await tokens.get('w@example.com')).toBe('rt-new');
+  });
+});
+
+describe('AuthService token keys and email references', () => {
+  it('looks up a shared address as the Google account on Google-only surfaces', async () => {
+    login.mockImplementationOnce(answer(signIn('same@example.com', 'rt-google')));
+    await service.addAccount('g');
+    await registry.add({
+      alias: 'ms',
+      email: 'same@example.com',
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+    await expect(service.resolveAccount('same@example.com')).resolves.toMatchObject({ alias: 'g' });
+    const { refreshToken } = await service.authorize('same@example.com');
+    expect(refreshToken).toBe('rt-google');
+  });
+});
+
+describe('AuthService dispatch to the Microsoft provider', () => {
+  const REF = {
+    alias: 'ms',
+    email: 'same@example.com',
+    provider: 'microsoft',
+    accountId: 't.o',
+  } as const;
+  const LOGIN_URL = 'https://login.example/authorize';
+  let pending: PendingLoginStore;
+  let dir: string;
+  let provider: { [K in keyof ProviderAuth]: Mock<ProviderAuth[K]> };
+  let loadCredentials: Mock<AuthServiceDeps['loadCredentials']>;
+  let dispatching: AuthService;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'marvin-dispatch-'));
+    pending = new PendingLoginStore(path.join(dir, 'pending.json'));
+    loadCredentials = vi.fn(async () => CREDS);
+    const added = { ...REF, addedAt: 'now' };
+    provider = {
+      add: vi.fn(async () => added),
+      startAdd: vi.fn(async () => LOGIN_URL),
+      finishAdd: vi.fn(async () => added),
+      relogin: vi.fn(async (r) => r),
+      startRelogin: vi.fn(async () => LOGIN_URL),
+      finishRelogin: vi.fn(async (r) => r),
+      checkStatus: vi.fn(async () => 'ok' as const),
+      forget: vi.fn(async () => undefined),
+    };
+    dispatching = new AuthService({
+      registry,
+      tokens,
+      loadCredentials,
+      login,
+      twoStep: { pending, start: vi.fn(), finish: vi.fn() },
+      microsoft: provider,
+      logger: createLogger(() => {}),
+    });
+  });
+
+  it('adds without touching the Google credentials', async () => {
+    await dispatching.addAccount('Ms', 'microsoft');
+    expect(provider.add).toHaveBeenCalledWith('ms');
+    await expect(dispatching.startAddAccount('ms2', 'microsoft')).resolves.toBe(LOGIN_URL);
+    expect(loadCredentials).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it('checks the alias before dispatching', async () => {
+    await registry.add(REF);
+    await expect(dispatching.addAccount('ms', 'microsoft')).rejects.toThrow(/already used/);
+    expect(provider.add).not.toHaveBeenCalled();
+  });
+
+  it('dispatches relogin, status and removal on the record', async () => {
+    const record = await registry.add(REF);
+    await dispatching.relogin('ms');
+    expect(provider.relogin).toHaveBeenCalledWith(record);
+    await expect(dispatching.startRelogin('ms')).resolves.toBe(LOGIN_URL);
+    await expect(dispatching.status()).resolves.toEqual([
+      { alias: 'ms', email: REF.email, provider: 'microsoft', isDefault: true, status: 'ok' },
+    ]);
+    expect(provider.checkStatus).toHaveBeenCalledWith(record, false);
+    await dispatching.removeAccount('ms');
+    expect(provider.forget).toHaveBeenCalledWith(record);
+    expect((await registry.read()).accounts).toEqual([]);
+  });
+
+  it('removes a Microsoft account with a shared address without touching the Google token', async () => {
+    login.mockImplementationOnce(answer(signIn('same@example.com', 'rt-google')));
+    await dispatching.addAccount('g');
+    await registry.add(REF);
+    const revoke = vi.spyOn(Auth.OAuth2Client.prototype, 'revokeToken');
+    await expect(dispatching.removeAccount('same@example.com')).rejects.toThrow(/use an alias/);
+    await dispatching.removeAccount('ms');
+    expect(await tokens.get('same@example.com')).toBe('rt-google');
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('removes the account even when forgetting the token fails', async () => {
+    await registry.add(REF);
+    provider.forget.mockRejectedValueOnce(new Error('keychain'));
+    await dispatching.removeAccount('ms');
+    expect((await registry.read()).accounts).toEqual([]);
+  });
+
+  describe('finishing a two-step login', () => {
+    const entry = (extra: Partial<PendingLogin>): Omit<PendingLogin, 'createdAt'> => ({
+      state: 's1',
+      codeVerifier: 'v',
+      redirectUri: 'http://localhost:1',
+      command: 'add',
+      account: null,
+      provider: 'microsoft',
+      ...extra,
+    });
+    const URL_OK = 'http://localhost:1/?state=s1&code=c';
+
+    it('lets the entry decide the provider', async () => {
+      await pending.save(entry({}));
+      await dispatching.finishAddAccount(undefined, URL_OK);
+      expect(provider.finishAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 's1' }),
+        URL_OK,
+      );
+      expect(loadCredentials).not.toHaveBeenCalled();
+    });
+
+    it('rejects a provider flag that contradicts the entry', async () => {
+      await pending.save(entry({}));
+      await expect(dispatching.finishAddAccount(undefined, URL_OK, 'google')).rejects.toThrow(
+        /belongs to a microsoft login/,
+      );
+      expect(provider.finishAdd).not.toHaveBeenCalled();
+    });
+
+    it('requires the provider to match on relogin and compares accountId', async () => {
+      const record = await registry.add(REF);
+      await pending.save(entry({ command: 'login', account: 't.o' }));
+      await dispatching.finishRelogin('ms', URL_OK);
+      expect(provider.finishRelogin).toHaveBeenCalledWith(record, expect.anything(), URL_OK);
+
+      await pending.save(entry({ command: 'login', account: 't.other' }));
+      await expect(dispatching.finishRelogin('ms', URL_OK)).rejects.toThrow(
+        /same command and account/,
+      );
+
+      await pending.save(entry({ command: 'login', account: 't.o', provider: 'google' }));
+      await expect(dispatching.finishRelogin('ms', URL_OK)).rejects.toThrow(
+        /belongs to a google login/,
+      );
+    });
+
+    it('names the provider of the waiting login in a redirect error', async () => {
+      await pending.save(entry({}));
+      await expect(
+        dispatching.finishAddAccount(undefined, 'http://localhost:1/?state=s1&error=boom'),
+      ).rejects.toThrow('Microsoft returned an error: boom');
+    });
+
+    it('still names Google for a Google login', async () => {
+      await pending.save(entry({ provider: 'google' }));
+      await expect(
+        dispatching.finishAddAccount(undefined, 'http://localhost:1/?state=s1&error=boom'),
+      ).rejects.toThrow('Google returned an error: boom');
+    });
+  });
+
+  it('reports a clear error when no Microsoft provider is configured', async () => {
+    await expect(service.addAccount(undefined, 'microsoft')).rejects.toThrow(ConfigError);
+  });
+});
+
+describe('AuthService.authorize', () => {
+  it('rejects a Microsoft account', async () => {
+    await registry.add({ alias: 'ms', email: 'a@b.c', provider: 'microsoft', accountId: 't.o' });
+    await expect(service.authorize('ms')).rejects.toThrow(ProviderNotSupportedError);
   });
 });

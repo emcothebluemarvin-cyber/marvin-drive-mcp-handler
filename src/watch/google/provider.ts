@@ -1,7 +1,8 @@
 import type { AuditSink } from '../../audit/audit-log.js';
-import type { AccountRecord } from '../../config/account-registry.js';
+import { isMicrosoft, type AccountRecord } from '../../config/account-registry.js';
 import { OperationRunner } from '../../core/operation.js';
 import type { DriveRunner } from '../../drive/client-factory.js';
+import { ProviderNotSupportedError } from '../../errors.js';
 import type { RetryOptions } from '../../files/retry.js';
 import type { Logger } from '../../logger.js';
 import type { WatchAccount, WatchProvider } from '../feed.js';
@@ -27,6 +28,7 @@ export function createGoogleWatchProvider(deps: GoogleWatchDeps): WatchProvider 
   return {
     resolveAccount: async (ref): Promise<WatchAccount> => {
       const account = await deps.resolveAccount(ref);
+      if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
       return { email: account.email, alias: account.alias };
     },
     feed: (email) => new GoogleChangeFeed(ops, email),

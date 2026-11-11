@@ -1,9 +1,18 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app.js';
+import { AccountRegistry } from '../config/account-registry.js';
+import { ProviderNotSupportedError } from '../errors.js';
+import { writeMarker } from '../sync/pair-store.js';
+import { FileRouter } from '../files/file-router.js';
 import { WatchService } from '../watch/watch-service.js';
+
+vi.mock('../sync/pair-store.js', async (original) => {
+  const actual = await original<typeof import('../sync/pair-store.js')>();
+  return { ...actual, writeMarker: vi.fn(actual.writeMarker) };
+});
 
 let tmp: string;
 beforeEach(async () => {
@@ -14,6 +23,28 @@ afterEach(async () => {
 });
 
 describe('buildApp', () => {
+  it('refuses a Microsoft account in sync before writeMarker', async () => {
+    const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
+    await new AccountRegistry(app.paths.accounts).add({
+      alias: 'ms',
+      email: 'a@b.c',
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+    const localDir = path.join(tmp, 'Local');
+    await mkdir(localDir);
+    await expect(
+      app.sync.createPair({ name: 'docs', localDir, remoteFolderId: 'R', account: 'ms' }),
+    ).rejects.toThrow(ProviderNotSupportedError);
+    expect(writeMarker).not.toHaveBeenCalled();
+  });
+
+  it('routes file operations through the FileRouter', () => {
+    const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
+    expect(app.files).toBeInstanceOf(FileRouter);
+    expect(app.paths.microsoftClient).toBe(path.join(tmp, 'microsoft-client.json'));
+  });
+
   it('wires the watch service under <configDir>/watch', () => {
     const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
     expect(app.watch).toBeInstanceOf(WatchService);

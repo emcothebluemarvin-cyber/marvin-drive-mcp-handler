@@ -3,10 +3,18 @@ import {
   ApiDisabledError,
   AppError,
   ConflictError,
+  CopyStillRunningError,
   DriveApiError,
   ExportTooLargeError,
+  FileLockedError,
+  GraphApiError,
+  GraphThrottledError,
+  NameConflictError,
   NotFoundError,
+  OneDriveFullError,
+  ProviderNotSupportedError,
   ReauthRequiredError,
+  TargetChangedError,
   ValidationError,
   hasErrorCode,
 } from '../errors.js';
@@ -71,5 +79,26 @@ describe('content API errors', () => {
     expect(new DriveApiError(400, 'bad', { api: 'slides' }).message).toBe(
       'Google Slides API error (400): bad',
     );
+  });
+});
+
+describe('OneDrive errors', () => {
+  it.each([
+    [
+      new ProviderNotSupportedError('work'),
+      'PROVIDER_NOT_SUPPORTED',
+      /"work".*not available on OneDrive/,
+    ],
+    [new NameConflictError('a.txt'), 'NAME_CONFLICT', /"a\.txt" already exists.*another name/],
+    [new TargetChangedError('a.txt'), 'TARGET_CHANGED', /"a\.txt" changed.*Check the file/],
+    [new GraphThrottledError(), 'GRAPH_THROTTLED', /try again later/],
+    [new CopyStillRunningError('a.txt'), 'COPY_STILL_RUNNING', /continues on the server/],
+    [new FileLockedError('a.txt'), 'FILE_LOCKED', /locked, probably open in Office/],
+    [new OneDriveFullError('work'), 'ONEDRIVE_FULL', /OneDrive storage is full/],
+    [new GraphApiError(500), 'GRAPH_API_ERROR', /OneDrive request failed \(500\)/],
+  ])('%s has its code and message', (err, code, message) => {
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.code).toBe(code);
+    expect(err.message).toMatch(message);
   });
 });

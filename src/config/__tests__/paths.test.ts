@@ -10,6 +10,7 @@ describe('resolvePaths', () => {
     expect(p).toEqual({
       configDir: dir,
       clientSecret: path.join(dir, 'client_secret.json'),
+      microsoftClient: path.join(dir, 'microsoft-client.json'),
       accounts: path.join(dir, 'accounts.json'),
       tokens: path.join(dir, 'tokens.json'),
       pendingLogins: path.join(dir, 'pending-logins.json'),

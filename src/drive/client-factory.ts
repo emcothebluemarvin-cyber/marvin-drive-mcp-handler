@@ -1,8 +1,8 @@
 import type { Auth } from 'googleapis';
 import type { AuthService } from '../auth/auth-service.js';
 import { isInvalidGrant } from '../auth/oauth-errors.js';
-import type { AccountRecord } from '../config/account-registry.js';
-import { ReauthRequiredError } from '../errors.js';
+import { isMicrosoft, tokenKey, type AccountRecord } from '../config/account-registry.js';
+import { ProviderNotSupportedError, ReauthRequiredError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { createDocsAdapter, type DocsAdapter } from './docs-adapter.js';
 import { createDriveAdapter, type DriveAdapter } from './drive-adapter.js';
@@ -56,7 +56,7 @@ export class DriveClientFactory implements DriveRunner {
     const ctx = await this.context(accountRef);
     try {
       const result = await fn(ctx);
-      this.auth.markHealthy(ctx.account.email);
+      this.auth.markHealthy(tokenKey(ctx.account));
       return result;
     } catch (err) {
       if (!isInvalidGrant(err)) throw err;
@@ -64,7 +64,7 @@ export class DriveClientFactory implements DriveRunner {
       this.evict(ctx);
       let latest: string | null = null;
       try {
-        latest = await this.auth.readRefreshToken(ctx.account.email);
+        latest = await this.auth.readRefreshToken(tokenKey(ctx.account));
       } catch (readErr) {
         this.logger.warn('Keychain re-read failed', { alias: ctx.account.alias, error: readErr });
       }
@@ -72,7 +72,7 @@ export class DriveClientFactory implements DriveRunner {
         const retryCtx = await this.context(ctx.account.alias);
         try {
           const result = await fn(retryCtx);
-          this.auth.markHealthy(ctx.account.email);
+          this.auth.markHealthy(tokenKey(ctx.account));
           return result;
         } catch (retryErr) {
           if (!isInvalidGrant(retryErr)) throw retryErr;
@@ -80,7 +80,7 @@ export class DriveClientFactory implements DriveRunner {
           this.evict(retryCtx);
         }
       }
-      this.auth.markReauthRequired(ctx.account.email);
+      this.auth.markReauthRequired(tokenKey(ctx.account));
       throw new ReauthRequiredError(ctx.account.alias, { cause: lastErr });
     }
   }
@@ -92,10 +92,11 @@ export class DriveClientFactory implements DriveRunner {
 
   private async context(accountRef: string | undefined): Promise<CachedContext> {
     const account = await this.auth.resolveAccount(accountRef);
-    const token = await this.auth.readRefreshToken(account.email);
+    if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
+    const token = await this.auth.readRefreshToken(tokenKey(account));
     if (!token) {
       this.cache.delete(account.email);
-      this.auth.markReauthRequired(account.email);
+      this.auth.markReauthRequired(tokenKey(account));
       throw new ReauthRequiredError(account.alias);
     }
     const cached = this.cache.get(account.email);

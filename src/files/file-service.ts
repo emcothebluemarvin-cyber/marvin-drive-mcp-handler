@@ -1,5 +1,4 @@
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
 import { OperationRunner } from '../core/operation.js';
@@ -8,10 +7,29 @@ import type { DriveFile, DriveFileList } from '../drive/drive-adapter.js';
 import { NotFoundError, ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
 import { statusOf } from './drive-errors.js';
-import { expandHome, resolveDestination, writeUnique } from './destination.js';
-import { GOOGLE_MIME, isGoogleNative, resolveExport, type ExportFormat } from './export-formats.js';
+import { resolveDestination, writeUnique } from './destination.js';
+import { GOOGLE_MIME, isGoogleNative, resolveExport } from './export-formats.js';
 import { openExport } from './export-stream.js';
-import { buildListQuery, buildSearchQuery, type SearchCriteria } from './query.js';
+import {
+  clampPageSize,
+  type CopyInput,
+  type CreateFolderInput,
+  type DeleteInput,
+  type DeleteResult,
+  type DownloadInput,
+  type DownloadResult,
+  type FileProvider,
+  type FileRef,
+  type FileSummary,
+  type ListInput,
+  type ListResult,
+  type MoveInput,
+  type RenameInput,
+  type SearchInput,
+  type UploadInput,
+} from './file-provider.js';
+import { resolveUploadPath } from './local-paths.js';
+import { buildListQuery, buildSearchQuery } from './query.js';
 import { type RetryClass, type RetryOptions } from './retry.js';
 import { googleTargetMime, uploadMimeType } from './upload-mime.js';
 
@@ -22,96 +40,12 @@ export const FILE_FIELDS =
 
 const DOWNLOAD_FIELDS = 'id, name, mimeType, size, webViewLink, shortcutDetails, exportLinks';
 
-const DEFAULT_PAGE_SIZE = 50;
-const MAX_PAGE_SIZE = 200;
-
-export interface FileSummary {
-  id: string;
-  name: string;
-  mimeType: string;
-  size?: number;
-  modifiedTime?: string;
-  parents?: string[];
-}
-
-export interface ListResult {
-  files: FileSummary[];
-  nextPageToken?: string;
-}
-
 export interface FileServiceDeps {
   runner: DriveRunner;
   audit: AuditSink;
   downloadsDir: string;
   retry?: RetryOptions;
   logger?: Logger;
-}
-
-interface AccountInput {
-  account?: string;
-}
-
-export interface ListInput extends AccountInput {
-  folderId?: string;
-  pageSize?: number;
-  pageToken?: string;
-  includeTrashed?: boolean;
-}
-
-export interface SearchInput extends AccountInput, SearchCriteria {
-  pageSize?: number;
-  pageToken?: string;
-}
-
-export interface FileRef extends AccountInput {
-  fileId: string;
-}
-
-export interface CreateFolderInput extends AccountInput {
-  name: string;
-  parentId?: string;
-}
-
-export interface MoveInput extends FileRef {
-  newParentId: string;
-}
-
-export interface RenameInput extends FileRef {
-  newName: string;
-}
-
-export interface CopyInput extends FileRef {
-  parentId?: string;
-  name?: string;
-}
-
-export interface DeleteInput extends FileRef {
-  permanent?: boolean;
-}
-
-export interface DeleteResult {
-  fileId: string;
-  name?: string;
-  permanent: boolean;
-}
-
-export interface UploadInput extends AccountInput {
-  localPath: string;
-  parentId?: string;
-  name?: string;
-  convertToGoogle?: boolean;
-}
-
-export interface DownloadInput extends FileRef {
-  destPath?: string;
-  exportFormat?: ExportFormat;
-}
-
-export interface DownloadResult {
-  path: string;
-  size: number;
-  mimeType: string;
-  exportFormat: ExportFormat | null;
 }
 
 export function toSummary(file: DriveFile): FileSummary {
@@ -143,11 +77,7 @@ function toListResult(list: DriveFileList): ListResult {
   };
 }
 
-function clampPageSize(pageSize: number | undefined): number {
-  return Math.min(Math.max(Math.trunc(pageSize ?? DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE);
-}
-
-export class FileService {
+export class FileService implements FileProvider {
   protected readonly log: Logger;
   private readonly ops: OperationRunner;
 
@@ -323,21 +253,7 @@ export class FileService {
   }
 
   async upload(input: UploadInput): Promise<FileSummary> {
-    const expanded = expandHome(input.localPath);
-    if (!path.isAbsolute(expanded)) {
-      throw new ValidationError(`localPath must be an absolute path (got "${input.localPath}")`);
-    }
-    const localPath = path.resolve(expanded);
-    let size: number;
-    try {
-      const info = await stat(localPath);
-      if (!info.isFile()) throw new ValidationError(`${localPath} is not a regular file`);
-      size = info.size;
-    } catch (err) {
-      if (err instanceof ValidationError) throw err;
-      throw new ValidationError(`Cannot read ${localPath}`, { cause: err });
-    }
-
+    const { localPath, size } = await resolveUploadPath(input.localPath);
     const convert = input.convertToGoogle ?? false;
     const parentId = input.parentId ?? 'root';
     const requestBody = {

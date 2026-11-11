@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ValidationError } from '../../errors.js';
+import { ProviderNotSupportedError, ValidationError } from '../../errors.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
 import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
@@ -42,6 +42,24 @@ async function createDocs(): Promise<void> {
 }
 
 describe('createPair', () => {
+  it('rejects an unsupported account without touching the folder', async () => {
+    const guarded = new SyncService({
+      runner: createRunner(mem.drive),
+      audit,
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      trash: refuseTrash,
+      assertSupportedAccount: async (ref) => {
+        throw new ProviderNotSupportedError(ref ?? 'default');
+      },
+    });
+    await expect(
+      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT', account: 'ms' }),
+    ).rejects.toThrow(ProviderNotSupportedError);
+    expect(await readdir(local)).toEqual([]);
+  });
+
   it('stores validated googleExport preferences (defaults for omitted types)', async () => {
     await sync.createPair({
       name: 'docs',

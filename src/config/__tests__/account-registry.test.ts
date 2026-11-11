@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AccountNotFoundError, ConfigError, ValidationError } from '../../errors.js';
-import { AccountRegistry, defaultAlias } from '../account-registry.js';
+import {
+  AccountRegistry,
+  defaultAlias,
+  isMicrosoft,
+  providerOf,
+  tokenKey,
+} from '../account-registry.js';
 import { expectMode } from '../../__tests__/fs-mode.js';
 
 let file: string;
@@ -134,5 +140,94 @@ describe('AccountRegistry', () => {
     const later = new Date(Date.now() + 10_000);
     await utimes(file, later, later);
     await expect(registry.read()).rejects.toThrow(ConfigError);
+  });
+});
+
+describe('accounts of two providers', () => {
+  const MS = {
+    alias: 'work',
+    email: 'same@example.com',
+    provider: 'microsoft',
+    accountId: 't.o',
+  } as const;
+
+  it('treats an absent provider as google and keeps Google records unchanged', async () => {
+    const google = await registry.add({ alias: 'g', email: 'g@example.com' });
+    expect(google).not.toHaveProperty('provider');
+    expect(providerOf(google)).toBe('google');
+    expect(isMicrosoft(google)).toBe(false);
+  });
+
+  it('keeps provider and accountId through the schema', async () => {
+    await registry.add(MS);
+    const fresh = new AccountRegistry(file);
+    expect((await fresh.read()).accounts[0]).toMatchObject({
+      provider: 'microsoft',
+      accountId: 't.o',
+    });
+  });
+
+  it('derives token keys', async () => {
+    expect(tokenKey(await registry.add({ alias: 'g', email: 'g@example.com' }))).toBe(
+      'g@example.com',
+    );
+    expect(tokenKey(await registry.add(MS))).toBe('microsoft:t.o');
+  });
+
+  it('refuses a Microsoft account without accountId', async () => {
+    await expect(
+      registry.add({ alias: 'm', email: 'a@b.c', provider: 'microsoft' }),
+    ).rejects.toThrow(ValidationError);
+    expect(() =>
+      tokenKey({ alias: 'm', email: 'a@b.c', addedAt: '', provider: 'microsoft' }),
+    ).toThrow(ConfigError);
+  });
+
+  it('is unique per email for Google and per accountId for Microsoft', async () => {
+    await registry.add({ alias: 'g', email: 'same@example.com' });
+    await registry.add(MS);
+    await registry.add({ ...MS, alias: 'personal', accountId: 't2.o2' });
+    await expect(registry.add({ ...MS, alias: 'again' })).rejects.toThrow(
+      /already registered as "work"/,
+    );
+    await expect(registry.add({ alias: 'g2', email: 'same@example.com' })).rejects.toThrow(
+      /already registered as "g"/,
+    );
+    await expect(registry.add({ ...MS, alias: 'g', accountId: 't3.o3' })).rejects.toThrow(
+      /--alias/,
+    );
+  });
+
+  describe('an email shared by several accounts', () => {
+    beforeEach(async () => {
+      await registry.add({ alias: 'g', email: 'same@example.com' });
+      await registry.add(MS);
+    });
+
+    it('is ambiguous where both providers are valid, naming the aliases', async () => {
+      await expect(registry.resolve('same@example.com')).rejects.toThrow(/\(g, work\).*alias/);
+      await expect(registry.setDefault('same@example.com')).rejects.toThrow(ValidationError);
+      await expect(registry.remove('same@example.com')).rejects.toThrow(ValidationError);
+    });
+
+    it('means the Google account on Google-only surfaces', async () => {
+      await expect(registry.resolveGoogleFirst('same@example.com')).resolves.toMatchObject({
+        alias: 'g',
+      });
+    });
+
+    it('resolves aliases on both paths', async () => {
+      await expect(registry.resolve('work')).resolves.toMatchObject({ alias: 'work' });
+      await expect(registry.resolveGoogleFirst('work')).resolves.toMatchObject({ alias: 'work' });
+    });
+  });
+
+  it('resolveGoogleFirst handles a Microsoft-only email, the default and unknown refs', async () => {
+    await registry.add(MS);
+    await expect(registry.resolveGoogleFirst('same@example.com')).resolves.toMatchObject({
+      alias: 'work',
+    });
+    await expect(registry.resolveGoogleFirst()).resolves.toMatchObject({ alias: 'work' });
+    await expect(registry.resolveGoogleFirst('nobody')).rejects.toThrow(AccountNotFoundError);
   });
 });

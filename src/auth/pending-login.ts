@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { AccountProvider } from '../config/account-registry.js';
 import { AuthFlowError, ConfigError, hasErrorCode } from '../errors.js';
 import { renameReplacing } from '../files/rename-replacing.js';
 
@@ -11,10 +12,15 @@ export interface PendingLogin {
   state: string;
   codeVerifier: string;
   redirectUri: string;
-  /** `add`: the alias asked for (null = derived from the email); `login`: the account's email. */
+  /**
+   * `add`: the alias asked for (null = derived from the address); `login`: the account's email
+   * (Google) or `accountId` (Microsoft).
+   */
   command: 'add' | 'login';
   account: string | null;
   createdAt: string;
+  /** Absent means `google`. Decides which provider finishes this login. */
+  provider?: AccountProvider;
 }
 
 interface PendingFile {
@@ -53,6 +59,12 @@ export class PendingLoginStore {
       );
     }
     return found;
+  }
+
+  /** The provider of a waiting login, without using it up. Null when no such login exists. */
+  async peekProvider(state: string): Promise<AccountProvider | null> {
+    const found = (await this.read()).find((l) => l.state === state);
+    return found ? (found.provider ?? 'google') : null;
   }
 
   private expired(l: PendingLogin): boolean {
@@ -118,6 +130,7 @@ function isPendingFile(value: unknown): value is PendingFile {
       typeof e.redirectUri === 'string' &&
       (e.command === 'add' || e.command === 'login') &&
       (e.account === null || typeof e.account === 'string') &&
+      (e.provider === undefined || e.provider === 'google' || e.provider === 'microsoft') &&
       typeof e.createdAt === 'string'
     );
   });

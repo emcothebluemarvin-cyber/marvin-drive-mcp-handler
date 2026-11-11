@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { AuthService } from '../../auth/auth-service.js';
 import { InMemoryTokenStore } from '../../auth/token-store.js';
 import { AccountRegistry } from '../../config/account-registry.js';
-import { ReauthRequiredError } from '../../errors.js';
+import { ProviderNotSupportedError, ReauthRequiredError } from '../../errors.js';
 import { createLogger } from '../../logger.js';
 import { DriveClientFactory, type DriveContext, type GoogleAdapters } from '../client-factory.js';
 
@@ -17,10 +17,11 @@ let tokens: InMemoryTokenStore;
 let auth: AuthService;
 let makeAdapter: Mock<(client: Auth.OAuth2Client) => GoogleAdapters>;
 let factory: DriveClientFactory;
+let registry: AccountRegistry;
 
 beforeEach(async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'marvin-factory-'));
-  const registry = new AccountRegistry(path.join(dir, 'accounts.json'));
+  registry = new AccountRegistry(path.join(dir, 'accounts.json'));
   await registry.add({ alias: 'emco', email: 'emco@example.com' });
   tokens = new InMemoryTokenStore();
   await tokens.set('emco@example.com', 'rt-1');
@@ -136,6 +137,36 @@ describe('DriveClientFactory', () => {
     expect(warn).toHaveBeenCalledWith(
       'Keychain re-read failed',
       expect.objectContaining({ alias: 'emco' }),
+    );
+  });
+});
+
+describe('DriveClientFactory with Microsoft accounts (spec §3.3)', () => {
+  const MS = {
+    alias: 'ms',
+    email: 'emco@example.com',
+    provider: 'microsoft',
+    accountId: 't.o',
+  } as const;
+
+  it('rejects the alias before reading a refresh token', async () => {
+    await registry.add(MS);
+    const read = vi.spyOn(auth, 'readRefreshToken');
+    await expect(factory.run('ms', async () => 'x')).rejects.toThrow(ProviderNotSupportedError);
+    expect(read).not.toHaveBeenCalled();
+    expect(makeAdapter).not.toHaveBeenCalled();
+  });
+
+  it('treats a shared address as the Google account', async () => {
+    await registry.add(MS);
+    await expect(factory.run('emco@example.com', async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('rejects a Microsoft default account', async () => {
+    await registry.add(MS);
+    await registry.setDefault('ms');
+    await expect(factory.run(undefined, async () => 'x')).rejects.toThrow(
+      ProviderNotSupportedError,
     );
   });
 });

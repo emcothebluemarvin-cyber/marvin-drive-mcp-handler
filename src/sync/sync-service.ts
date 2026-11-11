@@ -53,6 +53,8 @@ export interface SyncServiceDeps extends OperationDeps {
   /** Moves local files to the OS trash (the app passes `createLocalTrash()`; tests pass a fake, never the real trash). */
   trash: LocalTrash;
   clock?: () => Date;
+  /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
+  assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
 }
 
 export interface RunInput {
@@ -84,7 +86,14 @@ export class SyncService {
     this.ops = new OperationRunner(deps);
     this.log = deps.logger ?? defaultLogger;
     this.clock = deps.clock ?? ((): Date => new Date());
-    this.env = { ops: this.ops, log: this.log, clock: this.clock, store: deps.store };
+    this.env = {
+      ops: this.ops,
+      log: this.log,
+      clock: this.clock,
+      store: deps.store,
+      assertSupportedAccount:
+        deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
+    };
   }
 
   private get store(): PairStore {

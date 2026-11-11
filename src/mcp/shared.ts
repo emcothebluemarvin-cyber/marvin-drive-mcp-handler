@@ -8,7 +8,10 @@ export const account = z
   .min(1)
   .optional()
   .describe('Account alias or email. Omit to use the default account.');
-export const fileId = z.string().min(1).describe('Google Drive file or folder ID');
+export const fileId = z
+  .string()
+  .min(1)
+  .describe('File or folder ID (from a Google Drive or OneDrive account)');
 export const pageSize = z
   .number()
   .int()

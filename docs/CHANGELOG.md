@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- OneDrive accounts (sub-project 1): `auth add --provider microsoft` registers a personal or work/school Microsoft account, and the `drive_*` tools work on its own OneDrive. Provider shown in `auth list` and `drive_list_accounts`. Upload name conflicts ask Overwrite / Cancel through MCP elicitation. No new dependencies.
 - Drive watch: `drive_watch` / `drive_changes` MCP tools (34 tools in total) and CLI `marvin-drive watch add|remove|list|delivery` and `marvin-drive changes`. Watched files and folders are polled through the Drive Changes API; Claude learns who changed what and when (diffs for Docs, Sheets and Slides, and new comments when the file also changed; comment-only changes are not detected yet) and only informs. Delivery by a `UserPromptSubmit` hook (`changes --hook`, default) or by Claude Code channel push (`--dangerously-load-development-channels server:marvin-drive`).
 - New dependency: `diff` (jsdiff, BSD-3) for line diffs. `MARVIN_WATCH_POLL_SECONDS` sets the poll interval (default 30, between 15 and 3600).
 - The MCP server declares the experimental `claude/channel` capability and server instructions that tell Claude to treat change notifications as third-party data.
@@ -17,6 +18,7 @@
 - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
+- Tool descriptions are provider-neutral and mark Google-only parameters. Accounts are shown with their provider in `auth list`.
 - The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).
 - `src/cli/main.ts` is a small entry that loads the rest of the CLI lazily, so the hook path starts fast; the former entry is `src/cli/program.ts`.
 - Sync: deleting a tracked file locally no longer trashes its Drive copy automatically; it waits in `pendingConfirmation` until confirmed (`confirm-needs-mass-delete` warns when the confirmed run would also need `allowMassDelete`).

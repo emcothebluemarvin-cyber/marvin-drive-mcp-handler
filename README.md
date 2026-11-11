@@ -1,6 +1,6 @@
 # Marvin Drive MCP Handler
 
-Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive accounts, read and edit Google Docs, Sheets and Slides, and keep a chosen set of local files in two-way sync with a Drive folder, through your own Google OAuth client.
+Local MCP server + CLI that lets Claude Code manage files in one or more Google Drive and OneDrive accounts, read and edit Google Docs, Sheets and Slides, and keep a chosen set of local files in two-way sync with a Drive folder, through your own Google and Microsoft app registrations.
 
 ## Requirements
 
@@ -20,6 +20,40 @@ marvin-drive auth add --alias <name>   # e.g. work; default: the part of the ema
 ```
 
 Error messages refer to `marvin-drive …`; without `npm link`, run the same command as `node dist/cli/main.js …`.
+
+## OneDrive accounts
+
+A Microsoft account (personal or work/school) can be registered next to Google accounts. The `drive_*` tools then work on that account's own OneDrive; the account decides the provider, the tool names stay the same. Files shared with you, SharePoint and Teams libraries are not reachable, and sync, watch and the Docs/Sheets/Slides tools are Google-only for now (they return a clear error).
+
+Register an app once. Microsoft Entra admin center → App registrations → New registration:
+
+1. Supported accounts: any organizational directory and personal Microsoft accounts.
+2. Redirect: platform "Mobile and desktop applications", `http://localhost`.
+3. API permissions (Microsoft Graph, delegated): `Files.ReadWrite`, `offline_access`, `User.Read`, `openid`, `profile`, `email`.
+4. Save the Application (client) ID in `~/.config/google-handler/microsoft-client.json` as `{ "clientId": "<guid>" }`. It is not a secret.
+
+Since June 2024 an app must be registered in a directory (tenant), obtained from a work account, an Azure subscription or the Microsoft 365 Developer Program.
+
+```bash
+marvin-drive auth add --provider microsoft --alias <name>   # also --no-browser, --print-url, --redirect-url
+```
+
+An address can be both a personal and a work account, so a Microsoft account is identified internally by its tenant and object ID. When one address belongs to several accounts, use the alias.
+
+Differences on OneDrive:
+
+| Tool                                                | Difference                                                                                                                  |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `drive_list`                                        | `includeTrashed` is not available                                                                                           |
+| `drive_search`                                      | `query` is required; `rawQuery`, `mimeType` and `modifiedAfter` are not available; new files can take over 30 min to appear |
+| `drive_download`                                    | `exportFormat` is not available; OneNote packages cannot be downloaded                                                      |
+| `drive_upload`                                      | `convertToGoogle` is not available. An existing name fails, or Claude Code asks you Overwrite / Cancel                      |
+| `drive_create_folder`, `drive_rename`, `drive_move` | A name conflict is an error                                                                                                 |
+| `drive_copy`                                        | Folders can be copied; a name or a target folder is required; a name conflict is an error                                   |
+| `drive_delete`                                      | Moves to the recycle bin; `permanent` is not available                                                                      |
+| `drive_restore`                                     | Personal accounts only; on work or school accounts use the recycle bin on the OneDrive website                              |
+
+`auth remove` deletes the token on this machine; Microsoft has no per-token revoke for this kind of app.
 
 ## Register with Claude Code
 
@@ -70,22 +104,22 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 
 ## CLI
 
-| Command                                                                                                  | Purpose                                                                                                     |
-| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `marvin-drive auth add [--alias a] [--no-browser\|--print-url\|--redirect-url u]`                        | Browser login, register account (first = default)                                                           |
-| `marvin-drive auth login <alias> [--no-browser\|--print-url\|--redirect-url u]`                          | Re-login an expired account                                                                                 |
-| `marvin-drive auth list [--verify]`                                                                      | Accounts and token status                                                                                   |
-| `marvin-drive auth remove <alias>`                                                                       | Remove account, delete + revoke token                                                                       |
-| `marvin-drive auth default <alias>`                                                                      | Set the default account                                                                                     |
-| `marvin-drive serve`                                                                                     | MCP server on stdio                                                                                         |
-| `marvin-drive sync list`                                                                                 | Sync pairs with counts and last applied run                                                                 |
-| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete] [--confirm-remote-trash]` | Dry run (default) or apply a sync; exit code 1 on failure/abort; `--confirm-remote-trash` needs `--plan-id` |
-| `marvin-drive sync release <name> [--all \| <paths…>] [--apply]`                                         | Keep files in Drive only: local copies go to the system trash (dry run by default)                          |
-| `marvin-drive sync repair-marker <name>`                                                                 | Rewrite the folder marker after confirming the local folder                                                 |
-| `marvin-drive watch add\|remove <fileId> [--account a]`                                                  | Watch a file or folder (folders recursively) for changes by others / stop watching                          |
-| `marvin-drive watch list [--account a]`                                                                  | Watched files and folders                                                                                   |
-| `marvin-drive watch delivery [hook\|channel]`                                                            | Show or set how changes reach Claude Code (default `hook`)                                                  |
-| `marvin-drive changes [--all] [--own] [--json] [--hook]`                                                 | Changes in watched files (unread by default, marks them read); `--hook` is the `UserPromptSubmit` hook      |
+| Command                                                                                                          | Purpose                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `marvin-drive auth add [--provider google\|microsoft] [--alias a] [--no-browser\|--print-url\|--redirect-url u]` | Browser login, register account (first = default)                                                           |
+| `marvin-drive auth login <alias> [--no-browser\|--print-url\|--redirect-url u]`                                  | Re-login an expired account                                                                                 |
+| `marvin-drive auth list [--verify]`                                                                              | Accounts and token status                                                                                   |
+| `marvin-drive auth remove <alias>`                                                                               | Remove account, delete token (Google: also revokes it)                                                      |
+| `marvin-drive auth default <alias>`                                                                              | Set the default account                                                                                     |
+| `marvin-drive serve`                                                                                             | MCP server on stdio                                                                                         |
+| `marvin-drive sync list`                                                                                         | Sync pairs with counts and last applied run                                                                 |
+| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete] [--confirm-remote-trash]`         | Dry run (default) or apply a sync; exit code 1 on failure/abort; `--confirm-remote-trash` needs `--plan-id` |
+| `marvin-drive sync release <name> [--all \| <paths…>] [--apply]`                                                 | Keep files in Drive only: local copies go to the system trash (dry run by default)                          |
+| `marvin-drive sync repair-marker <name>`                                                                         | Rewrite the folder marker after confirming the local folder                                                 |
+| `marvin-drive watch add\|remove <fileId> [--account a]`                                                          | Watch a file or folder (folders recursively) for changes by others / stop watching                          |
+| `marvin-drive watch list [--account a]`                                                                          | Watched files and folders                                                                                   |
+| `marvin-drive watch delivery [hook\|channel]`                                                                    | Show or set how changes reach Claude Code (default `hook`)                                                  |
+| `marvin-drive changes [--all] [--own] [--json] [--hook]`                                                         | Changes in watched files (unread by default, marks them read); `--hook` is the `UserPromptSubmit` hook      |
 
 ## MCP tools
 
@@ -217,17 +251,18 @@ Good to know:
 
 ## Files
 
-| Path                                          | Content                              |
-| --------------------------------------------- | ------------------------------------ |
-| `~/.config/google-handler/client_secret.json` | OAuth client (never commit)          |
-| `~/.config/google-handler/accounts.json`      | Aliases and emails (no secrets)      |
-| `~/.config/google-handler/audit.jsonl`        | Every mutating operation             |
-| `~/.config/google-handler/sync/<name>.json`   | Sync pair state (selection, records) |
-| `~/.config/google-handler/watch/`             | Watch list, snapshots, change inbox  |
-| `<local folder>/.marvin-sync-<name>`          | Sync folder marker (pair id)         |
-| Keychain service `marvin-drive`               | Refresh tokens (default)             |
-| `~/.config/google-handler/tokens.json`        | Refresh tokens (`…TOKEN_STORE=file`) |
-| `~/Downloads/marvin-drive/`                   | Default download folder              |
+| Path                                             | Content                              |
+| ------------------------------------------------ | ------------------------------------ |
+| `~/.config/google-handler/client_secret.json`    | OAuth client (never commit)          |
+| `~/.config/google-handler/microsoft-client.json` | Microsoft client ID (not a secret)   |
+| `~/.config/google-handler/accounts.json`         | Aliases and emails (no secrets)      |
+| `~/.config/google-handler/audit.jsonl`           | Every mutating operation             |
+| `~/.config/google-handler/sync/<name>.json`      | Sync pair state (selection, records) |
+| `~/.config/google-handler/watch/`                | Watch list, snapshots, change inbox  |
+| `<local folder>/.marvin-sync-<name>`             | Sync folder marker (pair id)         |
+| Keychain service `marvin-drive`                  | Refresh tokens (default)             |
+| `~/.config/google-handler/tokens.json`           | Refresh tokens (`…TOKEN_STORE=file`) |
+| `~/Downloads/marvin-drive/`                      | Default download folder              |
 
 ## Development
 

@@ -2,8 +2,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AuthService } from '../auth/auth-service.js';
 import { EXPORT_FORMATS } from '../files/export-formats.js';
-import type { FileService } from '../files/file-service.js';
+import type { FileProvider } from '../files/file-provider.js';
 import type { Logger } from '../logger.js';
+import { createConfirmReplace, supportsConfirmReplace } from './confirm-replace.js';
 import { account, fileId, pageSize, pageToken, respond } from './shared.js';
 
 export const DRIVE_TOOL_NAMES = [
@@ -21,9 +22,11 @@ export const DRIVE_TOOL_NAMES = [
   'drive_restore',
 ] as const;
 
+const GOOGLE_ONLY = 'Google accounts only: not available on OneDrive accounts.';
+
 export function registerDriveTools(
   server: McpServer,
-  deps: { files: FileService; auth: Pick<AuthService, 'status'> },
+  deps: { files: FileProvider; auth: Pick<AuthService, 'status'> },
   log: Logger,
 ): void {
   const { files } = deps;
@@ -32,7 +35,7 @@ export function registerDriveTools(
     'drive_list_accounts',
     {
       description:
-        'List registered Google accounts, the default, and token status (ok / reauth_required). verify=true does a live token refresh.',
+        'List registered accounts (Google and Microsoft) with their provider, the default, and token status (ok / reauth_required). verify=true does a live token refresh.',
       inputSchema: { verify: z.boolean().optional() },
     },
     async ({ verify }) => respond(log, () => deps.auth.status(verify ?? false)),
@@ -42,13 +45,13 @@ export function registerDriveTools(
     'drive_list',
     {
       description:
-        'List files in a folder (default: My Drive root). Excludes trash unless includeTrashed.',
+        'List files in a folder (default: the drive root). Excludes trash unless includeTrashed.',
       inputSchema: {
         account,
         folderId: z.string().min(1).optional().describe('Folder ID (default "root")'),
         pageSize,
         pageToken,
-        includeTrashed: z.boolean().optional(),
+        includeTrashed: z.boolean().optional().describe(GOOGLE_ONLY),
       },
     },
     async (args) => respond(log, () => files.list(args)),
@@ -58,13 +61,13 @@ export function registerDriveTools(
     'drive_search',
     {
       description:
-        'Search files. query matches names and full text; rawQuery is raw Drive query syntax (ANDed). Excludes trash unless rawQuery mentions "trashed". Note: any mention of "trashed" in rawQuery (even inside a quoted value) disables the default trashed = false filter.',
+        'Search files. query matches names and full text; rawQuery is raw Drive query syntax (ANDed). Excludes trash unless rawQuery mentions "trashed". Note: any mention of "trashed" in rawQuery (even inside a quoted value) disables the default trashed = false filter. OneDrive accounts need query and do not accept the other filters.',
       inputSchema: {
         account,
         query: z.string().optional(),
-        mimeType: z.string().optional(),
-        modifiedAfter: z.string().optional().describe('ISO 8601 date or datetime'),
-        rawQuery: z.string().optional(),
+        mimeType: z.string().optional().describe(GOOGLE_ONLY),
+        modifiedAfter: z.string().optional().describe(`ISO 8601 date or datetime. ${GOOGLE_ONLY}`),
+        rawQuery: z.string().optional().describe(GOOGLE_ONLY),
         pageSize,
         pageToken,
       },
@@ -85,7 +88,7 @@ export function registerDriveTools(
     'drive_download',
     {
       description:
-        'Download a file to local disk and return its path. Google Docs/Sheets/Slides/Drawings are exported (defaults docx/xlsx/pptx/png). Never overwrites.',
+        'Download a file to local disk and return its path. Google Docs/Sheets/Slides/Drawings are exported (defaults docx/xlsx/pptx/png). OneNote packages cannot be downloaded from OneDrive. Never overwrites.',
       inputSchema: {
         account,
         fileId,
@@ -96,7 +99,7 @@ export function registerDriveTools(
           .describe(
             'Absolute directory (existing, or ending with "/"; "\\" also on Windows) or absolute file path; ~ allowed. Default ~/Downloads/marvin-drive/',
           ),
-        exportFormat: z.enum(EXPORT_FORMATS).optional(),
+        exportFormat: z.enum(EXPORT_FORMATS).optional().describe(GOOGLE_ONLY),
       },
     },
     async (args) => respond(log, () => files.download(args)),
@@ -106,16 +109,24 @@ export function registerDriveTools(
     'drive_upload',
     {
       description:
-        'Upload a local file. convertToGoogle turns office/text/csv files into Google Docs/Sheets/Slides.',
+        'Upload a local file. convertToGoogle turns office/text/csv files into Google Docs/Sheets/Slides. On OneDrive an existing name fails, or the user is asked Overwrite / Cancel when the client can ask; a cancelled upload is a normal result, do not retry it.',
       inputSchema: {
         account,
         localPath: z.string().min(1).describe('Absolute local file path (~/ allowed)'),
         parentId: z.string().min(1).optional().describe('Destination folder ID (default root)'),
         name: z.string().min(1).optional(),
-        convertToGoogle: z.boolean().optional(),
+        convertToGoogle: z.boolean().optional().describe(GOOGLE_ONLY),
       },
     },
-    async (args) => respond(log, () => files.upload(args)),
+    async (args) =>
+      respond(log, () =>
+        files.upload(
+          args,
+          supportsConfirmReplace(server.server)
+            ? { confirmReplace: createConfirmReplace(server.server, log) }
+            : {},
+        ),
+      ),
   );
 
   server.registerTool(
@@ -148,7 +159,8 @@ export function registerDriveTools(
   server.registerTool(
     'drive_copy',
     {
-      description: 'Copy a file (folders cannot be copied).',
+      description:
+        'Copy a file. On Google accounts folders cannot be copied. On OneDrive folders can be copied, and a name or parentId is required.',
       inputSchema: {
         account,
         fileId,
@@ -163,8 +175,12 @@ export function registerDriveTools(
     'drive_delete',
     {
       description:
-        'Delete a file or folder. Default moves it to trash (restorable for 30 days); permanent=true deletes forever.',
-      inputSchema: { account, fileId, permanent: z.boolean().optional() },
+        'Delete a file or folder. Default moves it to trash or the OneDrive recycle bin (Google: restorable for 30 days); permanent=true deletes forever.',
+      inputSchema: {
+        account,
+        fileId,
+        permanent: z.boolean().optional().describe(GOOGLE_ONLY),
+      },
     },
     async (args) => respond(log, () => files.delete(args)),
   );
@@ -172,7 +188,8 @@ export function registerDriveTools(
   server.registerTool(
     'drive_restore',
     {
-      description: 'Restore a file or folder from trash.',
+      description:
+        'Restore a file or folder from trash. OneDrive: personal accounts only (work or school: use the website recycle bin).',
       inputSchema: { account, fileId },
     },
     async (args) => respond(log, () => files.restore(args)),

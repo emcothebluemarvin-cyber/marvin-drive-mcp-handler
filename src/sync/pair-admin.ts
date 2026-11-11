@@ -32,6 +32,8 @@ export interface SyncEnv {
   log: Logger;
   clock: () => Date;
   store: PairStore;
+  /** Throws when the account cannot be synced, before anything touches the user's folder. */
+  assertSupportedAccount: (ref: string | undefined) => Promise<void>;
 }
 
 export interface CreatePairInput {
@@ -120,6 +122,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       localDir,
       remoteFolderId: input.remoteFolderId ?? '',
     });
+    await env.assertSupportedAccount(input.account);
     const id = randomUUID();
     await writeMarker(localDir, input.name, id);
     let remote: { folderId: string; alias: string };

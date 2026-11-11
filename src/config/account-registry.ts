@@ -8,10 +8,17 @@ export const ALIAS_PATTERN = /^[a-z0-9-]{1,32}$/;
 
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+$/;
 
+export type AccountProvider = 'google' | 'microsoft';
+
 export interface AccountRecord {
   alias: string;
+  /** Google: the identity. Microsoft: the display address only (see `accountId`). */
   email: string;
   addedAt: string;
+  /** Absent means `google`. */
+  provider?: AccountProvider;
+  /** Microsoft only: `<tid>.<oid>`, the account's identity. */
+  accountId?: string;
 }
 
 export interface RegistryData {
@@ -26,6 +33,8 @@ const registrySchema = z.object({
       alias: z.string().regex(ALIAS_PATTERN),
       email: z.string().includes('@'),
       addedAt: z.string(),
+      provider: z.enum(['google', 'microsoft']).optional(),
+      accountId: z.string().min(1).optional(),
     }),
   ),
 });
@@ -40,6 +49,23 @@ export function defaultAlias(email: string): string {
     .slice(0, 32)
     .replace(/-$/, '');
   return alias === '' ? 'account' : alias;
+}
+
+export function providerOf(record: AccountRecord): AccountProvider {
+  return record.provider ?? 'google';
+}
+
+export function isMicrosoft(record: AccountRecord): boolean {
+  return providerOf(record) === 'microsoft';
+}
+
+/** The only way to derive a token store key (spec §3.2). */
+export function tokenKey(record: AccountRecord): string {
+  if (!isMicrosoft(record)) return record.email;
+  if (!record.accountId) {
+    throw new ConfigError(`Microsoft account "${record.alias}" has no accountId; add it again.`);
+  }
+  return `microsoft:${record.accountId}`;
 }
 
 function describeAccounts(accounts: AccountRecord[]): string {
@@ -86,17 +112,32 @@ export class AccountRegistry {
     return accounts.find((a) => a.alias === needle || a.email === needle);
   }
 
-  /** Account by alias/email; without `ref`: the default, or the only account. */
+  private unknown(ref: string, data: RegistryData): AccountNotFoundError {
+    return new AccountNotFoundError(
+      `Unknown account "${ref}". Registered: ${describeAccounts(data.accounts)}`,
+    );
+  }
+
+  private matching(ref: string, data: RegistryData): AccountRecord[] {
+    const needle = ref.trim().toLowerCase();
+    return data.accounts.filter((a) => a.alias === needle || a.email === needle);
+  }
+
+  /**
+   * Where both providers are valid. An email shared by several accounts is an error listing
+   * the aliases. Without `ref`: the default, or the only account.
+   */
   async resolve(ref?: string): Promise<AccountRecord> {
     const data = await this.read();
     if (ref !== undefined) {
-      const found = await this.find(ref);
-      if (!found) {
-        throw new AccountNotFoundError(
-          `Unknown account "${ref}". Registered: ${describeAccounts(data.accounts)}`,
-        );
+      const found = this.matching(ref, data);
+      const [first] = found;
+      if (!first) throw this.unknown(ref, data);
+      if (found.length > 1) {
+        const aliases = found.map((a) => a.alias).join(', ');
+        throw new ValidationError(`"${ref}" matches several accounts (${aliases}); use an alias.`);
       }
-      return found;
+      return first;
     }
     const byDefault = data.accounts.find((a) => a.alias === data.default);
     if (byDefault) return byDefault;
@@ -109,8 +150,23 @@ export class AccountRegistry {
     );
   }
 
+  /** For Google-only surfaces: an email means the Google account of that address (spec §3.2). */
+  async resolveGoogleFirst(ref?: string): Promise<AccountRecord> {
+    if (ref === undefined) return this.resolve();
+    const data = await this.read();
+    const found = this.matching(ref, data);
+    const [first] = found;
+    if (!first) throw this.unknown(ref, data);
+    return found.find((a) => !isMicrosoft(a)) ?? first;
+  }
+
   async add(
-    input: { alias: string; email: string },
+    input: {
+      alias: string;
+      email: string;
+      provider?: AccountProvider;
+      accountId?: string;
+    },
     now: Date = new Date(),
   ): Promise<AccountRecord> {
     const alias = input.alias.trim().toLowerCase();
@@ -121,11 +177,17 @@ export class AccountRegistry {
     if (!EMAIL_PATTERN.test(email)) {
       throw new ValidationError(`"${input.email}" is not a valid email address`);
     }
+    const microsoft = input.provider === 'microsoft';
+    if (microsoft && !input.accountId) {
+      throw new ValidationError('A Microsoft account needs an accountId');
+    }
     const data = await this.read();
-    const sameEmail = data.accounts.find((a) => a.email === email);
-    if (sameEmail) {
+    const sameIdentity = data.accounts.find((a) =>
+      microsoft ? a.accountId === input.accountId : !isMicrosoft(a) && a.email === email,
+    );
+    if (sameIdentity) {
       throw new ValidationError(
-        `${email} is already registered as "${sameEmail.alias}"; use: marvin-drive auth login ${sameEmail.alias}`,
+        `${email} is already registered as "${sameIdentity.alias}"; use: marvin-drive auth login ${sameIdentity.alias}`,
       );
     }
     const sameAlias = data.accounts.find((a) => a.alias === alias);
@@ -134,7 +196,12 @@ export class AccountRegistry {
         `Alias "${alias}" is already used by ${sameAlias.email}; pass --alias <name>`,
       );
     }
-    const record: AccountRecord = { alias, email, addedAt: now.toISOString() };
+    const record: AccountRecord = {
+      alias,
+      email,
+      addedAt: now.toISOString(),
+      ...(microsoft ? { provider: 'microsoft' as const, accountId: input.accountId ?? '' } : {}),
+    };
     data.accounts.push(record);
     data.default ??= alias;
     await this.write(data);

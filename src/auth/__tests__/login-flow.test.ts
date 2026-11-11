@@ -4,11 +4,11 @@ import { AuthFlowError, ValidationError } from '../../errors.js';
 import {
   OAUTH_SCOPES,
   finishTwoStepLogin,
-  parseRedirectUrl,
   runLoginFlow,
   startTwoStepLogin,
   type OAuthFlowClient,
 } from '../login-flow.js';
+import { parseRedirectUrl } from '../loopback.js';
 
 const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive openid email';
 
@@ -595,7 +595,7 @@ describe('two-step login (--print-url / --redirect-url)', () => {
   });
 
   it('parses a bare query string too', () => {
-    expect(parseRedirectUrl('?state=s&code=c')).toEqual({ state: 's', code: 'c' });
-    expect(parseRedirectUrl('  state=s&code=c  ')).toEqual({ state: 's', code: 'c' });
+    expect(parseRedirectUrl('?state=s&code=c', 'Google')).toEqual({ state: 's', code: 'c' });
+    expect(parseRedirectUrl('  state=s&code=c  ', 'Google')).toEqual({ state: 's', code: 'c' });
   });
 });
