@@ -552,6 +552,10 @@ export class Executor {
     if (current === null) {
       // Already gone: with deletion evidence it is deleted (drop the record); without, it
       // may only be unreachable, so nothing is touched (OneDrive sync spec §4.1, §5).
+      // Defence only: in a real run this branch cannot drop a record. trash-remote is planned
+      // only for an item the scan saw present, and E (read before the scan) loses every id
+      // the scan saw present, the item's and its parent folder's alike; the feed is not
+      // re-read during the apply. So a deletion after the scan always lands in the skip.
       const evidence = this.deps.evidence;
       if (!evidence?.has(remote.id) && !evidence?.has(record.remoteParentId)) {
         throw new TargetChangedError(`${action.key} is gone from ${this.label} since planning`);

@@ -176,6 +176,8 @@ describe('Executor re-reads that find nothing (OneDrive sync spec §5)', () => {
     selection: { remove: ['a.txt'] },
   });
 
+  // Pins the executor's defensive branch with hand-made evidence. A real run never gets here:
+  // E has lost every id the scan saw present, and trash-remote is planned only for those.
   it('trash-remote of an item already gone: evidence drops the record', async () => {
     const file = makePairFile({ localDir: dir, remoteFolderId: od.rootId }, [
       record('gone', 'a.txt'),
