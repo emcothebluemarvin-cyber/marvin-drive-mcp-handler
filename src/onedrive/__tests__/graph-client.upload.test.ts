@@ -194,3 +194,25 @@ describe('GraphClient.upload', () => {
     }
   });
 });
+
+describe('GraphClient file bodies', () => {
+  it('sends a local file as the raw body, re-read on a retry', async () => {
+    let calls = 0;
+    const fake = fakeGraph(() => (calls++ === 0 ? empty(503) : json({ id: 'f1' })));
+    const small = { localPath, size: SIZE };
+    await expect(
+      makeClient(fake).client.json('PUT', '/me/drive/items/f1/content', {
+        retry: 'idempotent',
+        file: small,
+        headers: { 'If-Match': 'e1' },
+      }),
+    ).resolves.toEqual({ id: 'f1' });
+    expect(fake.calls).toHaveLength(2);
+    for (const call of fake.calls) {
+      expect(call.bytes?.equals(content)).toBe(true);
+      expect(call.headers['content-type']).toBe('application/octet-stream');
+      expect(call.headers['content-length']).toBe(String(SIZE));
+      expect(call.headers['if-match']).toBe('e1');
+    }
+  });
+});

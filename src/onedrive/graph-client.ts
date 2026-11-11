@@ -35,6 +35,8 @@ export interface GraphRequestOptions {
   headers?: Record<string, string>;
   /** A 404 on a repeat means an earlier attempt already succeeded. */
   notFoundOnRepeatIsOk?: boolean;
+  /** Sends this local file as the raw request body (re-read on every attempt). */
+  file?: { localPath: string; size: number };
 }
 
 /** 10 MiB, a multiple of 320 KiB as Graph requires. */
@@ -345,6 +347,8 @@ export class GraphClient {
       const token = await this.deps.accessToken(forceRefresh ? { forceRefresh } : undefined);
       forceRefresh = false;
       let res: Response | undefined;
+      const file = options.file;
+      const stream = file ? createReadStream(file.localPath) : undefined;
       try {
         res = await this.fetch(url, {
           method,
@@ -352,12 +356,18 @@ export class GraphClient {
           headers: {
             Authorization: `Bearer ${token}`,
             ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+            ...(file
+              ? { 'Content-Type': 'application/octet-stream', 'Content-Length': String(file.size) }
+              : {}),
             ...options.headers,
           },
           ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-        });
+          ...(stream ? { body: stream as unknown as RequestInit['body'], duplex: 'half' } : {}),
+        } as RequestInit);
       } catch (err) {
         this.log.warn('Graph request failed to reach the network', { error: err });
+      } finally {
+        stream?.destroy();
       }
       if (res?.status === 401) {
         await res.body?.cancel();
