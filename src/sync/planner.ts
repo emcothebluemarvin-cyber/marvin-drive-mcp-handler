@@ -2,7 +2,15 @@ import { createHash } from 'node:crypto';
 import { planTracked } from './plan-tracked.js';
 import { planUntracked } from './plan-untracked.js';
 import { buildContext, type PlanInput } from './resolve.js';
-import type { Action, ActionKind, BrakeInfo, Note, Plan } from './types.js';
+import type { RemoteUnsupported } from './remote/sync-remote.js';
+import {
+  UNSUPPORTED_TEXT,
+  type Action,
+  type ActionKind,
+  type BrakeInfo,
+  type Note,
+  type Plan,
+} from './types.js';
 
 export type { PlanInput } from './resolve.js';
 
@@ -92,6 +100,14 @@ export function plan(input: PlanInput): Plan {
         remoteId: ignored.id,
         message:
           'Google Forms, Sites, Apps Script and similar files cannot be exported; they are not synced',
+      });
+    } else if (UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] !== undefined) {
+      notes.push({
+        code: 'ignored',
+        path: ignored.path,
+        rule: 'ignored',
+        remoteId: ignored.id,
+        message: UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] ?? '',
       });
     } else if (ignored.reason === 'unrepresentable') {
       notes.push({

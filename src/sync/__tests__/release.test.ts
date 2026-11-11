@@ -41,6 +41,25 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
     expect(r.skipped.map((s) => s.path)).toEqual(['b.pdf', 'c.pdf']);
     expect(r.skipped[1]?.reason).toMatch(/name it in paths/);
   });
+  it('a file the remote reports no hash for is refused with that reason (OneDrive)', () => {
+    const r = sel(
+      {
+        records: [A],
+        local: [localEntry('a.pdf')],
+        remote: [remoteEntry('r1', 'a.pdf', { hash: null })],
+        remoteHashKind: 'quickXor',
+        remoteProvider: 'microsoft',
+      },
+      { paths: ['a.pdf'] },
+    );
+    expect(r.eligible).toEqual([]);
+    expect(r.skipped).toEqual([
+      {
+        path: 'a.pdf',
+        reason: 'OneDrive reports no hash for this file; it cannot be released safely',
+      },
+    ]);
+  });
   it('binary needs L = record = Drive md5; native needs L = last export', () => {
     const r = sel(
       {

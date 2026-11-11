@@ -78,6 +78,9 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
   if (L.kind === 'present') {
     const st = localState(ctx, record, L.entry);
     if (!st) return 'local file could not be hashed';
+    if (!st.changed && R.entry.native === null && R.entry.hash === null) {
+      return `${providerLabel(ctx.input.remoteProvider ?? 'google')} reports no hash for this file; it cannot be released safely`;
+    }
     if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
       return 'not in sync (changed locally or in Drive); run sync_run first';
     }

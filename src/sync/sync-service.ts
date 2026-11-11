@@ -22,6 +22,7 @@ import {
 } from './pair-admin.js';
 import type { PairStore } from './pair-store.js';
 import { GoogleSyncRemote } from './remote/google-remote.js';
+import { providerLabel } from './remote/remote-names.js';
 import type { SyncRemote } from './remote/sync-remote.js';
 import { absInside } from './paths.js';
 import { plan as makePlan } from './planner.js';
@@ -177,6 +178,7 @@ export class SyncService {
       const file = await this.store.load(input.name);
       await checkRoots(this.env, file.pair);
       const { plan, remote, local, feed } = await this.buildPlan(file);
+      const syncRemote = await this.env.remoteFor(file.pair);
       const name = file.pair.name;
       // Spec §4.1: the run persists the feed (dry run or apply), cursor and evidence together.
       // An apply's first executor save carries them; the other paths save them alone.
@@ -228,14 +230,14 @@ export class SyncService {
           dryRun: true,
           aborted: {
             reason: 'mass-delete',
-            message: `Would move ${trashRemote} Drive file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
+            message: `Would move ${trashRemote} ${providerLabel(syncRemote.provider)} file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
           },
         });
       }
       await this.removeStaleParts(file.pair, local);
       const executor = new Executor(
         {
-          remote: await this.env.remoteFor(file.pair),
+          remote: syncRemote,
           digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,

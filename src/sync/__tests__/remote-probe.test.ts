@@ -9,6 +9,7 @@ import {
 import { createFakeDrive } from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
 import { SYNC_FILE_FIELDS } from '../remote/google-remote.js';
+import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
 import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
 import type { RemoteScan } from '../types.js';
 import { binary } from './drive-tree.js';
@@ -43,6 +44,19 @@ function getter(files: Record<string, DriveFile | Error>): ItemGetter {
 }
 
 describe('probeRecord', () => {
+  it('a OneDrive item that became unsupported is unknown with its text (spec §4.2)', async () => {
+    const remote: ItemGetter = {
+      get: async () => ({
+        ...toRemoteItemFromGraph({ id: 'r', name: 'Notes', package: { type: 'oneNote' } }),
+        parentId: ROOT,
+      }),
+    };
+    expect(await probeRecord('r', scan(), remote)).toEqual({
+      state: 'unknown',
+      reason: 'OneNote notebook, cannot be synced',
+    });
+  });
+
   it('a missing item is trashed only with deletion evidence (OneDrive sync spec §4.1)', async () => {
     const get = getter({});
     expect(await probeRecord('r', scan(), get)).toEqual({ state: 'unavailable' });

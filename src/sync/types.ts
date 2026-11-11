@@ -136,6 +136,13 @@ export interface RemoteEntry {
 
 export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';
 
+/** Report texts of the OneDrive items that are never synced (OneDrive sync spec §4.2). */
+export const UNSUPPORTED_TEXT: Readonly<Partial<Record<RemoteUnsupported, string>>> = {
+  onenote: 'OneNote notebook, cannot be synced',
+  special: 'special item, cannot be synced',
+  shared: 'shared item, out of scope',
+};
+
 export interface RemoteIgnored {
   id: string;
   /** Relative path when representable, else the raw name. */

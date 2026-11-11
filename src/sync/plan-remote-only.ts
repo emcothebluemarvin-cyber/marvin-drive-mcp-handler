@@ -31,6 +31,12 @@ export function planRemoteOnly(
   R: RemoteResolution,
 ): TrackedResult {
   const { ctx, record, out, note, act } = s;
+  const bin =
+    ctx.input.remoteProvider === 'microsoft' ? 'the OneDrive recycle bin' : 'the Drive trash';
+  const purged =
+    ctx.input.remoteProvider === 'microsoft'
+      ? 'it is removed by OneDrive after 30 days'
+      : 'it is purged after 30 days';
   const entry = L.kind === 'present' ? L.entry : null;
   let lDigests: LocalDigests | null = null;
   if (entry) {
@@ -81,7 +87,7 @@ export function planRemoteOnly(
       return note(
         'remote-only-trashed',
         'O2',
-        'cannot restore: the only copy is in the Drive trash; restore it there first',
+        `cannot restore: the only copy is in ${bin}; restore it there first`,
       );
     }
     if (R.kind === 'unavailable') {
@@ -89,11 +95,7 @@ export function planRemoteOnly(
     }
   }
   if (R.kind === 'trashed') {
-    note(
-      'remote-only-trashed',
-      'O5',
-      'the only copy is in the Drive trash; it is purged after 30 days',
-    );
+    note('remote-only-trashed', 'O5', `the only copy is in ${bin}; ${purged}`);
     return record.remoteTrashed
       ? out
       : act({

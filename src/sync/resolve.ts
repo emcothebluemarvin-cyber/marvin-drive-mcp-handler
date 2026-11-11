@@ -1,5 +1,5 @@
 import { ancestorKeys, foldKey, isUnder } from './paths.js';
-import type { HashKind, SyncRemote } from './remote/sync-remote.js';
+import type { HashKind, RemoteUnsupported, SyncRemote } from './remote/sync-remote.js';
 import type {
   LocalDigests,
   LocalEntry,
@@ -12,6 +12,7 @@ import type {
   RemoteScan,
   SyncRecord,
 } from './types.js';
+import { UNSUPPORTED_TEXT } from './types.js';
 
 export interface PlanInput {
   pair: Pair;
@@ -179,12 +180,13 @@ export function resolveRemote(ctx: PlanContext, record: SyncRecord): RemoteResol
   if (scanned) return { kind: 'present', entry: scanned, moved: scanned.key !== record.path };
   const ignored = ctx.ignoredById.get(record.remoteId);
   if (ignored) {
+    const unsupported = UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported];
     return {
       kind: 'unknown',
       reason:
         ignored.reason === 'native-unsupported'
           ? 'is a Google file type that cannot be exported'
-          : 'renamed in Drive to a name that cannot be synced',
+          : (unsupported ?? 'renamed in Drive to a name that cannot be synced'),
     };
   }
   const probe = ctx.input.probes.get(record.remoteId);

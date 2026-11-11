@@ -3,7 +3,7 @@ import { isAbortError } from './errors.js';
 import { baseName, isIgnoredName, isRepresentable } from './paths.js';
 import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import { toRemoteEntry } from './remote-scanner.js';
-import type { Probe, RemoteScan } from './types.js';
+import { UNSUPPORTED_TEXT, type Probe, type RemoteScan } from './types.js';
 
 /** What a probe needs from the remote. */
 export type ItemGetter = Pick<SyncRemote, 'get'>;
@@ -59,7 +59,8 @@ export async function probeRecord(
       return unknown('is no longer a regular file');
     }
     if (file.kind === 'unsupported') {
-      return unknown('is a Google file type that cannot be exported');
+      const text = file.unsupported ? UNSUPPORTED_TEXT[file.unsupported] : undefined;
+      return unknown(text ?? 'is a Google file type that cannot be exported');
     }
     const entry = toRemoteEntry(file, parentKey, parent, [parent]);
     if (!isRepresentable(baseName(entry.key))) {
