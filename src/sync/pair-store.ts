@@ -32,7 +32,13 @@ const pairSchema = z.object({
   lastAppliedRunAt: z.string().nullable(),
   firstAppliedRunAt: z.string().nullable(),
   nativeBaselineDone: z.boolean().default(false),
+  // Added in version 2 (OneDrive sync spec §4.5); version-1 files start empty.
+  remoteCursor: z.string().nullable().default(null),
+  remoteDeletedIds: z.array(z.string()).default([]),
 });
+
+/** The pair file version this binary writes; a higher one comes from a newer release. */
+const PAIR_FILE_VERSION = 2;
 
 const contentHash = z.object({ kind: z.enum(['md5', 'quickXor']), value: z.string() });
 
@@ -141,6 +147,12 @@ export class PairStore {
       json = JSON.parse(text);
     } catch (err) {
       throw new ValidationError(`Sync pair file for "${name}" is not valid JSON`, { cause: err });
+    }
+    const version = (json as { version?: unknown } | null)?.version;
+    if (typeof version === 'number' && version > PAIR_FILE_VERSION) {
+      throw new ValidationError(
+        `Sync pair file for "${name}": this pair was saved by a newer marvin-drive; update it`,
+      );
     }
     const parsed = parsePairFile(json);
     if (!parsed.success) {

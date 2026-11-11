@@ -36,6 +36,10 @@ export interface Pair {
   firstAppliedRunAt: string | null;
   /** Addendum §4.1: false until the first applied run that baselined Google-native files. */
   nativeBaselineDone: boolean;
+  /** OneDrive deletion feed cursor (spec §4.1); always null on Google pairs. */
+  remoteCursor: string | null;
+  /** Remote ids the deletion feed reported deleted and not yet acted on; empty on Google. */
+  remoteDeletedIds: string[];
 }
 
 export interface SyncRecord {

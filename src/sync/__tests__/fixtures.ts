@@ -52,6 +52,8 @@ export function makePair(overrides: Partial<Pair> = {}): Pair {
     lastAppliedRunAt: '2026-11-02T00:00:00.000Z',
     firstAppliedRunAt: '2026-11-02T00:00:00.000Z',
     nativeBaselineDone: true,
+    remoteCursor: null,
+    remoteDeletedIds: [],
     ...overrides,
   };
 }

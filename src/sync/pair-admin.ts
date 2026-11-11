@@ -146,6 +146,8 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       lastAppliedRunAt: null,
       firstAppliedRunAt: null,
       nativeBaselineDone: false,
+      remoteCursor: null,
+      remoteDeletedIds: [],
     };
     const file: PairFile = { version: 2, pair, records: [] };
     await env.store.save(file);
