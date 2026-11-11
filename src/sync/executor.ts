@@ -1,7 +1,6 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
 import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { md5Of, remoteUnchangedSince } from './content-compare.js';
@@ -58,7 +57,6 @@ const MAX_CONFLICT_NAMES = 100;
 export { conflictName } from './exec-records.js';
 
 export interface ExecutorDeps {
-  ops: OperationRunner;
   /** The pair's remote; every remote read and write goes through it. */
   remote: SyncRemote;
   audit: AuditSink;
@@ -203,8 +201,7 @@ export class Executor {
   private host(): ExportHost {
     return {
       file: this.file,
-      ops: this.deps.ops,
-      logger: this.deps.logger,
+      remote: this.deps.remote,
       clock: this.deps.clock,
       commit: (action, mutate) => this.commit(action, mutate),
       audit: (op, action, remoteId) => this.audit(op, action, remoteId),
@@ -380,11 +377,8 @@ export class Executor {
     // N6: a Google-native file is re-read and exported instead of downloaded.
     const written = remote.native
       ? await exportOver(this.host(), to, expect, remote)
-      : await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-          downloadReplace(to, () => ctx.drive.downloadMedia(remote.id), {
-            expect,
-            expectedMd5: remote.md5,
-          }),
+      : await this.deps.remote.download(remote.id, (open) =>
+          downloadReplace(to, open, { expect, expectedMd5: remote.md5 }),
         );
     const after = await this.statFields(action.key, written.md5);
     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
@@ -396,15 +390,10 @@ export class Executor {
   private async downloadNew(action: Action): Promise<Partial<ActionOutcome>> {
     const remote = need(action.remote, 'remote');
     const abs = await prepareParent(this.pair.localDir, action.key);
-    const written = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-      placeExclusive(
-        path.dirname(abs),
-        () => path.basename(abs),
-        () => ctx.drive.downloadMedia(remote.id),
-        {
-          expectedMd5: remote.md5,
-        },
-      ),
+    const written = await this.deps.remote.download(remote.id, (open) =>
+      placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
+        expectedMd5: remote.md5,
+      }),
     );
     const local = await this.statFields(action.key, written.md5);
     await this.commit(action, () =>
@@ -418,11 +407,8 @@ export class Executor {
     const local = need(action.local, 'local');
     const remote = need(action.remote, 'remote');
     const abs = absInside(this.pair.localDir, local.name);
-    const written = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-      downloadReplace(abs, () => ctx.drive.downloadMedia(remote.id), {
-        expect: statOf(local),
-        expectedMd5: remote.md5,
-      }),
+    const written = await this.deps.remote.download(remote.id, (open) =>
+      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: remote.md5 }),
     );
     const after = await this.statFields(local.name, written.md5);
     await this.commit(action, () =>
@@ -440,16 +426,11 @@ export class Executor {
     const abs = absInside(this.pair.localDir, local.name);
     const at = this.deps.clock();
     const base = path.basename(abs);
-    const copy = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-      placeExclusive(
-        path.dirname(abs),
-        (i) => conflictName(base, at, i),
-        () => ctx.drive.downloadMedia(remote.id),
-        {
-          expectedMd5: remote.md5,
-          maxAttempts: MAX_CONFLICT_NAMES,
-        },
-      ),
+    const copy = await this.deps.remote.download(remote.id, (open) =>
+      placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
+        expectedMd5: remote.md5,
+        maxAttempts: MAX_CONFLICT_NAMES,
+      }),
     );
     const conflictCopy = path.relative(this.pair.localDir, copy.path).split(path.sep).join('/');
     await this.audit('sync_conflict', action, remote.id);

@@ -205,7 +205,6 @@ export class SyncService {
       await this.removeStaleParts(file.pair, local);
       const executor = new Executor(
         {
-          ops: this.ops,
           remote: this.env.remoteFor(file.pair),
           audit: this.deps.audit,
           logger: this.log,

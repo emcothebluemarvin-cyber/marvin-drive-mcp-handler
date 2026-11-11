@@ -16,13 +16,12 @@ import {
   type FakeDrive,
 } from '../../files/__tests__/fakes.js';
 import { Executor, conflictName } from '../executor.js';
-import { GoogleSyncRemote } from '../remote/google-remote.js';
+import { GoogleSyncRemote, SYNC_EXPORT_FIELDS } from '../remote/google-remote.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
 import { buildReport } from '../report.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { SYNC_EXPORT_FIELDS } from '../exec-export.js';
 import type { Action, LocalEntry, PairFile, Plan, RemoteEntry, SyncRecord } from '../types.js';
 import type { LocalTrash } from '../trash.js';
 import {
@@ -90,7 +89,6 @@ function executor(
   });
   return new Executor(
     {
-      ops,
       remote: new GoogleSyncRemote(ops, 'emco', DEFAULT_GOOGLE_EXPORT),
       audit,
       logger: silentLogger(),

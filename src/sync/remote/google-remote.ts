@@ -137,7 +137,7 @@ export class GoogleSyncRemote implements SyncRemote {
   readonly provider = 'google';
   readonly hashKind = 'md5';
   readonly rootId = 'root';
-  private readonly nativeFiles = new WeakMap<NativeSource, DriveFile>();
+  private readonly nativeFiles = new WeakMap<NativeSource, { id: string; file: DriveFile }>();
 
   constructor(
     private readonly ops: OperationRunner,
@@ -285,7 +285,7 @@ export class GoogleSyncRemote implements SyncRemote {
       ctx.drive.getFile(id, SYNC_EXPORT_FIELDS),
     );
     const source: NativeSource = { item: this.item(file) };
-    this.nativeFiles.set(source, file);
+    this.nativeFiles.set(source, { id, file });
     return source;
   }
 
@@ -294,10 +294,10 @@ export class GoogleSyncRemote implements SyncRemote {
     plan: ExportPlan,
     consume: (open: OpenStream) => Promise<T>,
   ): Promise<T> {
-    const file = this.nativeFiles.get(source);
-    if (!file) throw new ValidationError('Internal: export source was not read by this remote');
-    return this.ops.exec(this.account, 'idempotent', source.item.id, (ctx) =>
-      consume(() => openExport(ctx.drive, file, plan, this.ops.log)),
+    const read = this.nativeFiles.get(source);
+    if (!read) throw new ValidationError('Internal: export source was not read by this remote');
+    return this.ops.exec(this.account, 'idempotent', read.id, (ctx) =>
+      consume(() => openExport(ctx.drive, read.file, plan, this.ops.log)),
     );
   }
 
