@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
+import type { ReleaseResult } from '../../sync/release.js';
 import type { PairSummary } from '../../sync/sync-service.js';
 import type { Pair, SyncReport } from '../../sync/types.js';
 import { makePair } from '../../sync/__tests__/fixtures.js';
@@ -20,6 +21,16 @@ const REPORT: SyncReport = {
   failures: [],
   notRun: [],
   candidates: { local: [], remote: [], truncated: false },
+  pendingConfirmation: [],
+};
+
+const RELEASE: ReleaseResult = {
+  pair: 'docs',
+  dryRun: true,
+  released: [{ path: 'a.pdf', status: 'would release' }],
+  skipped: [{ path: 'b.pdf', reason: 'not in sync' }],
+  failed: [],
+  removedDirs: [],
 };
 
 const SUMMARY: PairSummary = {
@@ -33,11 +44,12 @@ const SUMMARY: PairSummary = {
   lastAppliedRunAt: null,
 };
 
-function setup(report: SyncReport = REPORT, answer = true) {
+function setup(report: SyncReport = REPORT, answer = true, release: ReleaseResult = RELEASE) {
   const lines: string[] = [];
   const service = {
     listPairs: vi.fn(async () => [SUMMARY]),
     run: vi.fn(async () => report),
+    release: vi.fn(async () => release),
     repairMarker: vi.fn(async (_name: string, confirm: (pair: Pair) => Promise<boolean>) => {
       const repaired = await confirm(makePair({ localDir: '/Users/x/Docs' }));
       return { repaired, localDir: '/Users/x/Docs', caseInsensitive: true };
@@ -102,6 +114,45 @@ describe('sync CLI', () => {
     expect(f.deps.setExitCode).toHaveBeenCalledWith(1);
   });
 
+  it('passes --confirm-remote-trash and prints pending deletions without failing', async () => {
+    const pending: SyncReport = {
+      ...REPORT,
+      dryRun: true,
+      pendingConfirmation: [{ path: 'gone.pdf', remoteId: 'r9' }],
+    };
+    const { service, run, lines, deps } = setup(pending);
+    await run('run', 'docs', '--apply', '--plan-id', 'abc', '--confirm-remote-trash');
+    expect(service.run).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: true,
+      allowMassDelete: false,
+      planId: 'abc',
+      confirmRemoteTrash: true,
+    });
+    const text = lines.at(-1) ?? '';
+    expect(text).toContain('Deleted locally');
+    expect(text).toContain('gone.pdf');
+    expect(text).toContain(`--plan-id ${pending.planId} --confirm-remote-trash`);
+    expect(text).toContain('marvin-drive sync release docs');
+    expect(deps.setExitCode).not.toHaveBeenCalled();
+  });
+  it('allows --confirm-remote-trash on a dry run without --plan-id', async () => {
+    const { service, run } = setup();
+    await run('run', 'docs', '--confirm-remote-trash');
+    expect(service.run).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: false,
+      allowMassDelete: false,
+      confirmRemoteTrash: true,
+    });
+  });
+  it('refuses --confirm-remote-trash with --apply but without --plan-id', async () => {
+    const { service, run } = setup();
+    await expect(run('run', 'docs', '--apply', '--confirm-remote-trash')).rejects.toThrow(
+      'pass the planId of the dry run you reviewed',
+    );
+    expect(service.run).not.toHaveBeenCalled();
+  });
   it('repair-marker asks for confirmation', async () => {
     const yes = setup(REPORT, true);
     await yes.run('repair-marker', 'docs');
@@ -128,6 +179,48 @@ describe('formatReport', () => {
     );
   });
 
+  it('shows remote-only counts and the releasable hint', async () => {
+    const text = formatReport({ ...REPORT, releasable: ['a.pdf', 'b.pdf'] });
+    expect(text).toContain(
+      'Releasable: 2 file(s) are in sync — marvin-drive sync release docs --all (dry run first)',
+    );
+    const { lines, run } = setup();
+    await run('list');
+    expect(lines[0]).toContain('remote-only 0');
+  });
+
+  it('releases named paths or --all, dry run unless --apply', async () => {
+    const { service, run, lines, deps } = setup();
+    await run('release', 'docs', 'a.pdf', 'b.pdf');
+    expect(service.release).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: false,
+      paths: ['a.pdf', 'b.pdf'],
+    });
+    expect(lines.at(-1)).toContain('would release: a.pdf');
+    expect(lines.at(-1)).toContain('b.pdf — not in sync');
+    await run('release', 'docs', '--all', '--apply');
+    expect(service.release).toHaveBeenLastCalledWith({ name: 'docs', apply: true, all: true });
+    await run('release', 'docs', '--all', 'a.pdf');
+    expect(service.release).toHaveBeenLastCalledWith({
+      name: 'docs',
+      apply: false,
+      all: true,
+      paths: ['a.pdf'],
+    });
+    expect(deps.setExitCode).not.toHaveBeenCalled();
+  });
+  it('release exits 1 when a file could not be released', async () => {
+    const failed = {
+      ...RELEASE,
+      dryRun: false,
+      released: [],
+      failed: [{ path: 'a.pdf', reason: 'no trash' }],
+    };
+    const { run, deps } = setup(REPORT, true, failed);
+    await run('release', 'docs', 'a.pdf', '--apply');
+    expect(deps.setExitCode).toHaveBeenCalledWith(1);
+  });
   it('says when there is nothing to do', () => {
     const empty: SyncReport = { ...REPORT, dryRun: true, actions: {}, conflicts: [], unknown: [] };
     expect(formatReport(empty)).toBe('docs — dry run (planId abcdef012345)\nNothing to do.');

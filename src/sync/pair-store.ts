@@ -41,6 +41,7 @@ const pairSchema = z.object({
   createdAt: z.string(),
   lastAppliedRunAt: z.string().nullable(),
   firstAppliedRunAt: z.string().nullable(),
+  nativeBaselineDone: z.boolean().default(false),
 });
 
 const recordSchema = z.object({

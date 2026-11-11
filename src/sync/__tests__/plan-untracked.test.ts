@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CANDIDATE_CAP, planUntracked, type Claims } from '../plan-untracked.js';
 import { buildContext } from '../resolve.js';
-import { localEntry, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, remoteEntry } from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const NO_CLAIMS: Claims = { folds: new Set(), localNames: new Set() };
@@ -122,6 +122,14 @@ describe('untracked keys (spec §6.5)', () => {
       rule: 'U6',
       selection: { add: ['a.pdf'] },
     });
+  });
+
+  it('a Drive native and a binary with the same export key are ambiguous (no action)', () => {
+    const result = run({
+      remote: [nativeEntry('g1', 'Plan.docx'), remoteEntry('b1', 'Plan.docx')],
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toMatchObject([{ code: 'ambiguous', path: 'Plan.docx' }]);
   });
 
   it('U7 new Drive file colliding with a local file → collision', () => {
@@ -274,5 +282,67 @@ describe('review regressions', () => {
   it('U8 counts ctime: a copied file with an old mtime is still a candidate', () => {
     const result = run({ local: [localEntry('copied.pdf', { mtimeMs: 1000, ctimeMs: RECENT })] });
     expect(result.candidates.local.map((c) => c.path)).toEqual(['copied.pdf']);
+  });
+});
+
+describe('untracked Google-native files (spec §6.5, §6.6)', () => {
+  const DOC = nativeEntry('g1', 'Plan.docx');
+
+  it('U0b a local file at the export path → ambiguous-native, nothing written', () => {
+    for (const selection of [[], ['Plan.docx']]) {
+      const result = run({ selection, local: [localEntry('Plan.docx')], remote: [DOC] });
+      expect(result.actions).toEqual([]);
+      expect(result.notes).toMatchObject([
+        { code: 'ambiguous-native', rule: 'U0b', path: 'Plan.docx', remoteId: 'g1' },
+      ]);
+    }
+  });
+  it('U0b a hashed local file colliding with a native, also in the upgrade window → ambiguous-native, never upload/adopt/conflict', () => {
+    for (const pair of [{}, { nativeBaselineDone: false }]) {
+      for (const selection of [[], ['Plan.docx']]) {
+        const result = run({
+          pair,
+          selection,
+          local: [localEntry('Plan.docx')],
+          remote: [DOC],
+          md5s: [['Plan.docx', 'md5-local']],
+        });
+        expect(result.actions).toEqual([]);
+        expect(result.candidates.remote).toEqual([]);
+        expect(result.notes).toMatchObject([
+          { code: 'ambiguous-native', rule: 'U0b', path: 'Plan.docx', remoteId: 'g1' },
+        ]);
+      }
+    }
+  });
+  it('U3 selected → export-new', () => {
+    const result = run({ selection: ['Plan.docx'], remote: [DOC] });
+    expect(result.actions.map((a) => [a.kind, a.rule, a.key])).toEqual([
+      ['export-new', 'U3', 'Plan.docx'],
+    ]);
+  });
+  it('U6 new after the first applied run → export-new and selected', () => {
+    expect(run({ remote: [DOC] }).actions).toMatchObject([
+      { kind: 'export-new', rule: 'U6', key: 'Plan.docx', selection: { add: ['Plan.docx'] } },
+    ]);
+  });
+  it('U5 upgrade window: unselected natives are candidates, binaries still adopt, selected natives export', () => {
+    const pair = { nativeBaselineDone: false };
+    const unselected = run({ pair, remote: [DOC, remoteEntry('n1', 'new.pdf')] });
+    expect(unselected.actions.map((a) => [a.kind, a.key])).toEqual([['download-new', 'new.pdf']]);
+    expect(unselected.candidates.remote.map((c) => c.path)).toEqual(['Plan.docx']);
+    const selected = run({ pair, selection: ['Plan.docx'], remote: [DOC] });
+    expect(selected.actions.map((a) => [a.kind, a.rule])).toEqual([['export-new', 'U3']]);
+  });
+  it('U5 upgrade window: a native selected during the window is exported (U3), with its selection kept', () => {
+    const result = run({
+      pair: { nativeBaselineDone: false },
+      selection: ['Plan.docx'],
+      remote: [DOC],
+    });
+    expect(result.actions).toMatchObject([
+      { kind: 'export-new', rule: 'U3', key: 'Plan.docx', remote: { id: 'g1' }, selection: {} },
+    ]);
+    expect(result.candidates.remote).toEqual([]);
   });
 });

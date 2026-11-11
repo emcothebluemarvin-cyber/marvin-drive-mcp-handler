@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ValidationError } from '../errors.js';
+import { EXPORT_FORMATS } from '../files/export-formats.js';
 import type { Logger } from '../logger.js';
 import type { SyncService } from '../sync/sync-service.js';
 import { PAIR_NAME } from '../sync/types.js';
@@ -12,6 +13,7 @@ export const SYNC_TOOL_NAMES = [
   'sync_scan',
   'sync_select',
   'sync_run',
+  'sync_release',
   'sync_remove_pair',
 ] as const;
 
@@ -45,6 +47,17 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           .min(1)
           .optional()
           .describe('Parent for remoteFolderName (default: My Drive)'),
+        googleExport: z
+          .object({
+            document: z.enum(EXPORT_FORMATS).optional(),
+            spreadsheet: z.enum(EXPORT_FORMATS).optional(),
+            presentation: z.enum(EXPORT_FORMATS).optional(),
+            drawing: z.enum(EXPORT_FORMATS).optional(),
+          })
+          .optional()
+          .describe(
+            'Local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
+          ),
         account,
       },
     },
@@ -100,7 +113,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_run',
     {
       description:
-        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion.',
+        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
       inputSchema: {
         name,
         apply: z.boolean().optional().describe('Default false (dry run)'),
@@ -110,6 +123,12 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           .optional()
           .describe('planId of the dry run the user approved; required with apply: true'),
         allowMassDelete: z.boolean().optional(),
+        confirmRemoteTrash: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also move the Drive copies of locally deleted files (pendingConfirmation) to the Drive trash; only after the user agreed, with the planId of the dry run they saw',
+          ),
       },
     },
     async (args) =>
@@ -121,6 +140,21 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
         }
         return sync.run(args);
       }),
+  );
+
+  server.registerTool(
+    'sync_release',
+    {
+      description:
+        'Move to Drive: remove the local copies of synced files and keep them in Drive only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
+      inputSchema: {
+        name,
+        paths: relPaths.optional(),
+        all: z.boolean().optional().describe('Release every file that is in sync'),
+        apply: z.boolean().optional().describe('Default false (dry run)'),
+      },
+    },
+    async (args) => respond(log, () => sync.release(args)),
   );
 
   server.registerTool(

@@ -74,13 +74,71 @@ afterEach(async () => {
 });
 
 describe('sync MCP tools', () => {
+  it('validates googleExport on sync_create_pair', async () => {
+    const bad = await call('sync_create_pair', {
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { presentation: 'csv' },
+    });
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toContain('Google Slides cannot be exported as "csv"');
+  });
   it('describe the conversational flow and the dry-run default', async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t.description ?? '']));
     expect(byName.get('sync_scan')).toContain('confirm it with them, then call sync_select');
     expect(byName.get('sync_run')).toContain('DRY RUN BY DEFAULT');
     expect(byName.get('sync_run')).toContain('apply without planId is rejected');
-    expect(byName.has('sync_release')).toBe(false);
+    expect(byName.get('sync_run')).toContain('pendingConfirmation');
+    expect(byName.get('sync_run')).toContain('ask the user');
+    expect(byName.get('sync_run')).toContain('sync_release');
+    expect(byName.get('sync_release')).toContain('DRY RUN BY DEFAULT');
+    expect(byName.get('sync_release')).toContain('pendingConfirmation');
+    expect(byName.get('sync_release')).toContain(
+      'Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır',
+    );
+  });
+  it('trashes the Drive copy of a locally deleted file only with confirmRemoteTrash', async () => {
+    await writeFile(path.join(local, 'voyage.txt'), 'log');
+    await call('sync_create_pair', { name: 'docs', localDir: local, remoteFolderId: 'ROOT' });
+    await call('sync_select', { name: 'docs', add: ['voyage.txt'] });
+    const first = await call('sync_run', { name: 'docs' });
+    await call('sync_run', {
+      name: 'docs',
+      apply: true,
+      planId: (first.data as { planId: string }).planId,
+    });
+    await rm(path.join(local, 'voyage.txt'));
+    const dry = await call('sync_run', { name: 'docs' });
+    expect(dry.data).toMatchObject({ pendingConfirmation: [{ path: 'voyage.txt' }] });
+    const planId = (dry.data as { planId: string }).planId;
+    const res = await call('sync_run', {
+      name: 'docs',
+      apply: true,
+      planId,
+      confirmRemoteTrash: true,
+    });
+    expect(res.data).toMatchObject({ actions: { 'trash-remote': ['voyage.txt'] } });
+    expect(mem.childrenOf('ROOT')).toEqual([]);
+  });
+  it('sync_release dry run lists files and needs paths or all', async () => {
+    await writeFile(path.join(local, 'voyage.txt'), 'Seafaring log');
+    await call('sync_create_pair', { name: 'docs', localDir: local, remoteFolderId: 'ROOT' });
+    await call('sync_select', { name: 'docs', add: ['voyage.txt'] });
+    const dry = await call('sync_run', { name: 'docs' });
+    await call('sync_run', {
+      name: 'docs',
+      apply: true,
+      planId: (dry.data as { planId: string }).planId,
+    });
+    const rel = await call('sync_release', { name: 'docs', all: true });
+    expect(rel.data).toMatchObject({
+      dryRun: true,
+      released: [{ path: 'voyage.txt', status: 'would release' }],
+    });
+    const bad = await call('sync_release', { name: 'docs' });
+    expect(bad).toMatchObject({ isError: true });
   });
 
   it('runs create → scan → select → dry run → apply with planId', async () => {

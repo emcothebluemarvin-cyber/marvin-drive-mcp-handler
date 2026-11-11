@@ -16,6 +16,8 @@ const KIND_ORDER: ActionKind[] = [
   'move-local',
   'download-new',
   'download-replace',
+  'export-new',
+  'export-replace',
   'conflict',
   'trash-remote',
   'trash-local',
@@ -64,6 +66,7 @@ export function plan(input: PlanInput): Plan {
   const notes: Note[] = [];
   const claimedFolds = new Set<string>();
   const claimedLocal = new Set<string>();
+  const inSync: string[] = [];
   const records = [...input.records].sort((a, b) =>
     a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
   );
@@ -73,6 +76,7 @@ export function plan(input: PlanInput): Plan {
     notes.push(...result.notes);
     for (const f of result.claimedFolds) claimedFolds.add(f);
     if (result.claimedLocal !== null) claimedLocal.add(result.claimedLocal);
+    if (result.inSync) inSync.push(record.path);
   }
   const untracked = planUntracked(ctx, { folds: claimedFolds, localNames: claimedLocal });
   actions.push(...untracked.actions);
@@ -80,13 +84,14 @@ export function plan(input: PlanInput): Plan {
 
   for (const ignored of input.remote.ignored) {
     if (ctx.trackedIds.has(ignored.id)) continue;
-    if (ignored.reason === 'native-skipped') {
+    if (ignored.reason === 'native-unsupported') {
       notes.push({
-        code: 'native-skipped',
+        code: 'native-unsupported',
         path: ignored.path,
         rule: 'ignored',
         remoteId: ignored.id,
-        message: 'Google Docs/Sheets/Slides sync arrives in Phase B',
+        message:
+          'Google Forms, Sites, Apps Script and similar files cannot be exported; they are not synced',
       });
     } else if (ignored.reason === 'unrepresentable') {
       notes.push({
@@ -112,6 +117,10 @@ export function plan(input: PlanInput): Plan {
     notes,
     candidates: untracked.candidates,
     brake: brakeFor(actions, tracked),
+    brakeUnconfirmed: brakeFor(
+      actions.filter((a) => a.reason !== 'local-deleted'),
+      tracked,
+    ),
     baseline: {
       files: [...new Set(baselineFiles)].sort(),
       folders: [
@@ -119,5 +128,13 @@ export function plan(input: PlanInput): Plan {
         ...input.remote.ignored.filter((i) => i.isFolder).map((i) => i.id),
       ].sort(),
     },
+    nativeBaseline: [
+      ...new Set(
+        input.remote.entries
+          .filter((r) => r.native !== null && !ctx.trackedIds.has(r.id))
+          .map((r) => r.id),
+      ),
+    ].sort(),
+    inSync: inSync.sort(),
   };
 }

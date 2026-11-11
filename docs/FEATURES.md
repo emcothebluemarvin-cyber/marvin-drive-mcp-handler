@@ -30,13 +30,15 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ Revision guards + conflict errors
 - ✅ Disabled-API errors
 
-### 5. Selective sync — Phase A (spec: `docs/superpowers/specs/2026-11-03-selective-sync-design.md`)
+### 5. Selective sync (spec: `docs/superpowers/specs/2026-11-03-selective-sync-design.md`, Phase B addendum `2026-11-07-sync-phase-b-addendum.md`)
 - ✅ Pairs: create (existing or new Drive folder), list, remove; root marker + case-sensitivity probe; overlap check
 - ✅ AI-assisted selection: `sync_scan` (previews, remote candidates) → `sync_select` (add/remove/exclude)
 - ✅ Pure three-way planner (B1–B14, U0–U8), ambiguity/unknown-state protection, mass-delete brake, stable `planId`
 - ✅ Executor: spec order, re-verification, exclusive local writes, conflict copies, Drive/OS trash, per-action persistence, audit
-- ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_remove_pair`; CLI `sync list/run/repair-marker`
-- ⬜ Phase B: Google-native exports, release ("move to Drive"), `sync_release`
+- ✅ MCP tools `sync_create_pair`, `sync_list_pairs`, `sync_scan`, `sync_select`, `sync_run`, `sync_release`, `sync_remove_pair`; CLI `sync list/run/release/repair-marker`
+- ✅ Phase B: Google-native exports (N1–N9, `googleExport`, upgrade baseline), release / "move to Drive" (`sync_release`, O0–O8, R0, `releasable`)
+- ✅ Confirmation before a local deletion trashes the Drive copy (`confirmRemoteTrash`, `pendingConfirmation`)
+- ✅ Provider boundary for a later OneDrive provider: `remote-kinds`, `content-compare`, no runtime `googleapis` under `src/sync`
 
 ### 6. Cross-platform (desktop: macOS, Windows, Linux; mobile needs a separate remote MCP)
 - ✅ File token store (`MARVIN_DRIVE_TOKEN_STORE=file`) for headless Linux / servers; keychain error hint

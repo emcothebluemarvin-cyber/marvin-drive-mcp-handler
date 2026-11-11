@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brakeFor, computePlanId, plan } from '../planner.js';
 import type { Action } from '../types.js';
-import { localEntry, record, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
 import { planInput } from './plan-input.js';
 
 function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
@@ -40,20 +40,21 @@ describe('plan composition', () => {
     ]);
   });
 
-  it('reports native-skipped and unrepresentable Drive files', () => {
+  it('reports native-unsupported and unrepresentable Drive files', () => {
     const p = plan(
       planInput({
         ignored: [
-          { id: 'g1', path: 'Plan', reason: 'native-skipped', isFolder: false },
+          { id: 'g1', path: 'Survey', reason: 'native-unsupported', isFolder: false },
           { id: 'u1', path: 'a/b', reason: 'unrepresentable', isFolder: false },
           { id: 's1', path: 'link', reason: 'shortcut', isFolder: false },
         ],
       }),
     );
     expect(p.notes.map((n) => [n.code, n.path])).toEqual([
-      ['native-skipped', 'Plan'],
+      ['native-unsupported', 'Survey'],
       ['unrepresentable', 'a/b'],
     ]);
+    expect(p.notes[0]?.message).toMatch(/cannot be exported/);
     expect(p.notes[1]?.message).toMatch(/rename it in Drive/);
     expect(p.notes[1]?.message).toMatch(/Windows/);
   });
@@ -71,7 +72,7 @@ describe('plan composition', () => {
           remoteEntry('d2', 'X.pdf'),
         ],
         ignored: [
-          { id: 'g1', path: 'Plan', reason: 'native-skipped', isFolder: false },
+          { id: 'g1', path: 'Plan', reason: 'native-unsupported', isFolder: false },
           { id: 'f9', path: '.git', reason: 'ignored-name', isFolder: true },
         ],
         unknownFolderIds: ['dupF'],
@@ -79,9 +80,63 @@ describe('plan composition', () => {
     );
     expect(p.baseline).toEqual({ files: ['d1', 'd2', 'g1', 'n1'], folders: ['dupF', 'f9'] });
   });
+
+  it('lists untracked Google-native Drive files for the upgrade baseline', () => {
+    const p = plan(
+      planInput({
+        records: [record('r0', 'a.pdf')],
+        local: [localEntry('a.pdf')],
+        remote: [
+          remoteEntry('r0', 'a.pdf'),
+          nativeEntry('g2', 'B.docx'),
+          nativeEntry('g1', 'A.docx'),
+          remoteEntry('n1', 'new.pdf'),
+        ],
+      }),
+    );
+    expect(p.nativeBaseline).toEqual(['g1', 'g2']);
+  });
+  it('lists records in sync (B1, N1) for releasable', () => {
+    const p = plan(
+      planInput({
+        records: [record('r1', 'a.pdf'), record('r2', 'b.pdf'), nativeRecord('g1', 'Plan.docx')],
+        local: [localEntry('a.pdf'), localEntry('Plan.docx')],
+        remote: [
+          remoteEntry('r1', 'a.pdf'),
+          remoteEntry('r2', 'b.pdf'),
+          nativeEntry('g1', 'Plan.docx'),
+        ],
+      }),
+    );
+    expect(p.inSync).toEqual(['Plan.docx', 'a.pdf']);
+  });
 });
 
 describe('mass-delete brake (spec §6.8)', () => {
+  it('brake counts every deletion; brakeUnconfirmed only those not awaiting confirmation', () => {
+    const records = ['a', 'b', 'c'].map((n, i) => record(`r${i}`, `${n}.pdf`));
+    const p = plan(
+      planInput({ records, remote: records.map((r) => remoteEntry(r.remoteId, r.path)) }),
+    );
+    expect(p.actions.map((a) => a.reason)).toEqual([
+      'local-deleted',
+      'local-deleted',
+      'local-deleted',
+    ]);
+    expect(p.brake.tripped).toBe(true);
+    expect(p.brakeUnconfirmed).toEqual({
+      tripped: false,
+      trashRemote: 0,
+      trashLocal: 0,
+      tracked: 3,
+    });
+  });
+
+  it('planId does not depend on the reason', () => {
+    const [a] = trash('trash-remote', 1);
+    expect(computePlanId([{ ...a!, reason: 'local-deleted' }])).toBe(computePlanId([a!]));
+  });
+
   it('trips above max(10, 20% of tracked)', () => {
     expect(brakeFor(trash('trash-remote', 10), 100).tripped).toBe(false);
     expect(brakeFor(trash('trash-remote', 11), 30).tripped).toBe(true);

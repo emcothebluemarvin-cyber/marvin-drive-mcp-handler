@@ -1,3 +1,4 @@
+import type { ReleaseResult } from '../sync/release.js';
 import type { PairSummary } from '../sync/sync-service.js';
 import type { SyncReport } from '../sync/types.js';
 
@@ -7,7 +8,7 @@ export function formatPairs(pairs: readonly PairSummary[]): string {
     .map((p) => {
       const c = p.counts;
       const last = p.lastAppliedRunAt ?? 'never';
-      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
+      return `${p.name.padEnd(20)} ${p.localDir} ⇄ ${p.remoteFolderId} (${p.account})\n  selected ${c.selected} · tracked ${c.tracked} · remote-only ${c.remoteOnly} · excluded ${c.excluded} · baseline ${c.baseline} · last applied ${last}`;
     })
     .join('\n');
 }
@@ -44,7 +45,9 @@ export function formatReport(r: SyncReport): string {
   lines.push(
     ...section(
       'Warnings',
-      r.warnings.map((w) => `${w.path}: ${w.code}${w.message ? ` — ${w.message}` : ''}`),
+      r.warnings.map(
+        (w) => `${w.path ? `${w.path}: ` : ''}${w.code}${w.message ? ` — ${w.message}` : ''}`,
+      ),
     ),
   );
   lines.push(
@@ -54,6 +57,24 @@ export function formatReport(r: SyncReport): string {
     ),
   );
   lines.push(...section('Not run', r.notRun));
+  if (r.pendingConfirmation.length > 0) {
+    lines.push(
+      ...section(
+        'Deleted locally — Drive copy kept until you decide',
+        r.pendingConfirmation.map((p) => p.path),
+      ),
+      r.dryRun
+        ? `  Delete in Drive too: marvin-drive sync run ${r.pair} --apply --plan-id ${r.planId} --confirm-remote-trash`
+        : '  Delete in Drive too: run a new dry run, then apply it with its --plan-id and --confirm-remote-trash',
+      `  Keep in Drive only: marvin-drive sync release ${r.pair} <paths…> --apply`,
+      '  (Confirming covers all of them; release the ones to keep first.)',
+    );
+  }
+  if (r.releasable && r.releasable.length > 0) {
+    lines.push(
+      `Releasable: ${r.releasable.length} file(s) are in sync — marvin-drive sync release ${r.pair} --all (dry run first)`,
+    );
+  }
   const { local, remote, truncated } = r.candidates;
   if (local.length + remote.length > 0) {
     lines.push(
@@ -67,4 +88,30 @@ export function formatReport(r: SyncReport): string {
 /** Exit code 1 if anything failed or the run aborted (spec §9). */
 export function reportFailed(r: SyncReport): boolean {
   return r.aborted !== null || r.failures.length > 0 || r.notRun.length > 0;
+}
+
+export function formatRelease(r: ReleaseResult): string {
+  const lines = [`${r.pair} — ${r.dryRun ? 'release dry run' : 'release applied'}`];
+  lines.push(
+    ...section(
+      'Release',
+      r.released.map((x) => `${x.status}: ${x.path}`),
+    ),
+  );
+  lines.push(
+    ...section(
+      'Skipped',
+      r.skipped.map((s) => `${s.path} — ${s.reason}`),
+    ),
+  );
+  lines.push(
+    ...section(
+      'Failed (nothing changed)',
+      r.failed.map((f) => `${f.path} — ${f.reason}`),
+    ),
+  );
+  lines.push(...section('Removed empty folders', r.removedDirs));
+  if (r.dryRun && r.released.length > 0) lines.push('Run again with --apply to release.');
+  if (lines.length === 1) lines.push('Nothing to release.');
+  return lines.join('\n');
 }

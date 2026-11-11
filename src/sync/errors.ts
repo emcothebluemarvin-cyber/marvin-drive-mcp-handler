@@ -35,6 +35,15 @@ export class ChecksumMismatchError extends AppError {
 
 export class LocalTrashError extends AppError {
   readonly code = 'SYNC_LOCAL_TRASH';
+
+  /** @param reason short cause without the path, when known (used by pre-checks). */
+  constructor(
+    message: string,
+    options?: ErrorOptions,
+    readonly reason?: string,
+  ) {
+    super(message, options);
+  }
 }
 
 /** The pair file could not be saved; continuing would act without a durable record (spec §7). */
@@ -51,4 +60,22 @@ export function isAbortError(err: unknown): boolean {
     err instanceof RateLimitError ||
     err instanceof PersistenceError
   );
+}
+
+/** Safe message of any thrown value (AppError messages are user-facing). */
+export function messageOf(err: unknown): string {
+  if (err instanceof AppError) return err.message;
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** N5: an export failed after the local edit was moved aside; carries the kept name. */
+export class LocalEditKeptError extends AppError {
+  readonly code = 'SYNC_LOCAL_EDIT_KEPT';
+
+  constructor(
+    readonly kept: string,
+    readonly original: unknown,
+  ) {
+    super(`${messageOf(original)}; your local edit is kept as ${kept}`, { cause: original });
+  }
 }

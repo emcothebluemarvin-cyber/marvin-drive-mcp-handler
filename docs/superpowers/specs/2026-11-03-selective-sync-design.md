@@ -182,15 +182,15 @@ Untracked native R with L present at the export key → `ambiguous-native` (repo
 
 | # | Situation | Action |
 |---|---|---|
-| O0 | `restorePending`, L present with md5 = R md5 (native: = `K.localMd5`) | `adopt`; clear `remoteOnly` and `restorePending` |
+| O0 | `restorePending`, L present with md5 = R md5 (native: = `K.localMd5`) | `adopt` (native whose R changed since that export: `export-replace`); clear `remoteOnly` and `restorePending` |
 | O1 | `restorePending` (set by `sync_select add`), R present-same or present-moved | `download-new` (native: `export-new`) at R's current key (exclusive; collision → report); clear `remoteOnly` and `restorePending` |
 | O2 | `restorePending`, R trashed / unavailable | report; keep flags |
-| O3 | L absent, R present-same | none (changed R → record refresh) |
+| O3 | L absent, R present-same | none (changed R → record refresh; a native keeps `remoteModifiedTime`, the export baseline) |
 | O4 | L absent, R present-moved | record path update; selection old key → new key |
 | O5 | R trashed | set `remoteTrashed`; warning every run `remote-only-trashed` ("the only copy is in Drive trash; purged after 30 days") |
 | O6 | `remoteTrashed` and R present again | clear `remoteTrashed` |
 | O7 | R moved-out / unavailable | as B13 / B14 |
-| O8 | L present again (same key, or `foldKey` on a case-insensitive volume) | md5 = R md5 (native: = `K.localMd5`) → clear `remoteOnly` (`adopt`); otherwise `collision` (report; nothing written) |
+| O8 | L present again (same key, or `foldKey` on a case-insensitive volume) | md5 = R md5 (native: = `K.localMd5`) → clear `remoteOnly` (`adopt`; native whose R changed since that export: `export-replace`); otherwise `collision` (report; nothing written) |
 
 Remote-only native records are never exported unless `restorePending` (regression test: released Google Doc, remote modified → no export).
 

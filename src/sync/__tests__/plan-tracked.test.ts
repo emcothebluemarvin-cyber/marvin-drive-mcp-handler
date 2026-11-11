@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { planTracked } from '../plan-tracked.js';
 import { buildContext } from '../resolve.js';
 import type { SyncRecord } from '../types.js';
-import { localEntry, record, remoteEntry } from './fixtures.js';
+import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const K = record('r1', 'a.pdf');
@@ -25,6 +25,23 @@ function only(o: InputOptions, k: SyncRecord = K) {
 }
 
 describe('dispatch (spec §6.3)', () => {
+  it('type-changed: the Drive file switched between binary and Google-native', () => {
+    const fromScan = run({ local: [L], remote: [nativeEntry('r1', 'a.pdf')] });
+    expect(fromScan.actions).toEqual([]);
+    expect(fromScan.notes[0]).toMatchObject({ code: 'unknown-state', rule: 'type-changed' });
+    expect(fromScan.notes[0]?.message).toMatch(/^type-changed:/);
+    const fromProbe = run({
+      local: [L],
+      probes: [['r1', { state: 'present', entry: nativeEntry('r1', 'a.pdf') }]],
+    });
+    expect(fromProbe.notes[0]).toMatchObject({ rule: 'type-changed' });
+    const nativeToBinary = run(
+      { local: [localEntry('Plan.docx')], remote: [remoteEntry('g1', 'Plan.docx')] },
+      nativeRecord('g1', 'Plan.docx'),
+    );
+    expect(nativeToBinary.notes[0]).toMatchObject({ rule: 'type-changed' });
+  });
+
   it('(a) unknown subtree beats everything', () => {
     const result = run({ local: [L], remote: [R], unknownLocal: [''] });
     expect(result.actions).toEqual([]);
@@ -40,13 +57,6 @@ describe('dispatch (spec §6.3)', () => {
     const result = run({ local: [L], remote: [R, remoteEntry('r9', 'A.pdf')] });
     expect(result.actions).toEqual([]);
     expect(result.notes[0]).toMatchObject({ code: 'ambiguous', path: 'a.pdf' });
-  });
-
-  it('(c)/(d) Phase B records never act', () => {
-    const remoteOnly = { ...K, remoteOnly: true };
-    const result = run({ remote: [R] }, remoteOnly);
-    expect(result.actions).toEqual([]);
-    expect(result.notes[0]).toMatchObject({ code: 'unknown-state', rule: 'phase-b' });
   });
 });
 
@@ -115,6 +125,14 @@ describe('binary tracked records (spec §6.4)', () => {
       kind: 'trash-remote',
       rule: 'B5',
       selection: { remove: ['a.pdf'] },
+    });
+  });
+
+  it('B5 trash-remote carries reason local-deleted', () => {
+    expect(only({ remote: [R] })).toMatchObject({
+      kind: 'trash-remote',
+      rule: 'B5',
+      reason: 'local-deleted',
     });
   });
 

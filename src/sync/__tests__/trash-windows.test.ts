@@ -127,6 +127,31 @@ describe('WindowsTrash path checks', () => {
     await expect(t.trash(abs)).rejects.toThrow(/network and device paths/);
   });
 
+  it('unavailableReason names a network path without writing anything', async () => {
+    const t = new WindowsTrash({
+      fs: { ...nodeTrashFs, realpath: async () => '\\\\srv\\share\\a.pdf' },
+      binDir: async () => {
+        throw new Error('must not be reached');
+      },
+    });
+    expect(await t.unavailableReason('Z:\\a.pdf')).toBe(
+      'network and device paths have no local Recycle Bin',
+    );
+  });
+
+  it('unavailableReason names a drive without a Recycle Bin, and is null when there is one', async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'marvin-recycle-pre-'));
+    try {
+      const fs = { ...nodeTrashFs, realpath: async () => 'D:\\a.pdf' };
+      const missing = new WindowsTrash({ fs, binDir: async () => path.join(tmp, 'nope') });
+      expect(await missing.unavailableReason('D:\\a.pdf')).toMatch(/no Recycle Bin on drive D:/);
+      const present = new WindowsTrash({ fs, binDir: async () => tmp });
+      expect(await present.unavailableReason('D:\\a.pdf')).toBeNull();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('looks up the SID once with whoami.exe by absolute path', async () => {
     const exec = vi.fn<ExecFn>(async () => ({ stdout: `"pc\\e","${SID}"\r\n` }));
     const t = new WindowsTrash({

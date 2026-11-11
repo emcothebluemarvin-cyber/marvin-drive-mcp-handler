@@ -6,7 +6,7 @@ import { ValidationError } from '../../errors.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
 import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
-import { refuseTrash } from './fixtures.js';
+import { record, refuseTrash } from './fixtures.js';
 import { memoryDrive, type MemoryDrive } from './memory-drive.js';
 
 let tmp: string;
@@ -42,6 +42,31 @@ async function createDocs(): Promise<void> {
 }
 
 describe('createPair', () => {
+  it('stores validated googleExport preferences (defaults for omitted types)', async () => {
+    await sync.createPair({
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { document: 'pdf', spreadsheet: 'csv' },
+    });
+    expect((await store.load('docs')).pair.googleExport).toEqual({
+      document: 'pdf',
+      spreadsheet: 'csv',
+      presentation: 'pptx',
+      drawing: 'pdf',
+    });
+  });
+  it('rejects an export format the Google type cannot produce, before writing anything', async () => {
+    const res = sync.createPair({
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: 'ROOT',
+      googleExport: { spreadsheet: 'docx' },
+    });
+    await expect(res).rejects.toBeInstanceOf(ValidationError);
+    await expect(res).rejects.toThrow('Google Sheets cannot be exported as "docx"');
+    expect(await readdir(local)).toEqual([]);
+  });
   it('binds an existing Drive folder, writes the marker and probes case sensitivity', async () => {
     const summary = await sync.createPair({
       name: 'docs',
@@ -66,6 +91,7 @@ describe('createPair', () => {
       presentation: 'pptx',
       drawing: 'pdf',
     });
+    expect(file.pair.nativeBaselineDone).toBe(false);
   });
 
   it('creates a new Drive folder by name and audits it', async () => {
@@ -236,6 +262,20 @@ describe('select', () => {
     expect(mem.files.get('n1')?.trashed).toBe(false);
     const again = await sync.select({ name: 'docs', add: ['remote.pdf'] });
     expect(again).toMatchObject({ added: ['remote.pdf'], excluded: 0 });
+  });
+
+  it('add on a released (remote-only) path sets restorePending', async () => {
+    mem.addFile('r1', 'a.pdf', 'ROOT', 'A');
+    await sync.select({ name: 'docs', add: ['a.pdf'] });
+    const file = await store.load('docs');
+    file.records.push(record('r1', 'a.pdf', { remoteOnly: true }));
+    await store.save(file);
+    const res = await sync.select({ name: 'docs', add: ['A.pdf'] });
+    expect(res.added).toEqual(['a.pdf']);
+    expect((await store.load('docs')).records[0]).toMatchObject({
+      remoteOnly: true,
+      restorePending: true,
+    });
   });
 
   it('refuses while another writer holds the lock', async () => {

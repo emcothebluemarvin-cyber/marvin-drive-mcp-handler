@@ -70,21 +70,22 @@ claude mcp add marvin-drive --scope user -- node "$PWD\dist\cli\main.js" serve
 
 ## CLI
 
-| Command                                                                           | Purpose                                                         |
-| --------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `marvin-drive auth add [--alias a] [--no-browser\|--print-url\|--redirect-url u]` | Browser login, register account (first = default)               |
-| `marvin-drive auth login <alias> [--no-browser\|--print-url\|--redirect-url u]`   | Re-login an expired account                                     |
-| `marvin-drive auth list [--verify]`                                               | Accounts and token status                                       |
-| `marvin-drive auth remove <alias>`                                                | Remove account, delete + revoke token                           |
-| `marvin-drive auth default <alias>`                                               | Set the default account                                         |
-| `marvin-drive serve`                                                              | MCP server on stdio                                             |
-| `marvin-drive sync list`                                                          | Sync pairs with counts and last applied run                     |
-| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete]`   | Dry run (default) or apply a sync; exit code 1 on failure/abort |
-| `marvin-drive sync repair-marker <name>`                                          | Rewrite the folder marker after confirming the local folder     |
+| Command                                                                                                  | Purpose                                                                                                     |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `marvin-drive auth add [--alias a] [--no-browser\|--print-url\|--redirect-url u]`                        | Browser login, register account (first = default)                                                           |
+| `marvin-drive auth login <alias> [--no-browser\|--print-url\|--redirect-url u]`                          | Re-login an expired account                                                                                 |
+| `marvin-drive auth list [--verify]`                                                                      | Accounts and token status                                                                                   |
+| `marvin-drive auth remove <alias>`                                                                       | Remove account, delete + revoke token                                                                       |
+| `marvin-drive auth default <alias>`                                                                      | Set the default account                                                                                     |
+| `marvin-drive serve`                                                                                     | MCP server on stdio                                                                                         |
+| `marvin-drive sync list`                                                                                 | Sync pairs with counts and last applied run                                                                 |
+| `marvin-drive sync run <name> [--apply] [--plan-id <id>] [--allow-mass-delete] [--confirm-remote-trash]` | Dry run (default) or apply a sync; exit code 1 on failure/abort; `--confirm-remote-trash` needs `--plan-id` |
+| `marvin-drive sync release <name> [--all \| <paths…>] [--apply]`                                         | Keep files in Drive only: local copies go to the system trash (dry run by default)                          |
+| `marvin-drive sync repair-marker <name>`                                                                 | Rewrite the folder marker after confirming the local folder                                                 |
 
 ## MCP tools
 
-All tools accept an optional `account` (alias or email).
+32 tools. All accept an optional `account` (alias or email).
 
 | Tool                                                              | Purpose                                                                                                   |
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -128,14 +129,15 @@ All tools accept an optional `account` (alias or email).
 
 ### Sync (selective two-way, on demand)
 
-| Tool               | Purpose                                                                                                |
-| ------------------ | ------------------------------------------------------------------------------------------------------ |
-| `sync_create_pair` | Pair a local folder with an existing or new Drive folder; writes a hidden `.marvin-sync-<name>` marker |
-| `sync_list_pairs`  | Pairs with selected / tracked / excluded / baseline counts and the last applied run                    |
-| `sync_scan`        | Local files (with short text previews) and Drive-only candidates, so Claude can propose a selection    |
-| `sync_select`      | Add or remove relative paths; removing excludes the path and touches no file                           |
-| `sync_run`         | Dry run by default (plan + `planId`); `apply: true` with the approved `planId` executes it             |
-| `sync_remove_pair` | Forget a pair and remove its marker; no files are touched                                              |
+| Tool               | Purpose                                                                                                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync_create_pair` | Pair a local folder with an existing or new Drive folder; writes a hidden `.marvin-sync-<name>` marker; `googleExport` picks the local format of Google Docs/Sheets/Slides/Drawings      |
+| `sync_list_pairs`  | Pairs with selected / tracked / remote-only / excluded / baseline counts and the last applied run                                                                                        |
+| `sync_scan`        | Local files (with short text previews) and Drive-only candidates, so Claude can propose a selection                                                                                      |
+| `sync_select`      | Add or remove relative paths; removing excludes the path and touches no file                                                                                                             |
+| `sync_run`         | Dry run by default (plan + `planId`); `apply: true` with the approved `planId` executes it; locally deleted files wait in `pendingConfirmation` until you confirm (`confirmRemoteTrash`) |
+| `sync_release`     | "Move to Drive": remove local copies (to the system trash) of files that are in sync; they stay in Drive and selected; `sync_select add` restores them                                   |
+| `sync_remove_pair` | Forget a pair and remove its marker; no files are touched                                                                                                                                |
 
 Typical conversation: "sync the seafaring files in Downloads to my Drive folder _Denizcilik_" → Claude creates the pair, runs `sync_scan`, opens unclear files with its own reader, proposes a list, asks you to confirm, calls `sync_select`, shows the `sync_run` dry run, and applies it with the `planId` once you agree.
 
@@ -146,7 +148,14 @@ Typical conversation: "sync the seafaring files in Downloads to my Drive folder 
 - Deletions are propagated but never permanent: Drive files go to the Drive trash, local files to the system trash: the macOS Trash via `/usr/bin/trash`, the Windows Recycle Bin, or the freedesktop.org trash on Linux (`~/.local/share/Trash`, or `.Trash-<uid>` at the top of another disk), restorable from Files/Dolphin/`gio trash --restore`. If no trash can be used with certainty — network drives, Linux FAT/exFAT USB disks, some SMB volumes — the action fails and the file stays; nothing is ever deleted permanently. A safety brake stops runs that would delete more than max(10, 20 %) of tracked files, or every tracked file of one side.
 - A local file is only ever overwritten when it is the tracked file itself and unchanged since the scan; every new local file is created exclusively (never replaces anything). Anything the planner cannot classify — unreadable folders, duplicate names, case-only clashes on case-sensitive disks — is reported and left alone.
 - Each run checks that the local folder still has its marker (catches unmounted or replaced disks) and that the Drive folder still exists; if the marker is missing, run `marvin-drive sync repair-marker <name>`.
-- Google Docs/Sheets/Slides inside a synced Drive folder are reported as `native-skipped` in this version. Hashing a file that iCloud has evicted makes macOS download it first (slow but correct).
+- Hashing a file that iCloud has evicted makes macOS download it first (slow but correct).
+- **Google Docs, Sheets, Slides and Drawings** sync one way, as read-only exports (default `.docx`, `.xlsx`, `.pptx`, `.pdf`; set `googleExport` when creating the pair, e.g. `{ "document": "pdf", "spreadsheet": "csv" }`). A changed Drive original is exported again; local edits are never uploaded — they are reported, and if the original also changed your copy is kept as `<name> (local edit YYYY-MM-DD HH.mm).<ext>`. Forms, Sites and Apps Script files are listed as `native-unsupported`. Exports over Drive's 10 MB limit use the export link; if that fails too they are reported `native-too-large`.
+- **Deleting a synced file locally does not delete it in Drive by itself.** The run lists it under `pendingConfirmation`; Claude asks whether to delete the Drive copy too (`confirmRemoteTrash` with the dry run's `planId`, Drive trash for 30 days) or to keep it in Drive only (`sync_release`). From the terminal: `marvin-drive sync run <name> --apply --plan-id <id> --confirm-remote-trash`, or `marvin-drive sync release <name> <path> --apply`.
+- **Upgrading from 0.3:** on the first applied run after the upgrade, Google files already in a synced Drive folder are listed as candidates (not exported); select the ones you want. Google files added later are exported automatically.
+
+#### Move to Drive
+
+After an applied run Claude can offer to free disk space: `sync_release` (or `marvin-drive sync release <name> --all`) re-checks every file, moves the local copy to the system trash and keeps the Drive file; released files are never downloaded again unless you `sync_select add` them. A file you already deleted locally can be released by name, so it stays in Drive. Where no system trash can be used (Windows network drives, a drive without a Recycle Bin), release cannot move the local copy: the dry run lists such files under `skipped`. To keep one in Drive only there, delete the local copy yourself, then release it by name.
 
 ### Editing safely
 

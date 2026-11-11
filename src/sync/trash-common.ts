@@ -8,6 +8,12 @@ import { LocalTrashError } from './errors.js';
 /** Moves one regular file to the OS trash. Never deletes, never overwrites (local trash spec §3). */
 export interface LocalTrash {
   trash(absPath: string): Promise<void>;
+  /**
+   * Optional cheap pre-check, no writes: a reason the trash certainly cannot take this file
+   * (e.g. a network path on Windows), or null when it may. A null is no guarantee; trash()
+   * still checks and fails safely.
+   */
+  unavailableReason?(absPath: string): Promise<string | null>;
 }
 
 /** Runs a program without a shell; rejects on a non-zero exit. */
@@ -134,6 +140,7 @@ export function trashFailure(absPath: string, reason: string, cause?: unknown): 
   return new LocalTrashError(
     `Could not move ${absPath} to the trash: ${reason}. Nothing was deleted.`,
     cause === undefined ? undefined : { cause },
+    reason,
   );
 }
 

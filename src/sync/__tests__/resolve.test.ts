@@ -4,7 +4,6 @@ import {
   hashTargets,
   onDiskProbeKeys,
   localState,
-  remoteState,
   resolveLocal,
   resolveRemote,
 } from '../resolve.js';
@@ -116,19 +115,6 @@ describe('content state', () => {
       md5: 'md5-r1',
     });
     expect(localState(ctx, k, localEntry('a.pdf', { mtimeMs: 5 }))).toBeNull();
-  });
-
-  it('remote: md5 compare, else weak size + modifiedTime', () => {
-    const k = record('r1', 'a.pdf');
-    expect(remoteState(k, remoteEntry('r1', 'a.pdf', { md5: 'other' }))).toEqual({
-      changed: true,
-      weak: false,
-    });
-    expect(remoteState(k, remoteEntry('r1', 'a.pdf', { md5: null }))).toEqual({
-      changed: false,
-      weak: true,
-    });
-    expect(remoteState(k, remoteEntry('r1', 'a.pdf', { md5: null, size: 11 })).changed).toBe(true);
   });
 });
 

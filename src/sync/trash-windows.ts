@@ -99,7 +99,17 @@ export class WindowsTrash implements LocalTrash {
     await afterChecks(absPath, this.fs, () => this.move(absPath));
   }
 
-  private async move(absPath: string): Promise<void> {
+  async unavailableReason(absPath: string): Promise<string | null> {
+    try {
+      await this.locate(absPath);
+      return null;
+    } catch (err) {
+      return err instanceof LocalTrashError ? (err.reason ?? err.message) : null;
+    }
+  }
+
+  /** Resolved file path and its Recycle Bin folder; LocalTrashError if there is none. */
+  private async locate(absPath: string): Promise<{ file: string; bin: string }> {
     const fs = this.fs;
     const file = await fs.realpath(path.win32.resolve(absPath));
     const root = recycleRoot(file);
@@ -116,6 +126,12 @@ export class WindowsTrash implements LocalTrash {
         `no Recycle Bin on drive ${drive}; delete any file there in Explorer once, or the drive does not support one`,
       );
     }
+    return { file, bin };
+  }
+
+  private async move(absPath: string): Promise<void> {
+    const fs = this.fs;
+    const { file, bin } = await this.locate(absPath);
     const { size } = await fs.lstat(file, { bigint: true });
     const record = encodeRecycleRecord({
       path: file,

@@ -14,7 +14,7 @@ export interface GoogleExportPrefs {
   drawing: ExportFormat;
 }
 
-/** Phase B uses these; Phase A stores the defaults unvalidated. */
+/** Export formats used when a pair gives no `googleExport`; validated at sync_create_pair. */
 export const DEFAULT_GOOGLE_EXPORT: GoogleExportPrefs = {
   document: 'docx',
   spreadsheet: 'xlsx',
@@ -37,6 +37,8 @@ export interface Pair {
   createdAt: string;
   lastAppliedRunAt: string | null;
   firstAppliedRunAt: string | null;
+  /** Addendum §4.1: false until the first applied run that baselined Google-native files. */
+  nativeBaselineDone: boolean;
 }
 
 export interface SyncRecord {
@@ -93,6 +95,13 @@ export interface OnDiskProbe {
   ino: number;
 }
 
+/** Export settings of a Google-native Drive file (addendum §4.1). */
+export interface NativeInfo {
+  mimeType: string;
+  exportFormat: ExportFormat;
+  exportMime: string;
+}
+
 export interface RemoteEntry {
   id: string;
   key: string;
@@ -108,9 +117,12 @@ export interface RemoteEntry {
   createdTime: string;
   canEdit: boolean;
   canTrash: boolean;
+  /** Google-native file synced as a read-only export; null for binary files. */
+  native: NativeInfo | null;
 }
 
-export type RemoteIgnoreReason = 'native-skipped' | 'shortcut' | 'unrepresentable' | 'ignored-name';
+export type RemoteIgnoreReason =
+  'native-unsupported' | 'shortcut' | 'unrepresentable' | 'ignored-name';
 
 export interface RemoteIgnored {
   id: string;
@@ -141,6 +153,8 @@ export type ActionKind =
   | 'update-remote'
   | 'download-new'
   | 'download-replace'
+  | 'export-new'
+  | 'export-replace'
   | 'move-local'
   | 'conflict'
   | 'trash-remote'
@@ -176,6 +190,12 @@ export interface Action {
   updateRemote?: boolean;
   /** upload-new: replaces this trashed record (B11). */
   rebaseFrom?: string;
+  /** export-new (N5): move the locally edited L aside as `<stem> (local edit …)<ext>` first. */
+  localEdit?: boolean;
+  /** refresh: record fields to set (remote-only bookkeeping O3–O6); no file is touched. */
+  patch?: Partial<SyncRecord>;
+  /** B5 only: the local copy was deleted; trash-remote waits for confirmRemoteTrash (addendum §2). */
+  reason?: 'local-deleted';
 }
 
 export type NoteCode =
@@ -189,9 +209,14 @@ export type NoteCode =
   | 'remote-readonly'
   | 'cannot-trash'
   | 'missing'
-  | 'native-skipped'
+  | 'native-unsupported'
   | 'unrepresentable'
+  | 'ambiguous-native'
   | 'weak-compare'
+  | 'native-readonly-edited'
+  | 'native-local-missing'
+  | 'native-trashed-edited'
+  | 'remote-only-trashed'
   | 'ignored';
 
 export interface Note {
@@ -222,8 +247,14 @@ export interface Plan {
   notes: Note[];
   candidates: { local: Candidate[]; remote: Candidate[]; truncated: boolean };
   brake: BrakeInfo;
+  /** Brake over deletions that run without confirmation (addendum §2.6). */
+  brakeUnconfirmed: BrakeInfo;
   /** What the first applied run stores as remoteBaseline / baselineFolders (spec §5 step 7). */
   baseline: { files: string[]; folders: string[] };
+  /** Untracked Google-native files seen (upgrade baseline, addendum §4.1). */
+  nativeBaseline: string[];
+  /** Record paths in sync at planning (B1/N1). */
+  inSync: string[];
 }
 
 export interface ActionOutcome {
@@ -250,4 +281,8 @@ export interface SyncReport {
   failures: Array<{ path: string; kind: ActionKind; message: string }>;
   notRun: string[];
   candidates: { local: Candidate[]; remote: Candidate[]; truncated: boolean };
+  /** B5 deletions waiting for confirmRemoteTrash (addendum §2.3). */
+  pendingConfirmation: Array<{ path: string; remoteId: string }>;
+  /** Applied runs: files sync_release could release now (spec §10). */
+  releasable?: string[];
 }

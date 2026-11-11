@@ -84,10 +84,10 @@ beforeEach(async () => {
 });
 
 describe('MCP server', () => {
-  it('exposes the 31 tools from all specs', async () => {
+  it('exposes the 32 tools from all specs', async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_NAMES).toHaveLength(31);
+    expect(TOOL_NAMES).toHaveLength(32);
     const list = tools.find((t) => t.name === 'drive_list');
     expect(list?.inputSchema.properties).toHaveProperty('account');
     expect(list?.inputSchema.properties).toHaveProperty('folderId');

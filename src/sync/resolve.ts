@@ -169,8 +169,15 @@ export type RemoteResolution =
 export function resolveRemote(ctx: PlanContext, record: SyncRecord): RemoteResolution {
   const scanned = ctx.remoteById.get(record.remoteId);
   if (scanned) return { kind: 'present', entry: scanned, moved: scanned.key !== record.path };
-  if (ctx.ignoredById.has(record.remoteId)) {
-    return { kind: 'unknown', reason: 'renamed in Drive to a name that cannot be synced' };
+  const ignored = ctx.ignoredById.get(record.remoteId);
+  if (ignored) {
+    return {
+      kind: 'unknown',
+      reason:
+        ignored.reason === 'native-unsupported'
+          ? 'is a Google file type that cannot be exported'
+          : 'renamed in Drive to a name that cannot be synced',
+    };
   }
   const probe = ctx.input.probes.get(record.remoteId);
   if (!probe) return { kind: 'unknown', reason: 'Drive file was not probed' };
@@ -202,20 +209,6 @@ export function localState(
   const md5 = ctx.input.md5s.get(entry.name);
   if (md5 === undefined) return null;
   return { changed: md5 !== record.localMd5, md5 };
-}
-
-/** R content vs the record (md5, else size + modifiedTime with `weak`). */
-export function remoteState(
-  record: SyncRecord,
-  entry: RemoteEntry,
-): { changed: boolean; weak: boolean } {
-  if (entry.md5 !== null && record.remoteMd5 !== null) {
-    return { changed: entry.md5 !== record.remoteMd5, weak: false };
-  }
-  return {
-    changed: entry.size !== record.remoteSize || entry.modifiedTime !== record.remoteModifiedTime,
-    weak: true,
-  };
 }
 
 /**
