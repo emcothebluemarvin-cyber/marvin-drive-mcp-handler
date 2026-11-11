@@ -3808,13 +3808,3937 @@ MSG
 
 ### End of Chunk 1
 
-- [ ] Run the Google live sync E2E (spec §8 item 1; the user runs it) and record the result here before Chunk 2 starts.
+- [x] Google live sync E2E (spec §8 item 1): passed on `88519d2` (run by the coordinator).
 
 ## Chunk 2: Hashes and pair file v2
 
-To be written: `LocalDigests`, `sameContent` in `content-compare`, `writeTemp` expected hash and size, `exec-records` and release re-hash, `RemoteEntry.hash` / `SyncRecord.remoteHash`, pair file v2 with the v1 migration (spec §3, §4.5, §8 item 2).
+Spec §8 item 2 (§3.1–§3.3, §4.5), still Google only, plus the review fixes for Chunk 1 (Tasks 20–22, committed after the stage-2 work). Starting point: Chunk 1 done, **1351 passed, 6 skipped (1357)**, 127 files, at `88519d2`; the Google live sync E2E passed on that commit.
+
+Decisions (keep consistent):
+
+1. `LocalDigests.remote` is `ContentHash | null`; null means "not computed" (a stat-unchanged tracked file on a remote whose kind is not md5, when `hashTargets` did not ask for it). `sameContent` returns null for it, so such a file is never adopted or released by content.
+2. Digesters are injectable (`DigesterFactory`; `SyncServiceDeps.digesters` → `SyncEnv.digesters` → executor, release, `hashLocal`, `writeTemp`). The default knows md5 only and throws `No <kind> digest is available in this build`; Chunk 3 adds quickXor to the default.
+3. On Google, `remote` is always `{ kind: 'md5', value: md5 }`, so plans and actions are unchanged. The only Google-visible changes are the ones the spec asks for: the planId hashes `md5:<value>` (a planId from an older binary no longer matches), a changed-during-upload record keeps the local md5, the duplicate-upload check also requires the size, and downloads fail on a size mismatch.
+4. `Action.localDigests` is optional; the executor falls back to the md5 (`plannedDigests`) for actions built without it (tests).
+5. The pair file schema reads version 1 through a separate schema and maps `remoteMd5`; `remoteCursor`/`remoteDeletedIds` default to null/[] for version 1. A version above 2 is refused before parsing.
+6. Tests keep `md5`/`remoteMd5` shorthands in `fixtures.ts` (`remoteEntry`, `record`) and `md5s` in `plan-input.ts`; new helpers `md5Hash` (fixtures) and `md5Digests` (plan-input).
+
+### Task 13: ContentHash replaces md5 in entries, records and the pair file (v2)
+
+**Spec:** §3.2 last bullet (`remoteHash`, `RemoteEntry.hash`, planId `kind:value`), §4.5 (version 2, v1 migration). Commit `1a8e166` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/content-compare.test.ts`
+- Test: `src/sync/__tests__/exec-records.test.ts`
+- Test: `src/sync/__tests__/executor.test.ts`
+- Test: `src/sync/__tests__/fixtures.ts`
+- Test: `src/sync/__tests__/pair-store.test.ts`
+- Test: `src/sync/__tests__/plan-remote-only.test.ts`
+- Test: `src/sync/__tests__/plan-tracked.test.ts`
+- Test: `src/sync/__tests__/release.test.ts`
+- Test: `src/sync/__tests__/remote-probe.test.ts`
+- Test: `src/sync/__tests__/remote-scanner.test.ts`
+- Test: `src/sync/__tests__/sync-service.pairs.test.ts`
+- Modify: `src/sync/content-compare.ts`
+- Modify: `src/sync/exec-records.ts`
+- Modify: `src/sync/executor.ts`
+- Modify: `src/sync/pair-admin.ts`
+- Modify: `src/sync/pair-store.ts`
+- Modify: `src/sync/plan-remote-only.ts`
+- Modify: `src/sync/plan-shared.ts`
+- Modify: `src/sync/plan-tracked.ts`
+- Modify: `src/sync/planner.ts`
+- Modify: `src/sync/remote-scanner.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/content-compare.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/content-compare.test.ts b/src/sync/__tests__/content-compare.test.ts
+index 7a2e06f..8dde3b0 100644
+--- a/src/sync/__tests__/content-compare.test.ts
++++ b/src/sync/__tests__/content-compare.test.ts
+@@ -40,7 +40,7 @@ describe('remoteChanged', () => {
+ describe('remoteUnchangedSince', () => {
+   it('binary needs md5 and modifiedTime equal', () => {
+     const r = remoteEntry('r1', 'a.pdf');
+-    const md5Checksum = r.md5 ?? undefined;
++    const md5Checksum = r.hash?.value;
+     expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: r.modifiedTime }))).toBe(true);
+     expect(remoteUnchangedSince(r, item({ md5Checksum: 'x', modifiedTime: r.modifiedTime }))).toBe(
+       false,
+@@ -58,7 +58,7 @@ describe('localMatchesRemote', () => {
+     const r = remoteEntry('r1', 'a.pdf');
+     expect(localMatchesRemote('md5-r1', null, r)).toBe(true);
+     expect(localMatchesRemote('other', null, r)).toBe(false);
+-    expect(localMatchesRemote('md5-r1', null, { ...r, md5: null })).toBe(false);
++    expect(localMatchesRemote('md5-r1', null, { ...r, hash: null })).toBe(false);
+   });
+   it('native: local md5 = md5 of the last export (record required)', () => {
+     const k = nativeRecord('g1', 'Plan.docx', { localMd5: 'export-md5' });
+```
+
+`src/sync/__tests__/exec-records.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/exec-records.test.ts b/src/sync/__tests__/exec-records.test.ts
+index ffb3500..c1ddcd4 100644
+--- a/src/sync/__tests__/exec-records.test.ts
++++ b/src/sync/__tests__/exec-records.test.ts
+@@ -5,13 +5,13 @@ import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
+ import { binary } from './drive-tree.js';
+ 
+ describe('fromRemote', () => {
+-  it('takes the uploaded file fields, md5 and first parent', () => {
++  it('takes the uploaded file fields, hash and first parent', () => {
+     const item = toRemoteItem(binary('n1', 'a.pdf', 'P'), DEFAULT_GOOGLE_EXPORT);
+     expect(fromRemote(item, 'fallback')).toEqual({
+       id: 'n1',
+       name: 'a.pdf',
+       parentId: 'P',
+-      md5: 'md5-n1',
++      hash: { kind: 'md5', value: 'md5-n1' },
+       size: 10,
+       modifiedTime: '2026-11-02T00:00:00.000Z',
+       native: null,
+@@ -19,6 +19,6 @@ describe('fromRemote', () => {
+   });
+   it('falls back to the upload parent when Drive returns no parents', () => {
+     const item = toRemoteItem({ id: 'n1' }, DEFAULT_GOOGLE_EXPORT);
+-    expect(fromRemote(item, 'P')).toMatchObject({ parentId: 'P', md5: null, size: null });
++    expect(fromRemote(item, 'P')).toMatchObject({ parentId: 'P', hash: null, size: null });
+   });
+ });
+```
+
+`src/sync/__tests__/executor.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.test.ts b/src/sync/__tests__/executor.test.ts
+index 02a2608..570b5f4 100644
+--- a/src/sync/__tests__/executor.test.ts
++++ b/src/sync/__tests__/executor.test.ts
+@@ -239,7 +239,7 @@ describe('Executor', () => {
+     expect(out[0]?.warning).toBe('changed-during-upload');
+     expect(file.records[0]).toMatchObject({
+       localMd5: 'other',
+-      remoteMd5: 'other',
++      remoteHash: { kind: 'md5', value: 'other' },
+       localSize: l.size,
+     });
+   });
+@@ -287,7 +287,7 @@ describe('Executor', () => {
+     const r = remote('r1', 'a.pdf', 'R');
+     drive.getFile.mockResolvedValueOnce({
+       id: 'r1',
+-      md5Checksum: r.md5,
++      md5Checksum: r.hash?.value,
+       modifiedTime: r.modifiedTime,
+     });
+     drive.updateFile.mockResolvedValueOnce({
+@@ -308,7 +308,7 @@ describe('Executor', () => {
+     expect(drive.updateFile.mock.calls[0]?.[0]).toMatchObject({ fileId: 'r1' });
+     expect(file.records[0]).toMatchObject({
+       localMd5: md5('local edit'),
+-      remoteMd5: md5('local edit'),
++      remoteHash: { kind: 'md5', value: md5('local edit') },
+       remoteModifiedTime: 'new',
+     });
+   });
+@@ -369,11 +369,11 @@ describe('Executor', () => {
+     expect(file.records[0]).toMatchObject({
+       path: 'sub/b.pdf',
+       localMd5: md5('new'),
+-      remoteMd5: md5('new'),
++      remoteHash: { kind: 'md5', value: md5('new') },
+       remoteParentId: 'F',
+     });
+     expect(saves).toHaveLength(2);
+-    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteMd5: k.remoteMd5 });
++    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteHash: k.remoteHash });
+   });
+ 
+   it('places the conflict copy before uploading L (spec §6.9)', async () => {
+@@ -382,7 +382,7 @@ describe('Executor', () => {
+     serve('remote edit');
+     drive.getFile.mockResolvedValueOnce({
+       id: 'r1',
+-      md5Checksum: r.md5,
++      md5Checksum: r.hash?.value,
+       modifiedTime: r.modifiedTime,
+     });
+     drive.updateFile.mockResolvedValueOnce({
+@@ -410,7 +410,7 @@ describe('Executor', () => {
+     );
+     expect(file.records[0]).toMatchObject({
+       localMd5: md5('local edit'),
+-      remoteMd5: md5('local edit'),
++      remoteHash: { kind: 'md5', value: md5('local edit') },
+     });
+     expect(file.pair.selection).toEqual(['a.pdf']);
+   });
+@@ -573,7 +573,7 @@ describe('Executor (review regressions)', () => {
+     const k = record('r1', 'a.pdf');
+     drive.getFile.mockResolvedValueOnce({
+       id: 'r1',
+-      md5Checksum: r.md5,
++      md5Checksum: r.hash?.value,
+       modifiedTime: '2026-11-03T09:00:00.000Z',
+       parents: [ROOT_ID],
+     });
+@@ -589,7 +589,7 @@ describe('Executor (review regressions)', () => {
+     const r = remote('r2', 'moved.pdf', 'M');
+     drive.getFile.mockResolvedValueOnce({
+       id: 'r2',
+-      md5Checksum: r.md5,
++      md5Checksum: r.hash?.value,
+       modifiedTime: r.modifiedTime,
+       parents: ['ELSEWHERE'],
+     });
+@@ -684,7 +684,7 @@ describe('Executor exports (Google-native)', () => {
+         path: 'Plan.docx',
+         remoteName: 'Plan',
+         localMd5: md5('DOCX v1'),
+-        remoteMd5: null,
++        remoteHash: null,
+         native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx' },
+       },
+     ]);
+```
+
+`src/sync/__tests__/fixtures.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/fixtures.ts b/src/sync/__tests__/fixtures.ts
+index aed1fa7..1836b4a 100644
+--- a/src/sync/__tests__/fixtures.ts
++++ b/src/sync/__tests__/fixtures.ts
+@@ -5,6 +5,17 @@ import type { LocalTrash } from '../trash.js';
+ import type { LocalEntry, Pair, PairFile, RemoteEntry, SyncRecord } from '../types.js';
+ import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
+ import { foldKey } from '../paths.js';
++import type { ContentHash } from '../remote/sync-remote.js';
++
++/** An md5 ContentHash (null stays null). */
++export function md5Hash(value: string | null): ContentHash | null {
++  return value === null ? null : { kind: 'md5', value };
++}
++
++/** Test shorthand: `md5` sets an md5 `hash`. */
++export type RemoteEntryOverrides = Partial<RemoteEntry> & { md5?: string | null };
++/** Test shorthand: `remoteMd5` sets an md5 `remoteHash`. */
++export type RecordOverrides = Partial<SyncRecord> & { remoteMd5?: string | null };
+ 
+ /** LocalTrash for tests that must never trash anything. */
+ export const refuseTrash: LocalTrash = {
+@@ -46,7 +57,7 @@ export function makePair(overrides: Partial<Pair> = {}): Pair {
+ }
+ 
+ export function makePairFile(pair: Partial<Pair> = {}, records: SyncRecord[] = []): PairFile {
+-  return { version: 1, pair: makePair(pair), records };
++  return { version: 2, pair: makePair(pair), records };
+ }
+ 
+ export function localEntry(name: string, overrides: Partial<LocalEntry> = {}): LocalEntry {
+@@ -66,10 +77,11 @@ export function localEntry(name: string, overrides: Partial<LocalEntry> = {}): L
+ export function remoteEntry(
+   id: string,
+   key: string,
+-  overrides: Partial<RemoteEntry> = {},
++  overrides: RemoteEntryOverrides = {},
+ ): RemoteEntry {
+   const nfc = key.normalize('NFC');
+   const slash = nfc.lastIndexOf('/');
++  const { md5, ...rest } = overrides;
+   return {
+     id,
+     key: nfc,
+@@ -78,25 +90,22 @@ export function remoteEntry(
+     parentId: slash === -1 ? ROOT_ID : `folder:${nfc.slice(0, slash)}`,
+     ancestorIds: slash === -1 ? [ROOT_ID] : [`folder:${nfc.slice(0, slash)}`, ROOT_ID],
+     mimeType: 'application/pdf',
+-    md5: `md5-${id}`,
++    hash: md5Hash(md5 === undefined ? `md5-${id}` : md5),
+     size: 10,
+     modifiedTime: '2026-11-02T00:00:00.000Z',
+     createdTime: '2026-11-01T00:00:00.000Z',
+     canEdit: true,
+     canTrash: true,
+     native: null,
+-    ...overrides,
++    ...rest,
+   };
+ }
+ 
+ /** A record in sync with `localEntry(key)` and `remoteEntry(remoteId, key)`. */
+-export function record(
+-  remoteId: string,
+-  key: string,
+-  overrides: Partial<SyncRecord> = {},
+-): SyncRecord {
++export function record(remoteId: string, key: string, overrides: RecordOverrides = {}): SyncRecord {
+   const nfc = key.normalize('NFC');
+   const slash = nfc.lastIndexOf('/');
++  const { remoteMd5, ...rest } = overrides;
+   return {
+     remoteId,
+     path: nfc,
+@@ -107,14 +116,14 @@ export function record(
+     localSize: 10,
+     localMtimeMs: 1000,
+     localCtimeMs: 1000,
+-    remoteMd5: `md5-${remoteId}`,
++    remoteHash: md5Hash(remoteMd5 === undefined ? `md5-${remoteId}` : remoteMd5),
+     remoteSize: 10,
+     remoteModifiedTime: '2026-11-02T00:00:00.000Z',
+     native: null,
+     remoteOnly: false,
+     restorePending: false,
+     remoteTrashed: false,
+-    ...overrides,
++    ...rest,
+   };
+ }
+ 
+@@ -124,7 +133,7 @@ export const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordproc
+ export function nativeEntry(
+   id: string,
+   key: string,
+-  overrides: Partial<RemoteEntry> = {},
++  overrides: RemoteEntryOverrides = {},
+ ): RemoteEntry {
+   const base = key.slice(key.lastIndexOf('/') + 1);
+   return remoteEntry(id, key, {
+@@ -141,7 +150,7 @@ export function nativeEntry(
+ export function nativeRecord(
+   remoteId: string,
+   key: string,
+-  overrides: Partial<SyncRecord> = {},
++  overrides: RecordOverrides = {},
+ ): SyncRecord {
+   const base = key.slice(key.lastIndexOf('/') + 1);
+   return record(remoteId, key, {
+```
+
+`src/sync/__tests__/pair-store.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/pair-store.test.ts b/src/sync/__tests__/pair-store.test.ts
+index 2a11df8..ffe4426 100644
+--- a/src/sync/__tests__/pair-store.test.ts
++++ b/src/sync/__tests__/pair-store.test.ts
+@@ -52,6 +52,32 @@ describe('PairStore', () => {
+     expect((await store().load('docs')).pair.nativeBaselineDone).toBe(false);
+   });
+ 
++  it('loads a version-1 file (remoteMd5) as version 2 and saves it as version 2', async () => {
++    const file = makePairFile({}, [record('r1', 'a.pdf'), record('r2', 'b.pdf')]);
++    const v1 = {
++      ...file,
++      version: 1,
++      records: file.records.map(({ remoteHash, ...r }, i) => ({
++        ...r,
++        remoteMd5: i === 0 ? (remoteHash?.value ?? null) : null,
++      })),
++    };
++    await mkdir(dir, { recursive: true });
++    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
++    const s = store();
++    const loaded = await s.load('docs');
++    expect(loaded.version).toBe(2);
++    expect(loaded.records.map((r) => r.remoteHash)).toEqual([
++      { kind: 'md5', value: 'md5-r1' },
++      null,
++    ]);
++    expect(loaded.records[0]).not.toHaveProperty('remoteMd5');
++    await s.save(loaded);
++    const saved = JSON.parse(await readFile(path.join(dir, 'docs.json'), 'utf8'));
++    expect(saved.version).toBe(2);
++    expect(saved.records[0].remoteHash).toEqual({ kind: 'md5', value: 'md5-r1' });
++  });
++
+   it('tightens an existing sync dir to 0700', async () => {
+     await mkdir(dir, { recursive: true });
+     await chmod(dir, 0o755);
+```
+
+`src/sync/__tests__/plan-remote-only.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-remote-only.test.ts b/src/sync/__tests__/plan-remote-only.test.ts
+index d3e8e46..150faab 100644
+--- a/src/sync/__tests__/plan-remote-only.test.ts
++++ b/src/sync/__tests__/plan-remote-only.test.ts
+@@ -66,7 +66,11 @@ describe('remote-only records (spec §6.7)', () => {
+     expect(
+       run({ remote: [remoteEntry('r1', 'a.pdf', { md5: 'new', modifiedTime: NEWER })] }).actions,
+     ).toMatchObject([
+-      { kind: 'refresh', rule: 'O3', patch: { remoteMd5: 'new', remoteModifiedTime: NEWER } },
++      {
++        kind: 'refresh',
++        rule: 'O3',
++        patch: { remoteHash: { kind: 'md5', value: 'new' }, remoteModifiedTime: NEWER },
++      },
+     ]);
+   });
+   it('a released Google Doc modified in Drive is never exported', () => {
+```
+
+`src/sync/__tests__/plan-tracked.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-tracked.test.ts b/src/sync/__tests__/plan-tracked.test.ts
+index 34550a8..c980e49 100644
+--- a/src/sync/__tests__/plan-tracked.test.ts
++++ b/src/sync/__tests__/plan-tracked.test.ts
+@@ -276,7 +276,7 @@ describe('binary tracked records (spec §6.4)', () => {
+   it('warns weak-compare when Drive has no md5', () => {
+     const result = run(
+       { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
+-      { ...K, remoteMd5: null },
++      { ...K, remoteHash: null },
+     );
+     expect(result.notes.map((n) => n.code)).toEqual(['weak-compare']);
+   });
+```
+
+`src/sync/__tests__/release.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/release.test.ts b/src/sync/__tests__/release.test.ts
+index 9d21ef3..d01dd9e 100644
+--- a/src/sync/__tests__/release.test.ts
++++ b/src/sync/__tests__/release.test.ts
+@@ -154,7 +154,7 @@ describe('applyRelease re-reads R through the remote', () => {
+     const drive = createFakeDrive();
+     drive.getFile.mockResolvedValueOnce({
+       ...binary('r1', 'a.pdf', 'elsewhere'),
+-      md5Checksum: RA.md5 ?? undefined,
++      md5Checksum: RA.hash?.value,
+       modifiedTime: RA.modifiedTime,
+     });
+     const saves: unknown[] = [];
+```
+
+`src/sync/__tests__/remote-probe.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-probe.test.ts b/src/sync/__tests__/remote-probe.test.ts
+index e483c7e..cab9c45 100644
+--- a/src/sync/__tests__/remote-probe.test.ts
++++ b/src/sync/__tests__/remote-probe.test.ts
+@@ -68,7 +68,7 @@ describe('probeRecord', () => {
+     const doc = { ...binary('r', 'Plan', 'f1'), mimeType: GOOGLE_MIME.document };
+     expect(await probeRecord('r', scan(), getter({ r: doc }))).toMatchObject({
+       state: 'present',
+-      entry: { key: 'docs/Plan.docx', md5: null, native: { exportFormat: 'docx' } },
++      entry: { key: 'docs/Plan.docx', hash: null, native: { exportFormat: 'docx' } },
+     });
+     const form = { ...binary('r', 'Survey', 'f1'), mimeType: 'application/vnd.google-apps.form' };
+     expect(await probeRecord('r', scan(), getter({ r: form }))).toEqual({
+```
+
+`src/sync/__tests__/remote-scanner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-scanner.test.ts b/src/sync/__tests__/remote-scanner.test.ts
+index 7d3f2b7..d9ad0af 100644
+--- a/src/sync/__tests__/remote-scanner.test.ts
++++ b/src/sync/__tests__/remote-scanner.test.ts
+@@ -39,7 +39,7 @@ describe('scanRemote', () => {
+     expect(scan.entries[1]).toMatchObject({
+       canEdit: false,
+       canTrash: false,
+-      md5: 'md5-b',
++      hash: { kind: 'md5', value: 'md5-b' },
+       size: 10,
+     });
+     expect([...scan.folders.entries()]).toEqual([
+@@ -107,7 +107,7 @@ describe('scanRemote', () => {
+       ),
+     );
+     expect(
+-      scan.entries.map((e) => [e.id, e.key, e.name, e.md5, e.size, e.native?.exportFormat]),
++      scan.entries.map((e) => [e.id, e.key, e.name, e.hash, e.size, e.native?.exportFormat]),
+     ).toEqual([
+       ['s', 'Budget.csv', 'Budget', null, null, 'csv'],
+       ['g', 'Plan.docx', 'Plan', null, null, 'docx'],
+```
+
+`src/sync/__tests__/sync-service.pairs.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/sync-service.pairs.test.ts b/src/sync/__tests__/sync-service.pairs.test.ts
+index 97c4196..3dd0cef 100644
+--- a/src/sync/__tests__/sync-service.pairs.test.ts
++++ b/src/sync/__tests__/sync-service.pairs.test.ts
+@@ -261,7 +261,7 @@ describe('select', () => {
+       localSize: 1,
+       localMtimeMs: 1,
+       localCtimeMs: 1,
+-      remoteMd5: 'x',
++      remoteHash: { kind: 'md5', value: 'x' },
+       remoteSize: 1,
+       remoteModifiedTime: 't',
+       native: null,
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: FAIL. 3 failed: `ValidationError: Sync pair file for "docs" is invalid` (the fixtures now write version 2) and `expected 1 to be 2`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/content-compare.ts` (modify):
+
+```diff
+diff --git a/src/sync/content-compare.ts b/src/sync/content-compare.ts
+index 87c2ca2..5a329fd 100644
+--- a/src/sync/content-compare.ts
++++ b/src/sync/content-compare.ts
+@@ -1,13 +1,30 @@
+ import { ValidationError } from '../errors.js';
+-import type { RemoteItem } from './remote/sync-remote.js';
++import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+ import type { RemoteEntry, SyncRecord } from './types.js';
+ 
+ /** The item's md5, or null when it reports none (or another hash kind). */
+ export function md5Of(item: RemoteItem): string | null {
+-  return item.hash?.kind === 'md5' ? item.hash.value : null;
++  return md5Value(item.hash);
+ }
+ 
+-/** R content vs the record: binary md5 (else size + modifiedTime, `weak`); native modifiedTime. */
++/** The value of an md5 hash; null for none or another kind. */
++export function md5Value(hash: ContentHash | null): string | null {
++  return hash?.kind === 'md5' ? hash.value : null;
++}
++
++/** Equal hashes, or both missing (record bookkeeping: did the remote's hash change?). */
++export function sameHashOrNone(a: ContentHash | null, b: ContentHash | null): boolean {
++  if (a === null || b === null) return a === b;
++  return a.kind === b.kind && a.value === b.value;
++}
++
++/** Both hashes known, of one kind and equal (null when either is missing or kinds differ). */
++function sameHash(a: ContentHash | null, b: ContentHash | null): boolean | null {
++  if (a === null || b === null || a.kind !== b.kind) return null;
++  return a.value === b.value;
++}
++
++/** R content vs the record: the hash (else size + modifiedTime, `weak`); native modifiedTime. */
+ export function remoteChanged(
+   record: SyncRecord,
+   entry: RemoteEntry,
+@@ -15,19 +32,20 @@ export function remoteChanged(
+   if (entry.native !== null) {
+     return { changed: entry.modifiedTime !== record.remoteModifiedTime, weak: false };
+   }
+-  if (entry.md5 !== null && record.remoteMd5 !== null) {
+-    return { changed: entry.md5 !== record.remoteMd5, weak: false };
+-  }
++  const same = sameHash(entry.hash, record.remoteHash);
++  if (same !== null) return { changed: !same, weak: false };
+   return {
+     changed: entry.size !== record.remoteSize || entry.modifiedTime !== record.remoteModifiedTime,
+     weak: true,
+   };
+ }
+ 
+-/** Executor re-verification: binary md5 and modifiedTime equal; native modifiedTime equal. */
++/** Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal. */
+ export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem): boolean {
+   if (current.modifiedTime !== planned.modifiedTime) return false;
+-  return planned.native !== null || md5Of(current) === planned.md5;
++  if (planned.native !== null) return true;
++  if (planned.hash === null || current.hash === null) return planned.hash === current.hash;
++  return sameHash(planned.hash, current.hash) === true;
+ }
+ 
+ /**
+@@ -39,7 +57,7 @@ export function localMatchesRemote(
+   record: SyncRecord | null,
+   entry: RemoteEntry,
+ ): boolean {
+-  if (entry.native === null) return entry.md5 !== null && localMd5 === entry.md5;
++  if (entry.native === null) return md5Value(entry.hash) === localMd5;
+   if (record === null) {
+     throw new ValidationError(`Internal: comparing ${entry.key} needs its record`);
+   }
+```
+
+`src/sync/exec-records.ts` (modify):
+
+```diff
+diff --git a/src/sync/exec-records.ts b/src/sync/exec-records.ts
+index 5e77251..0149744 100644
+--- a/src/sync/exec-records.ts
++++ b/src/sync/exec-records.ts
+@@ -1,7 +1,6 @@
+ import { ValidationError } from '../errors.js';
+-import { md5Of } from './content-compare.js';
+ import { foldKey } from './paths.js';
+-import type { RemoteItem } from './remote/sync-remote.js';
++import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+ import type { StatExpect } from './transfer.js';
+ import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
+ 
+@@ -9,7 +8,7 @@ export interface RemoteFields {
+   id: string;
+   name: string;
+   parentId: string;
+-  md5: string | null;
++  hash: ContentHash | null;
+   size: number | null;
+   modifiedTime: string;
+   native: SyncRecord['native'];
+@@ -28,7 +27,7 @@ export function fromEntry(e: RemoteEntry): RemoteFields {
+     id: e.id,
+     name: e.name,
+     parentId: e.parentId,
+-    md5: e.md5,
++    hash: e.hash,
+     size: e.size,
+     modifiedTime: e.modifiedTime,
+     native: e.native ? { mimeType: e.native.mimeType, exportFormat: e.native.exportFormat } : null,
+@@ -41,7 +40,7 @@ export function fromRemote(item: RemoteItem, fallbackParent: string): RemoteFiel
+     id: item.id,
+     name: item.name,
+     parentId: item.parentId ?? fallbackParent,
+-    md5: md5Of(item),
++    hash: item.hash,
+     size: item.size,
+     modifiedTime: item.modifiedTime,
+     // Uploads are binary files.
+@@ -64,7 +63,7 @@ export function makeRecord(key: string, local: LocalFields, remote: RemoteFields
+     localSize: local.size,
+     localMtimeMs: local.mtimeMs,
+     localCtimeMs: local.ctimeMs,
+-    remoteMd5: remote.md5,
++    remoteHash: remote.hash,
+     remoteSize: remote.size,
+     remoteModifiedTime: remote.modifiedTime,
+     native: remote.native,
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index fe89775..fb2dd8a 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -3,7 +3,7 @@ import path from 'node:path';
+ import type { AuditOp, AuditSink } from '../audit/audit-log.js';
+ import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
+ import type { Logger } from '../logger.js';
+-import { md5Of, remoteUnchangedSince } from './content-compare.js';
++import { md5Of, md5Value, remoteUnchangedSince } from './content-compare.js';
+ import {
+   CollisionError,
+   LocalEditKeptError,
+@@ -290,12 +290,13 @@ export class Executor {
+       uploaded = adopted;
+     }
+     const remote = fromRemote(uploaded, parentId);
++    const uploadedMd5 = md5Value(remote.hash);
+     const warning =
+-      remote.md5 !== null && remote.md5 !== planned ? 'changed-during-upload' : undefined;
++      uploadedMd5 !== null && uploadedMd5 !== planned ? 'changed-during-upload' : undefined;
+     await this.commit(action, () =>
+       putRecord(
+         this.file,
+-        makeRecord(action.key, this.localFields(local, remote.md5 ?? planned), remote),
++        makeRecord(action.key, this.localFields(local, uploadedMd5 ?? planned), remote),
+         action.rebaseFrom,
+       ),
+     );
+@@ -334,12 +335,13 @@ export class Executor {
+     const abs = absInside(this.pair.localDir, local.name);
+     const updated = await this.deps.remote.replaceContent(current, abs);
+     const fields = fromRemote(updated, remote.parentId);
++    const updatedMd5 = md5Value(fields.hash);
+     const warning =
+-      fields.md5 !== null && fields.md5 !== planned ? 'changed-during-upload' : undefined;
++      updatedMd5 !== null && updatedMd5 !== planned ? 'changed-during-upload' : undefined;
+     await this.commit(action, () =>
+       putRecord(
+         this.file,
+-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
++        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
+       ),
+     );
+     await this.audit('sync_update', action, remote.id);
+@@ -378,7 +380,7 @@ export class Executor {
+     const written = remote.native
+       ? await exportOver(this.host(), to, expect, remote)
+       : await this.deps.remote.download(remote.id, (open) =>
+-          downloadReplace(to, open, { expect, expectedMd5: remote.md5 }),
++          downloadReplace(to, open, { expect, expectedMd5: md5Value(remote.hash) }),
+         );
+     const after = await this.statFields(action.key, written.md5);
+     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
+@@ -392,7 +394,7 @@ export class Executor {
+     const abs = await prepareParent(this.pair.localDir, action.key);
+     const written = await this.deps.remote.download(remote.id, (open) =>
+       placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
+-        expectedMd5: remote.md5,
++        expectedMd5: md5Value(remote.hash),
+       }),
+     );
+     const local = await this.statFields(action.key, written.md5);
+@@ -408,7 +410,7 @@ export class Executor {
+     const remote = need(action.remote, 'remote');
+     const abs = absInside(this.pair.localDir, local.name);
+     const written = await this.deps.remote.download(remote.id, (open) =>
+-      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: remote.md5 }),
++      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: md5Value(remote.hash) }),
+     );
+     const after = await this.statFields(local.name, written.md5);
+     await this.commit(action, () =>
+@@ -428,7 +430,7 @@ export class Executor {
+     const base = path.basename(abs);
+     const copy = await this.deps.remote.download(remote.id, (open) =>
+       placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
+-        expectedMd5: remote.md5,
++        expectedMd5: md5Value(remote.hash),
+         maxAttempts: MAX_CONFLICT_NAMES,
+       }),
+     );
+@@ -439,7 +441,7 @@ export class Executor {
+       await this.commit(action, () =>
+         putRecord(this.file, {
+           ...record,
+-          remoteMd5: remote.md5,
++          remoteHash: remote.hash,
+           remoteSize: remote.size,
+           remoteModifiedTime: remote.modifiedTime,
+           remoteName: remote.name,
+@@ -451,16 +453,17 @@ export class Executor {
+     const current = await this.verifyRemote(remote);
+     const updated = await this.deps.remote.replaceContent(current, abs);
+     const fields = fromRemote(updated, remote.parentId);
++    const updatedMd5 = md5Value(fields.hash);
+     await this.commit(action, () =>
+       putRecord(
+         this.file,
+-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
++        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
+       ),
+     );
+     await this.audit('sync_update', action, remote.id);
+     return {
+       conflictCopy,
+-      ...(fields.md5 !== null && fields.md5 !== planned
++      ...(updatedMd5 !== null && updatedMd5 !== planned
+         ? { warning: 'changed-during-upload' }
+         : {}),
+     };
+```
+
+`src/sync/pair-admin.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-admin.ts b/src/sync/pair-admin.ts
+index 1d59b20..ea61f74 100644
+--- a/src/sync/pair-admin.ts
++++ b/src/sync/pair-admin.ts
+@@ -147,7 +147,7 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+       firstAppliedRunAt: null,
+       nativeBaselineDone: false,
+     };
+-    const file: PairFile = { version: 1, pair, records: [] };
++    const file: PairFile = { version: 2, pair, records: [] };
+     await env.store.save(file);
+     return summarize(file);
+   });
+```
+
+`src/sync/pair-store.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-store.ts b/src/sync/pair-store.ts
+index 537b1e5..ca1bf93 100644
+--- a/src/sync/pair-store.ts
++++ b/src/sync/pair-store.ts
+@@ -34,7 +34,9 @@ const pairSchema = z.object({
+   nativeBaselineDone: z.boolean().default(false),
+ });
+ 
+-const recordSchema = z.object({
++const contentHash = z.object({ kind: z.enum(['md5', 'quickXor']), value: z.string() });
++
++const recordFields = {
+   remoteId: z.string().min(1),
+   path: z.string().min(1),
+   localName: z.string().min(1),
+@@ -44,21 +46,41 @@ const recordSchema = z.object({
+   localSize: z.number(),
+   localMtimeMs: z.number(),
+   localCtimeMs: z.number(),
+-  remoteMd5: z.string().nullable(),
+   remoteSize: z.number().nullable(),
+   remoteModifiedTime: z.string(),
+   native: z.object({ mimeType: z.string(), exportFormat }).nullable(),
+   remoteOnly: z.boolean(),
+   restorePending: z.boolean(),
+   remoteTrashed: z.boolean(),
+-});
++};
+ 
+ const pairFileSchema = z.object({
++  version: z.literal(2),
++  pair: pairSchema,
++  records: z.array(z.object({ ...recordFields, remoteHash: contentHash.nullable() })),
++});
++
++/** Version 1 (before OneDrive sync): `remoteMd5` instead of `remoteHash` (spec §4.5). */
++const pairFileV1Schema = z.object({
+   version: z.literal(1),
+   pair: pairSchema,
+-  records: z.array(recordSchema),
++  records: z.array(z.object({ ...recordFields, remoteMd5: z.string().nullable() })),
+ });
+ 
++/** Reads a stored pair file; version 1 is migrated in memory and saved as version 2. */
++function parsePairFile(json: unknown): ReturnType<typeof pairFileSchema.safeParse> {
++  const v1 = pairFileV1Schema.safeParse(json);
++  if (!v1.success) return pairFileSchema.safeParse(json);
++  return pairFileSchema.safeParse({
++    ...v1.data,
++    version: 2,
++    records: v1.data.records.map(({ remoteMd5, ...r }) => ({
++      ...r,
++      remoteHash: remoteMd5 === null ? null : { kind: 'md5', value: remoteMd5 },
++    })),
++  });
++}
++
+ export interface PairStoreOptions {
+   dir: string;
+   isAlive?: (pid: number) => boolean;
+@@ -120,7 +142,7 @@ export class PairStore {
+     } catch (err) {
+       throw new ValidationError(`Sync pair file for "${name}" is not valid JSON`, { cause: err });
+     }
+-    const parsed = pairFileSchema.safeParse(json);
++    const parsed = parsePairFile(json);
+     if (!parsed.success) {
+       throw new ValidationError(`Sync pair file for "${name}" is invalid: ${parsed.error.message}`);
+     }
+```
+
+`src/sync/plan-remote-only.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-remote-only.ts b/src/sync/plan-remote-only.ts
+index 8167443..8176440 100644
+--- a/src/sync/plan-remote-only.ts
++++ b/src/sync/plan-remote-only.ts
+@@ -1,4 +1,4 @@
+-import { localMatchesRemote, remoteChanged } from './content-compare.js';
++import { localMatchesRemote, remoteChanged, sameHashOrNone } from './content-compare.js';
+ import { foldKey } from './paths.js';
+ import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
+ import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
+@@ -13,7 +13,7 @@ function remotePatch(record: SyncRecord, remote: RemoteEntry): Partial<SyncRecor
+   const patch: Partial<SyncRecord> = {};
+   if (remote.name !== record.remoteName) patch.remoteName = remote.name;
+   if (remote.parentId !== record.remoteParentId) patch.remoteParentId = remote.parentId;
+-  if (remote.md5 !== record.remoteMd5) patch.remoteMd5 = remote.md5;
++  if (!sameHashOrNone(remote.hash, record.remoteHash)) patch.remoteHash = remote.hash;
+   if (remote.size !== record.remoteSize) patch.remoteSize = remote.size;
+   if (remote.native === null && remote.modifiedTime !== record.remoteModifiedTime) {
+     patch.remoteModifiedTime = remote.modifiedTime;
+```
+
+`src/sync/plan-shared.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-shared.ts b/src/sync/plan-shared.ts
+index 22d30da..361359b 100644
+--- a/src/sync/plan-shared.ts
++++ b/src/sync/plan-shared.ts
+@@ -1,3 +1,4 @@
++import { sameHashOrNone } from './content-compare.js';
+ import { foldKey } from './paths.js';
+ import { isExcluded, type PlanContext } from './resolve.js';
+ import type {
+@@ -76,7 +77,7 @@ export function needsRefresh(record: SyncRecord, entry: LocalEntry, remote: Remo
+     entry.ctimeMs !== record.localCtimeMs ||
+     remote.name !== record.remoteName ||
+     remote.parentId !== record.remoteParentId ||
+-    remote.md5 !== record.remoteMd5 ||
++    !sameHashOrNone(remote.hash, record.remoteHash) ||
+     remote.size !== record.remoteSize ||
+     remote.modifiedTime !== record.remoteModifiedTime
+   );
+```
+
+`src/sync/plan-tracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-tracked.ts b/src/sync/plan-tracked.ts
+index 22c9e3f..9ef98a9 100644
+--- a/src/sync/plan-tracked.ts
++++ b/src/sync/plan-tracked.ts
+@@ -1,4 +1,4 @@
+-import { localMatchesRemote, remoteChanged } from './content-compare.js';
++import { localMatchesRemote, md5Value, remoteChanged } from './content-compare.js';
+ import { foldKey } from './paths.js';
+ import { planNative } from './plan-native.js';
+ import { planRemoteOnly } from './plan-remote-only.js';
+@@ -84,7 +84,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+     const others = (ctx.remoteByFold.get(foldKey(record.path)) ?? []).filter(
+       (r) => !ctx.trackedIds.has(r.id),
+     );
+-    const reuploaded = others.find((r) => r.md5 !== null && r.md5 === lMd5);
++    const reuploaded = others.find((r) => lMd5 !== null && md5Value(r.hash) === lMd5);
+     if (reuploaded)
+       return act({
+         ...base,
+```
+
+`src/sync/planner.ts` (modify):
+
+```diff
+diff --git a/src/sync/planner.ts b/src/sync/planner.ts
+index 96ed2ba..911f7dc 100644
+--- a/src/sync/planner.ts
++++ b/src/sync/planner.ts
+@@ -40,7 +40,7 @@ export function brakeFor(actions: readonly Action[], tracked: number): BrakeInfo
+ }
+ 
+ /**
+- * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote md5)` list of
++ * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote kind:hash)` list of
+  * every non-refresh action — no generated names or timestamps (spec §5 step 5).
+  */
+ export function computePlanId(actions: readonly Action[]): string {
+@@ -52,7 +52,7 @@ export function computePlanId(actions: readonly Action[]): string {
+         a.record?.remoteId ?? a.remote?.id ?? '',
+         a.key,
+         a.localMd5 ?? '',
+-        a.remote?.md5 ?? '',
++        a.remote?.hash ? `${a.remote.hash.kind}:${a.remote.hash.value}` : '',
+       ]),
+     )
+     .sort();
+```
+
+`src/sync/remote-scanner.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-scanner.ts b/src/sync/remote-scanner.ts
+index 7adc893..4f29719 100644
+--- a/src/sync/remote-scanner.ts
++++ b/src/sync/remote-scanner.ts
+@@ -37,7 +37,7 @@ export function toRemoteEntry(
+     parentId,
+     ancestorIds,
+     mimeType: item.mimeType,
+-    md5: native || item.hash?.kind !== 'md5' ? null : item.hash.value,
++    hash: native ? null : item.hash,
+     size: native ? null : item.size,
+     modifiedTime: item.modifiedTime,
+     createdTime: item.createdTime,
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index e9c5a5b..46476e3 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -1,5 +1,5 @@
+ import type { ExportFormat } from '../files/export-formats.js';
+-import type { RemoteUnsupported } from './remote/sync-remote.js';
++import type { ContentHash, RemoteUnsupported } from './remote/sync-remote.js';
+ 
+ /** Pair names: lower-case letters, digits and dashes (spec §3). */
+ export const PAIR_NAME = /^[a-z0-9-]{1,40}$/;
+@@ -48,7 +48,8 @@ export interface SyncRecord {
+   localSize: number;
+   localMtimeMs: number;
+   localCtimeMs: number;
+-  remoteMd5: string | null;
++  /** The remote's hash at the last sync (md5 on Google); null when it reported none. */
++  remoteHash: ContentHash | null;
+   remoteSize: number | null;
+   remoteModifiedTime: string;
+   native: null | { mimeType: string; exportFormat: ExportFormat };
+@@ -58,7 +59,7 @@ export interface SyncRecord {
+ }
+ 
+ export interface PairFile {
+-  version: 1;
++  version: 2;
+   pair: Pair;
+   records: SyncRecord[];
+ }
+@@ -108,7 +109,8 @@ export interface RemoteEntry {
+   /** Folder ids from the parent up to the pair root (inclusive). */
+   ancestorIds: string[];
+   mimeType: string;
+-  md5: string | null;
++  /** Content hash of a binary file; null for natives and when the remote reports none. */
++  hash: ContentHash | null;
+   size: number | null;
+   modifiedTime: string;
+   createdTime: string;
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/content-compare.test.ts src/sync/__tests__/exec-records.test.ts src/sync/__tests__/executor.test.ts src/sync/__tests__/fixtures.ts src/sync/__tests__/pair-store.test.ts src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/remote-scanner.test.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/content-compare.ts src/sync/exec-records.ts src/sync/executor.ts src/sync/pair-admin.ts src/sync/pair-store.ts src/sync/plan-remote-only.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/planner.ts src/sync/remote-scanner.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  127 passed (127); Tests  1352 passed | 6 skipped (1358)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/content-compare.test.ts src/sync/__tests__/exec-records.test.ts src/sync/__tests__/executor.test.ts src/sync/__tests__/fixtures.ts src/sync/__tests__/pair-store.test.ts src/sync/__tests__/plan-remote-only.test.ts src/sync/__tests__/plan-tracked.test.ts src/sync/__tests__/release.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/__tests__/remote-scanner.test.ts src/sync/__tests__/sync-service.pairs.test.ts src/sync/content-compare.ts src/sync/exec-records.ts src/sync/executor.ts src/sync/pair-admin.ts src/sync/pair-store.ts src/sync/plan-remote-only.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/planner.ts src/sync/remote-scanner.ts src/sync/types.ts
+git commit -F - <<'MSG'
+refactor(sync): ContentHash replaces md5 in entries, records and the pair file (v2)
+
+RemoteEntry.md5 becomes hash, SyncRecord.remoteMd5 becomes remoteHash and the
+planId hashes kind:value. The pair file moves to version 2; a version-1 file is
+migrated in memory (remoteMd5 x -> { kind: 'md5', value: x }) and saved as
+version 2. Test fixtures keep md5/remoteMd5 as shorthands.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 14: Pair deletion cursor and evidence fields; newer-version message
+
+**Spec:** §4.1 (`remoteCursor`, `remoteDeletedIds`), §4.5 (older binary message). Commit `7d192fd` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/fixtures.ts`
+- Test: `src/sync/__tests__/pair-store.test.ts`
+- Modify: `src/sync/pair-admin.ts`
+- Modify: `src/sync/pair-store.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/fixtures.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/fixtures.ts b/src/sync/__tests__/fixtures.ts
+index 1836b4a..9c75ce6 100644
+--- a/src/sync/__tests__/fixtures.ts
++++ b/src/sync/__tests__/fixtures.ts
+@@ -52,6 +52,8 @@ export function makePair(overrides: Partial<Pair> = {}): Pair {
+     lastAppliedRunAt: '2026-11-02T00:00:00.000Z',
+     firstAppliedRunAt: '2026-11-02T00:00:00.000Z',
+     nativeBaselineDone: true,
++    remoteCursor: null,
++    remoteDeletedIds: [],
+     ...overrides,
+   };
+ }
+```
+
+`src/sync/__tests__/pair-store.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/pair-store.test.ts b/src/sync/__tests__/pair-store.test.ts
+index ffe4426..37efacc 100644
+--- a/src/sync/__tests__/pair-store.test.ts
++++ b/src/sync/__tests__/pair-store.test.ts
+@@ -78,6 +78,27 @@ describe('PairStore', () => {
+     expect(saved.records[0].remoteHash).toEqual({ kind: 'md5', value: 'md5-r1' });
+   });
+ 
++  it('gives a version-1 pair an empty deletion cursor and evidence', async () => {
++    const file = makePairFile();
++    const pair: Record<string, unknown> = { ...file.pair };
++    delete pair.remoteCursor;
++    delete pair.remoteDeletedIds;
++    await mkdir(dir, { recursive: true });
++    await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...file, version: 1, pair }));
++    expect((await store().load('docs')).pair).toMatchObject({
++      remoteCursor: null,
++      remoteDeletedIds: [],
++    });
++  });
++
++  it('refuses a pair file from a newer version with an update hint', async () => {
++    await mkdir(dir, { recursive: true });
++    await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...makePairFile(), version: 3 }));
++    await expect(store().load('docs')).rejects.toThrow(
++      'this pair was saved by a newer marvin-drive; update it',
++    );
++  });
++
+   it('tightens an existing sync dir to 0700', async () => {
+     await mkdir(dir, { recursive: true });
+     await chmod(dir, 0o755);
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: FAIL. 2 failed: `expected { Object (name, id, ...) } to match object { remoteCursor: null, …(1) }` and `expected [Function] to throw error including 'this pair was saved by a newer marvin…' but got 'Sync pair file for "docs" is invalid:…'`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/pair-admin.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-admin.ts b/src/sync/pair-admin.ts
+index ea61f74..5dbc977 100644
+--- a/src/sync/pair-admin.ts
++++ b/src/sync/pair-admin.ts
+@@ -146,6 +146,8 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
+       lastAppliedRunAt: null,
+       firstAppliedRunAt: null,
+       nativeBaselineDone: false,
++      remoteCursor: null,
++      remoteDeletedIds: [],
+     };
+     const file: PairFile = { version: 2, pair, records: [] };
+     await env.store.save(file);
+```
+
+`src/sync/pair-store.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-store.ts b/src/sync/pair-store.ts
+index ca1bf93..eb05c67 100644
+--- a/src/sync/pair-store.ts
++++ b/src/sync/pair-store.ts
+@@ -32,8 +32,14 @@ const pairSchema = z.object({
+   lastAppliedRunAt: z.string().nullable(),
+   firstAppliedRunAt: z.string().nullable(),
+   nativeBaselineDone: z.boolean().default(false),
++  // Added in version 2 (OneDrive sync spec §4.5); version-1 files start empty.
++  remoteCursor: z.string().nullable().default(null),
++  remoteDeletedIds: z.array(z.string()).default([]),
+ });
+ 
++/** The pair file version this binary writes; a higher one comes from a newer release. */
++const PAIR_FILE_VERSION = 2;
++
+ const contentHash = z.object({ kind: z.enum(['md5', 'quickXor']), value: z.string() });
+ 
+ const recordFields = {
+@@ -142,6 +148,12 @@ export class PairStore {
+     } catch (err) {
+       throw new ValidationError(`Sync pair file for "${name}" is not valid JSON`, { cause: err });
+     }
++    const version = (json as { version?: unknown } | null)?.version;
++    if (typeof version === 'number' && version > PAIR_FILE_VERSION) {
++      throw new ValidationError(
++        `Sync pair file for "${name}": this pair was saved by a newer marvin-drive; update it`,
++      );
++    }
+     const parsed = parsePairFile(json);
+     if (!parsed.success) {
+       throw new ValidationError(`Sync pair file for "${name}" is invalid: ${parsed.error.message}`);
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index 46476e3..2a3d977 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -36,6 +36,10 @@ export interface Pair {
+   firstAppliedRunAt: string | null;
+   /** Addendum §4.1: false until the first applied run that baselined Google-native files. */
+   nativeBaselineDone: boolean;
++  /** OneDrive deletion feed cursor (spec §4.1); always null on Google pairs. */
++  remoteCursor: string | null;
++  /** Remote ids the deletion feed reported deleted and not yet acted on; empty on Google. */
++  remoteDeletedIds: string[];
+ }
+ 
+ export interface SyncRecord {
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/pair-store.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/fixtures.ts src/sync/__tests__/pair-store.test.ts src/sync/pair-admin.ts src/sync/pair-store.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  127 passed (127); Tests  1354 passed | 6 skipped (1360)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/fixtures.ts src/sync/__tests__/pair-store.test.ts src/sync/pair-admin.ts src/sync/pair-store.ts src/sync/types.ts
+git commit -F - <<'MSG'
+feat(sync): pair deletion cursor and evidence fields; newer-version message
+
+Pair gains remoteCursor (null) and remoteDeletedIds ([]); version-1 files load
+with those defaults. A pair file with a version above 2 is refused with "this pair
+was saved by a newer marvin-drive; update it".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 15: Local digests and sameContent
+
+**Spec:** §3.1 (`LocalDigests`, `hashFileDigests`, `PlanInput.digests`, `Action.localDigests`, stat-unchanged files), §3.2 (`sameContent`, `localMatchesRemote` without weak fallback). Commit `169d140` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/content-compare.test.ts`
+- Test: `src/sync/__tests__/local-scanner.test.ts`
+- Test: `src/sync/__tests__/plan-input.ts`
+- Test: `src/sync/__tests__/planner.test.ts`
+- Test: `src/sync/__tests__/resolve.test.ts`
+- Modify: `src/sync/content-compare.ts`
+- Modify: `src/sync/local-scanner.ts`
+- Modify: `src/sync/plan-remote-only.ts`
+- Modify: `src/sync/plan-shared.ts`
+- Modify: `src/sync/plan-tracked.ts`
+- Modify: `src/sync/plan-untracked.ts`
+- Modify: `src/sync/release.ts`
+- Modify: `src/sync/resolve.ts`
+- Modify: `src/sync/scan-select.ts`
+- Modify: `src/sync/types.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/content-compare.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/content-compare.test.ts b/src/sync/__tests__/content-compare.test.ts
+index 8dde3b0..8fd1472 100644
+--- a/src/sync/__tests__/content-compare.test.ts
++++ b/src/sync/__tests__/content-compare.test.ts
+@@ -1,10 +1,16 @@
+ import { describe, expect, it } from 'vitest';
+ import type { DriveFile } from '../../drive/drive-adapter.js';
+-import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from '../content-compare.js';
++import {
++  localMatchesRemote,
++  remoteChanged,
++  remoteUnchangedSince,
++  sameContent,
++} from '../content-compare.js';
+ import { toRemoteItem } from '../remote/google-remote.js';
+ import type { RemoteItem } from '../remote/sync-remote.js';
+ import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
+ import { nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
++import { md5Digests } from './plan-input.js';
+ 
+ const item = (file: DriveFile): RemoteItem => toRemoteItem(file, DEFAULT_GOOGLE_EXPORT);
+ 
+@@ -53,18 +59,37 @@ describe('remoteUnchangedSince', () => {
+     expect(remoteUnchangedSince(r, item({ modifiedTime: LATER }))).toBe(false);
+   });
+ });
++describe('sameContent', () => {
++  it('compares the local digest of the remote kind; null when unknown or of another kind', () => {
++    const qx = { kind: 'quickXor' as const, value: 'QX' };
++    expect(sameContent(md5Digests('a'), { kind: 'md5', value: 'a' })).toBe(true);
++    expect(sameContent(md5Digests('a'), { kind: 'md5', value: 'b' })).toBe(false);
++    expect(sameContent(md5Digests('a'), null)).toBeNull();
++    expect(sameContent(md5Digests('a'), qx)).toBeNull();
++    expect(sameContent({ md5: 'a', remote: null }, qx)).toBeNull();
++    expect(sameContent({ md5: 'a', remote: qx }, qx)).toBe(true);
++  });
++});
+ describe('localMatchesRemote', () => {
++  it('binary without a comparable remote hash is never a match (no weak fallback)', () => {
++    const r = remoteEntry('r1', 'a.pdf', { hash: { kind: 'quickXor', value: 'QX' } });
++    expect(localMatchesRemote(md5Digests('md5-r1'), null, r)).toBe(false);
++    expect(localMatchesRemote({ md5: 'md5-r1', remote: null }, null, r)).toBe(false);
++    expect(
++      localMatchesRemote({ md5: 'x', remote: { kind: 'quickXor', value: 'QX' } }, null, r),
++    ).toBe(true);
++  });
+   it('binary: local md5 = Drive md5 (no record needed)', () => {
+     const r = remoteEntry('r1', 'a.pdf');
+-    expect(localMatchesRemote('md5-r1', null, r)).toBe(true);
+-    expect(localMatchesRemote('other', null, r)).toBe(false);
+-    expect(localMatchesRemote('md5-r1', null, { ...r, hash: null })).toBe(false);
++    expect(localMatchesRemote(md5Digests('md5-r1'), null, r)).toBe(true);
++    expect(localMatchesRemote(md5Digests('other'), null, r)).toBe(false);
++    expect(localMatchesRemote(md5Digests('md5-r1'), null, { ...r, hash: null })).toBe(false);
+   });
+   it('native: local md5 = md5 of the last export (record required)', () => {
+     const k = nativeRecord('g1', 'Plan.docx', { localMd5: 'export-md5' });
+     const r = nativeEntry('g1', 'Plan.docx');
+-    expect(localMatchesRemote('export-md5', k, r)).toBe(true);
+-    expect(localMatchesRemote('edited', k, r)).toBe(false);
+-    expect(() => localMatchesRemote('export-md5', null, r)).toThrow(/needs its record/);
++    expect(localMatchesRemote(md5Digests('export-md5'), k, r)).toBe(true);
++    expect(localMatchesRemote(md5Digests('edited'), k, r)).toBe(false);
++    expect(() => localMatchesRemote(md5Digests('export-md5'), null, r)).toThrow(/needs its record/);
+   });
+ });
+```
+
+`src/sync/__tests__/local-scanner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/local-scanner.test.ts b/src/sync/__tests__/local-scanner.test.ts
+index 208f25e..e6988eb 100644
+--- a/src/sync/__tests__/local-scanner.test.ts
++++ b/src/sync/__tests__/local-scanner.test.ts
+@@ -5,7 +5,7 @@ import os from 'node:os';
+ import path from 'node:path';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
+-import { hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
++import { hashFileDigests, hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
+ 
+ const NFD = 'şartname.pdf'.normalize('NFD');
+ const isRoot = process.getuid?.() === 0;
+@@ -116,8 +116,29 @@ describe('hashing', () => {
+     await writeFile(path.join(root, 'a.txt'), 'hello');
+     const expected = createHash('md5').update('hello').digest('hex');
+     expect(await md5File(path.join(root, 'a.txt'))).toBe(expected);
+-    const { md5s, failed } = await hashLocal(root, ['a.txt', 'gone.txt']);
+-    expect(md5s.get('a.txt')).toBe(expected);
++    const { digests, failed } = await hashLocal(root, ['a.txt', 'gone.txt'], 'md5');
++    expect(digests.get('a.txt')).toEqual({
++      md5: expected,
++      remote: { kind: 'md5', value: expected },
++    });
+     expect(failed).toEqual(['gone.txt']);
+   });
++
++  it('computes the remote kind next to md5 in one read, with an injected digester', async () => {
++    await writeFile(path.join(root, 'a.txt'), 'hello');
++    const expected = createHash('md5').update('hello').digest('hex');
++    const seen: string[] = [];
++    const stub = (kind: string) => ({
++      update: (chunk: Buffer) => void seen.push(`${kind}:${chunk.toString()}`),
++      digest: () => 'QX-STUB',
++    });
++    expect(await hashFileDigests(path.join(root, 'a.txt'), 'quickXor', stub)).toEqual({
++      md5: expected,
++      remote: { kind: 'quickXor', value: 'QX-STUB' },
++    });
++    expect(seen).toEqual(['quickXor:hello']);
++    await expect(hashFileDigests(path.join(root, 'a.txt'), 'quickXor')).rejects.toThrow(
++      'No quickXor digest',
++    );
++  });
+ });
+```
+
+`src/sync/__tests__/plan-input.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-input.ts b/src/sync/__tests__/plan-input.ts
+index c5b6f9a..7073f9b 100644
+--- a/src/sync/__tests__/plan-input.ts
++++ b/src/sync/__tests__/plan-input.ts
+@@ -1,3 +1,4 @@
++import type { HashKind } from '../remote/sync-remote.js';
+ import type { PlanInput } from '../resolve.js';
+ import type {
+   LocalEntry,
+@@ -6,9 +7,10 @@ import type {
+   Probe,
+   RemoteEntry,
+   RemoteIgnored,
++  LocalDigests,
+   SyncRecord,
+ } from '../types.js';
+-import { ROOT_ID, makePair } from './fixtures.js';
++import { ROOT_ID, makePair, md5Hash } from './fixtures.js';
+ 
+ export interface InputOptions {
+   pair?: Partial<Pair>;
+@@ -19,7 +21,10 @@ export interface InputOptions {
+   remote?: RemoteEntry[];
+   ignored?: RemoteIgnored[];
+   probes?: Array<[string, Probe]>;
++  /** Shorthand: local md5 by on-disk name (its remote digest is the same md5). */
+   md5s?: Array<[string, string]>;
++  digests?: Array<[string, LocalDigests]>;
++  remoteHashKind?: HashKind;
+   onDisk?: Array<[string, OnDiskProbe]>;
+   blocking?: string[];
+   folders?: Array<[string, string]>;
+@@ -29,6 +34,11 @@ export interface InputOptions {
+   unknownFolderIds?: string[];
+ }
+ 
++/** The digests of a file whose md5 is `md5` on an md5 remote. */
++export function md5Digests(md5: string): LocalDigests {
++  return { md5, remote: md5Hash(md5) };
++}
++
+ export function planInput(o: InputOptions = {}): PlanInput {
+   const records = o.records ?? [];
+   const pair = makePair({
+@@ -53,7 +63,11 @@ export function planInput(o: InputOptions = {}): PlanInput {
+       unknownFolderIds: o.unknownFolderIds ?? [],
+     },
+     probes: new Map(o.probes ?? []),
+-    md5s: new Map(o.md5s ?? []),
++    digests: new Map([
++      ...(o.md5s ?? []).map(([name, md5]): [string, LocalDigests] => [name, md5Digests(md5)]),
++      ...(o.digests ?? []),
++    ]),
++    remoteHashKind: o.remoteHashKind ?? 'md5',
+     onDisk: new Map(o.onDisk ?? []),
+   };
+ }
+```
+
+`src/sync/__tests__/planner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/planner.test.ts b/src/sync/__tests__/planner.test.ts
+index cd4a48d..dbe9d38 100644
+--- a/src/sync/__tests__/planner.test.ts
++++ b/src/sync/__tests__/planner.test.ts
+@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { brakeFor, computePlanId, plan } from '../planner.js';
+ import type { Action } from '../types.js';
+ import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
+-import { planInput } from './plan-input.js';
++import { md5Digests, planInput } from './plan-input.js';
+ 
+ function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
+   return Array.from({ length: n }, (_, i) => ({
+@@ -197,9 +197,9 @@ describe('planId (spec §5)', () => {
+ 
+   it('changes when content changes', () => {
+     const changed = input();
+-    const md5s = new Map(changed.md5s);
+-    md5s.set('a.pdf', 'local-2');
+-    expect(plan({ ...changed, md5s }).planId).not.toBe(plan(input()).planId);
++    const digests = new Map(changed.digests);
++    digests.set('a.pdf', md5Digests('local-2'));
++    expect(plan({ ...changed, digests }).planId).not.toBe(plan(input()).planId);
+   });
+ });
+```
+
+`src/sync/__tests__/resolve.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/resolve.test.ts b/src/sync/__tests__/resolve.test.ts
+index 248d71e..ae5c38d 100644
+--- a/src/sync/__tests__/resolve.test.ts
++++ b/src/sync/__tests__/resolve.test.ts
+@@ -8,7 +8,7 @@ import {
+   resolveRemote,
+ } from '../resolve.js';
+ import { localEntry, record, remoteEntry } from './fixtures.js';
+-import { planInput } from './plan-input.js';
++import { md5Digests, planInput } from './plan-input.js';
+ 
+ const NFD = 'şartname.pdf'.normalize('NFD');
+ 
+@@ -109,13 +109,35 @@ describe('content state', () => {
+   it('local: unchanged by stat, else by md5; null when not hashed', () => {
+     const k = record('r1', 'a.pdf');
+     const ctx = buildContext(planInput({ md5s: [['b.pdf', 'md5-r1']] }));
+-    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({ changed: false, md5: 'md5-r1' });
++    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({
++      changed: false,
++      digests: md5Digests('md5-r1'),
++    });
+     expect(localState(ctx, k, localEntry('b.pdf', { mtimeMs: 5 }))).toEqual({
+       changed: false,
+-      md5: 'md5-r1',
++      digests: md5Digests('md5-r1'),
+     });
+     expect(localState(ctx, k, localEntry('a.pdf', { mtimeMs: 5 }))).toBeNull();
+   });
++  it('local on a non-md5 remote: stat-unchanged keeps the record md5, remote digest only if hashed', () => {
++    const k = record('r1', 'a.pdf');
++    const qx = { kind: 'quickXor' as const, value: 'QX' };
++    const plain = buildContext(planInput({ remoteHashKind: 'quickXor' }));
++    expect(localState(plain, k, localEntry('a.pdf'))).toEqual({
++      changed: false,
++      digests: { md5: 'md5-r1', remote: null },
++    });
++    const hashed = buildContext(
++      planInput({
++        remoteHashKind: 'quickXor',
++        digests: [['a.pdf', { md5: 'md5-r1', remote: qx }]],
++      }),
++    );
++    expect(localState(hashed, k, localEntry('a.pdf'))).toEqual({
++      changed: false,
++      digests: { md5: 'md5-r1', remote: qx },
++    });
++  });
+ });
+ 
+ describe('hashTargets', () => {
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/resolve.test.ts`
+
+Expected: FAIL. 4 failed: `TypeError: Cannot read properties of undefined (reading 'get')`, `TypeError: hashFileDigests is not a function`, `AssertionError: expected { changed: false, md5: 'md5-r1' } to deeply equal { changed: false, digests: { …(2) } }` (twice).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/content-compare.ts` (modify):
+
+```diff
+diff --git a/src/sync/content-compare.ts b/src/sync/content-compare.ts
+index 5a329fd..a394b53 100644
+--- a/src/sync/content-compare.ts
++++ b/src/sync/content-compare.ts
+@@ -1,6 +1,6 @@
+ import { ValidationError } from '../errors.js';
+ import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+-import type { RemoteEntry, SyncRecord } from './types.js';
++import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
+ 
+ /** The item's md5, or null when it reports none (or another hash kind). */
+ export function md5Of(item: RemoteItem): string | null {
+@@ -49,17 +49,26 @@ export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem):
+ }
+ 
+ /**
+- * L equals R: binary by Drive md5 (record unused: U2/B4 adopt); native by the md5 of the
+- * last export (record required — untracked natives with a local file are U0b).
++ * L's content vs a remote hash (spec §3.2): null when the remote reports none, the local
++ * digest of its kind was not computed, or the kinds differ.
++ */
++export function sameContent(local: LocalDigests, remote: ContentHash | null): boolean | null {
++  return sameHash(local.remote, remote);
++}
++
++/**
++ * L equals R: binary by the remote hash, never by a weaker fallback (record unused: U2/B4
++ * adopt, release); native by the md5 of the last export (record required — untracked
++ * natives with a local file are U0b).
+  */
+ export function localMatchesRemote(
+-  localMd5: string,
++  local: LocalDigests,
+   record: SyncRecord | null,
+   entry: RemoteEntry,
+ ): boolean {
+-  if (entry.native === null) return md5Value(entry.hash) === localMd5;
++  if (entry.native === null) return sameContent(local, entry.hash) === true;
+   if (record === null) {
+     throw new ValidationError(`Internal: comparing ${entry.key} needs its record`);
+   }
+-  return localMd5 === record.localMd5;
++  return local.md5 === record.localMd5;
+ }
+```
+
+`src/sync/local-scanner.ts` (modify):
+
+```diff
+diff --git a/src/sync/local-scanner.ts b/src/sync/local-scanner.ts
+index 986940d..306412c 100644
+--- a/src/sync/local-scanner.ts
++++ b/src/sync/local-scanner.ts
+@@ -5,7 +5,49 @@ import path from 'node:path';
+ import { pipeline } from 'node:stream/promises';
+ import { ValidationError, hasErrorCode } from '../errors.js';
+ import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
+-import type { LocalScan, OnDiskProbe } from './types.js';
++import type { HashKind } from './remote/sync-remote.js';
++import type { LocalDigests, LocalScan, OnDiskProbe } from './types.js';
++
++/** An incremental digest of one hash kind. */
++export interface Digester {
++  update(chunk: Buffer): void;
++  digest(): string;
++}
++
++/** Makes a digester for a remote's hash kind (injectable; quickXor plugs in here). */
++export type DigesterFactory = (kind: HashKind) => Digester;
++
++/** md5 only; other kinds are added with their implementation. */
++export const defaultDigesters: DigesterFactory = (kind) => {
++  if (kind !== 'md5') throw new ValidationError(`No ${kind} digest is available in this build`);
++  const hash = createHash('md5');
++  return {
++    update: (chunk): void => {
++      hash.update(chunk);
++    },
++    digest: (): string => hash.digest('hex'),
++  };
++};
++
++/** md5 and, when `kind` is not md5, the digest of `kind`, in one read (spec §3.1). */
++export async function hashFileDigests(
++  abs: string,
++  kind: HashKind,
++  digesters: DigesterFactory = defaultDigesters,
++): Promise<LocalDigests> {
++  const md5 = createHash('md5');
++  const other = kind === 'md5' ? null : digesters(kind);
++  for await (const chunk of createReadStream(abs)) {
++    const buf = chunk as Buffer;
++    md5.update(buf);
++    other?.update(buf);
++  }
++  const value = md5.digest('hex');
++  return {
++    md5: value,
++    remote: other ? { kind, value: other.digest() } : { kind: 'md5', value },
++  };
++}
+ 
+ export interface LocalScanOptions {
+   /** On-disk relative directory to restrict the scan to (sync_scan `subdir`). */
+@@ -144,19 +186,21 @@ export async function md5File(abs: string): Promise<string> {
+   return hash.digest('hex');
+ }
+ 
+-/** Hashes the given on-disk relative names; failures are returned, not thrown. */
++/** Digests of the given on-disk relative names; failures are returned, not thrown. */
+ export async function hashLocal(
+   root: string,
+   names: readonly string[],
+-): Promise<{ md5s: Map<string, string>; failed: string[] }> {
+-  const md5s = new Map<string, string>();
++  kind: HashKind,
++  digesters: DigesterFactory = defaultDigesters,
++): Promise<{ digests: Map<string, LocalDigests>; failed: string[] }> {
++  const digests = new Map<string, LocalDigests>();
+   const failed: string[] = [];
+   for (const name of names) {
+     try {
+-      md5s.set(name, await md5File(absInside(root, name)));
++      digests.set(name, await hashFileDigests(absInside(root, name), kind, digesters));
+     } catch {
+       failed.push(name);
+     }
+   }
+-  return { md5s, failed };
++  return { digests, failed };
+ }
+```
+
+`src/sync/plan-remote-only.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-remote-only.ts b/src/sync/plan-remote-only.ts
+index 8176440..21f1fd9 100644
+--- a/src/sync/plan-remote-only.ts
++++ b/src/sync/plan-remote-only.ts
+@@ -2,7 +2,7 @@ import { localMatchesRemote, remoteChanged, sameHashOrNone } from './content-com
+ import { foldKey } from './paths.js';
+ import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
+ import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
+-import type { RemoteEntry, SyncRecord } from './types.js';
++import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
+ 
+ /**
+  * Remote-side record fields that differ from R (O3/O4/O6 record refresh). A native's
+@@ -32,16 +32,23 @@ export function planRemoteOnly(
+ ): TrackedResult {
+   const { ctx, record, out, note, act } = s;
+   const entry = L.kind === 'present' ? L.entry : null;
+-  let lMd5: string | null = null;
++  let lDigests: LocalDigests | null = null;
+   if (entry) {
+     const st = localState(ctx, record, entry);
+     if (!st) return note('unknown-state', 'unknown', 'local file could not be hashed');
+-    lMd5 = st.md5;
++    lDigests = st.digests;
+   }
+-  const base: ActionBase = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
++  const base: ActionBase = {
++    key: record.path,
++    local: entry,
++    localMd5: lDigests?.md5 ?? null,
++    localDigests: lDigests,
++    selection: {},
++  };
+   const untrack = { remove: [record.path], exclude: [record.path] };
+   const present = R.kind === 'present' ? R.entry : null;
+-  const same = present !== null && lMd5 !== null && localMatchesRemote(lMd5, record, present);
++  const same =
++    present !== null && lDigests !== null && localMatchesRemote(lDigests, record, present);
+   // L is the unmodified last export but the Doc changed since: re-export over it (like N4).
+   const stale = same && present.native !== null && remoteChanged(record, present).changed;
+   const back = (rule: 'O0' | 'O8', remote: RemoteEntry): TrackedResult =>
+@@ -63,6 +70,7 @@ export function planRemoteOnly(
+         key: target,
+         local: null,
+         localMd5: null,
++        localDigests: null,
+         kind: present.native ? 'export-new' : 'download-new',
+         rule: 'O1',
+         remote: present,
+```
+
+`src/sync/plan-shared.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-shared.ts b/src/sync/plan-shared.ts
+index 361359b..278983d 100644
+--- a/src/sync/plan-shared.ts
++++ b/src/sync/plan-shared.ts
+@@ -4,6 +4,7 @@ import { isExcluded, type PlanContext } from './resolve.js';
+ import type {
+   Action,
+   ActionKind,
++  LocalDigests,
+   LocalEntry,
+   Note,
+   NoteCode,
+@@ -37,6 +38,7 @@ export interface ActionBase {
+   key: string;
+   local: LocalEntry | null;
+   localMd5: string | null;
++  localDigests: LocalDigests | null;
+   selection: SelectionChange;
+ }
+ 
+@@ -115,15 +117,16 @@ export function planMoved(
+   const [moved] = blockers;
+   if (!entry && !rChanged && blockers.length === 1 && moved) {
+     // Resume after a crash between the local move and persistence: the file is already there.
+-    const md5 = ctx.input.md5s.get(moved.name);
+-    if (md5 === record.localMd5) {
++    const digests = ctx.input.digests.get(moved.name);
++    if (digests !== undefined && digests.md5 === record.localMd5) {
+       return act({
+         ...base,
+         key: target,
+         kind: 'adopt',
+         rule: rule('B7-resume'),
+         local: moved,
+-        localMd5: md5,
++        localMd5: digests.md5,
++        localDigests: digests,
+         remote,
+         selection: { remove: [record.path], add: [target] },
+       });
+```
+
+`src/sync/plan-tracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-tracked.ts b/src/sync/plan-tracked.ts
+index 9ef98a9..dff2375 100644
+--- a/src/sync/plan-tracked.ts
++++ b/src/sync/plan-tracked.ts
+@@ -1,4 +1,4 @@
+-import { localMatchesRemote, md5Value, remoteChanged } from './content-compare.js';
++import { localMatchesRemote, remoteChanged, sameContent } from './content-compare.js';
+ import { foldKey } from './paths.js';
+ import { planNative } from './plan-native.js';
+ import { planRemoteOnly } from './plan-remote-only.js';
+@@ -10,7 +10,7 @@ import {
+   resolveRemote,
+   type PlanContext,
+ } from './resolve.js';
+-import type { SyncRecord } from './types.js';
++import type { LocalDigests, SyncRecord } from './types.js';
+ 
+ export type { TrackedResult } from './plan-shared.js';
+ 
+@@ -50,14 +50,20 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+ 
+   const entry = L.kind === 'present' ? L.entry : null;
+   let lChanged = false;
+-  let lMd5: string | null = null;
++  let lDigests: LocalDigests | null = null;
+   if (entry) {
+     const ls = localState(ctx, record, entry);
+     if (!ls) return note('unknown-state', 'unknown', 'local file could not be hashed');
+     lChanged = ls.changed;
+-    lMd5 = ls.md5;
++    lDigests = ls.digests;
+   }
+-  const base = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
++  const base = {
++    key: record.path,
++    local: entry,
++    localMd5: lDigests?.md5 ?? null,
++    localDigests: lDigests,
++    selection: {},
++  };
+   // (d)
+   if (record.native) return planNative(s, base, R, lChanged);
+ 
+@@ -84,7 +90,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+     const others = (ctx.remoteByFold.get(foldKey(record.path)) ?? []).filter(
+       (r) => !ctx.trackedIds.has(r.id),
+     );
+-    const reuploaded = others.find((r) => lMd5 !== null && md5Value(r.hash) === lMd5);
++    const reuploaded = others.find((r) => lDigests !== null && sameContent(lDigests, r.hash));
+     if (reuploaded)
+       return act({
+         ...base,
+@@ -141,7 +147,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
+       }
+       if (rs.changed && !lChanged)
+         return act({ ...base, kind: 'download-replace', rule: 'B3', remote });
+-      if (lMd5 !== null && localMatchesRemote(lMd5, null, remote))
++      if (lDigests !== null && localMatchesRemote(lDigests, null, remote))
+         return act({ ...base, kind: 'adopt', rule: 'B4', remote });
+       if (!remote.canEdit)
+         note('remote-readonly', 'B4', 'no edit permission; kept a conflict copy only');
+```
+
+`src/sync/plan-untracked.ts` (modify):
+
+```diff
+diff --git a/src/sync/plan-untracked.ts b/src/sync/plan-untracked.ts
+index ad1324b..2d91b0a 100644
+--- a/src/sync/plan-untracked.ts
++++ b/src/sync/plan-untracked.ts
+@@ -165,21 +165,23 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
+           rule: 'U1',
+           key: target,
+           local: L,
+-          localMd5: ctx.input.md5s.get(L.name) ?? null,
++          localMd5: ctx.input.digests.get(L.name)?.md5 ?? null,
++          localDigests: ctx.input.digests.get(L.name) ?? null,
+           remote: null,
+           selection: rename(sel, target),
+         });
+       } else if (L && R) {
+-        const lMd5 = ctx.input.md5s.get(L.name);
+-        if (lMd5 === undefined) note('unknown-state', 'U2', 'local file could not be hashed');
+-        else if (localMatchesRemote(lMd5, null, R)) {
++        const lDigests = ctx.input.digests.get(L.name);
++        if (lDigests === undefined) note('unknown-state', 'U2', 'local file could not be hashed');
++        else if (localMatchesRemote(lDigests, null, R)) {
+           out.actions.push({
+             ...base,
+             kind: 'adopt',
+             rule: 'U2',
+             key: R.key,
+             local: L,
+-            localMd5: lMd5,
++            localMd5: lDigests.md5,
++            localDigests: lDigests,
+             remote: R,
+             selection: rename(sel, R.key),
+           });
+@@ -192,7 +194,8 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
+             rule: 'U2',
+             key: R.key,
+             local: L,
+-            localMd5: lMd5,
++            localMd5: lDigests.md5,
++            localDigests: lDigests,
+             remote: R,
+             updateRemote: true,
+             selection: rename(sel, R.key),
+```
+
+`src/sync/release.ts` (modify):
+
+```diff
+diff --git a/src/sync/release.ts b/src/sync/release.ts
+index c3b6c8f..1798201 100644
+--- a/src/sync/release.ts
++++ b/src/sync/release.ts
+@@ -77,7 +77,7 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
+   if (L.kind === 'present') {
+     const st = localState(ctx, record, L.entry);
+     if (!st) return 'local file could not be hashed';
+-    if (st.changed || !localMatchesRemote(st.md5, record, R.entry)) {
++    if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
+       return 'not in sync (changed locally or in Drive); run sync_run first';
+     }
+     return { record, remote: R.entry, kind: 'present', localName: L.entry.name };
+@@ -189,7 +189,8 @@ async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
+     if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
+     throw err;
+   });
+-  if (md5 !== c.record.localMd5 || !localMatchesRemote(md5, c.record, c.remote)) {
++  const digests = { md5, remote: { kind: 'md5' as const, value: md5 } };
++  if (md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
+     throw new TargetChangedError(`${key} changed locally since the scan`);
+   }
+ }
+```
+
+`src/sync/resolve.ts` (modify):
+
+```diff
+diff --git a/src/sync/resolve.ts b/src/sync/resolve.ts
+index 1133d96..69d900a 100644
+--- a/src/sync/resolve.ts
++++ b/src/sync/resolve.ts
+@@ -1,5 +1,7 @@
+ import { ancestorKeys, foldKey, isUnder } from './paths.js';
++import type { HashKind } from './remote/sync-remote.js';
+ import type {
++  LocalDigests,
+   LocalEntry,
+   LocalScan,
+   OnDiskProbe,
+@@ -18,8 +20,10 @@ export interface PlanInput {
+   remote: RemoteScan;
+   /** Probe results for records missing from the remote scan (spec §6.2). */
+   probes: ReadonlyMap<string, Probe>;
+-  /** md5 by on-disk relative name, for the names `hashTargets` asked for. */
+-  md5s: ReadonlyMap<string, string>;
++  /** Digests by on-disk relative name, for the names `hashTargets` asked for. */
++  digests: ReadonlyMap<string, LocalDigests>;
++  /** The pair remote's hash kind (local digests of this kind are compared with it). */
++  remoteHashKind: HashKind;
+   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
+   onDisk: ReadonlyMap<string, OnDiskProbe>;
+ }
+@@ -204,11 +208,19 @@ export function localState(
+   ctx: PlanContext,
+   record: SyncRecord,
+   entry: LocalEntry,
+-): { changed: boolean; md5: string } | null {
+-  if (statMatches(entry, record)) return { changed: false, md5: record.localMd5 };
+-  const md5 = ctx.input.md5s.get(entry.name);
+-  if (md5 === undefined) return null;
+-  return { changed: md5 !== record.localMd5, md5 };
++): { changed: boolean; digests: LocalDigests } | null {
++  const hashed = ctx.input.digests.get(entry.name);
++  if (statMatches(entry, record)) {
++    // Not re-hashed for change detection: the record md5 stands (spec §3.1).
++    const md5 = record.localMd5;
++    const remote =
++      ctx.input.remoteHashKind === 'md5'
++        ? { kind: 'md5' as const, value: md5 }
++        : (hashed?.remote ?? null);
++    return { changed: false, digests: { md5, remote } };
++  }
++  if (hashed === undefined) return null;
++  return { changed: hashed.md5 !== record.localMd5, digests: hashed };
+ }
+ 
+ /**
+@@ -236,8 +248,8 @@ export function onDiskProbeKeys(
+  * files whose stat differs from the record, selected files not yet recorded, and a
+  * local file already at a vanished record's Drive-move target (crash after a move).
+  */
+-export function hashTargets(input: Omit<PlanInput, 'md5s'>): string[] {
+-  const ctx = buildContext({ ...input, md5s: new Map() });
++export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
++  const ctx = buildContext({ ...input, digests: new Map() });
+   const names = new Set<string>();
+   const recordFolds = new Set<string>();
+   for (const record of input.records) {
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 7afacef..5b67c7f 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -101,13 +101,26 @@ export async function gatherInput(
+     pair.localDir,
+     onDiskProbeKeys({ pair, records, local, remote }),
+   );
+-  const base = { pair, records, local, remote, probes: new Map(), onDisk };
+-  const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
++  const syncRemote = env.remoteFor(pair);
++  const base = {
++    pair,
++    records,
++    local,
++    remote,
++    probes: new Map(),
++    onDisk,
++    remoteHashKind: syncRemote.hashKind,
++  };
++  const { digests, failed } = await hashLocal(
++    pair.localDir,
++    hashTargets(base),
++    syncRemote.hashKind,
++  );
+   for (const name of failed) local.unknownSubtrees.push(toKey(name));
+   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
+   const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
+-  const probes = await probeRecords(missing, remote, env.remoteFor(pair));
+-  return { input: { ...base, probes, md5s }, local, remote };
++  const probes = await probeRecords(missing, remote, syncRemote);
++  return { input: { ...base, probes, digests }, local, remote };
+ }
+ 
+ /** sync_scan: local files (with text previews) and remote candidates for Claude to choose from. */
+```
+
+`src/sync/types.ts` (modify):
+
+```diff
+diff --git a/src/sync/types.ts b/src/sync/types.ts
+index 2a3d977..4c0de62 100644
+--- a/src/sync/types.ts
++++ b/src/sync/types.ts
+@@ -97,6 +97,16 @@ export interface OnDiskProbe {
+   ino: number;
+ }
+ 
++/**
++ * A local file's digests (OneDrive sync spec §3.1): its md5, and the digest of the remote's
++ * hash kind (the same md5 on Google). `remote` is null only when it was not computed: a
++ * stat-unchanged tracked file on a remote whose kind is not md5 (§3.1 "Stat-unchanged").
++ */
++export interface LocalDigests {
++  md5: string;
++  remote: ContentHash | null;
++}
++
+ /** Export settings of a Google-native Drive file (addendum §4.1). */
+ export interface NativeInfo {
+   mimeType: string;
+@@ -182,6 +192,8 @@ export interface Action {
+   record: SyncRecord | null;
+   local: LocalEntry | null;
+   localMd5: string | null;
++  /** The planned local content (md5 and the remote's kind); null when no local file is read. */
++  localDigests?: LocalDigests | null;
+   remote: RemoteEntry | null;
+   selection: SelectionChange;
+   /** move-local: rename in place (case-only change on a case-insensitive volume). */
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/resolve.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/content-compare.test.ts src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/plan-input.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/resolve.test.ts src/sync/content-compare.ts src/sync/local-scanner.ts src/sync/plan-remote-only.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts src/sync/release.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/types.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  127 passed (127); Tests  1358 passed | 6 skipped (1364)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/content-compare.test.ts src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/plan-input.ts src/sync/__tests__/planner.test.ts src/sync/__tests__/resolve.test.ts src/sync/content-compare.ts src/sync/local-scanner.ts src/sync/plan-remote-only.ts src/sync/plan-shared.ts src/sync/plan-tracked.ts src/sync/plan-untracked.ts src/sync/release.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/types.ts
+git commit -F - <<'MSG'
+feat(sync): local digests and sameContent for content comparison
+
+hashFileDigests computes md5 plus the remote's hash kind in one read (digesters
+are injectable; only md5 exists so far). PlanInput.md5s becomes digests, with
+remoteHashKind; localState returns LocalDigests; actions carry localDigests.
+localMatchesRemote compares through sameContent and never falls back to a weak
+match. On Google every digest is the md5, so plans are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 16: hashTargets asks for remote-kind digests to adopt or release
+
+**Spec:** §3.1 "Stat-unchanged files" (`remoteHashKind`, `releaseNames`, release candidates, untracked same-key files). Commit `a056c42` on the reference branch.
+
+**Files:**
+- Test (create): `src/sync/__tests__/gather-digests.test.ts`
+- Test: `src/sync/__tests__/plan-input.ts`
+- Test: `src/sync/__tests__/resolve.test.ts`
+- Modify: `src/sync/pair-admin.ts`
+- Modify: `src/sync/resolve.ts`
+- Modify: `src/sync/scan-select.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/gather-digests.test.ts` (create):
+
+```ts
+import { createHash } from 'node:crypto';
+import { lstat, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createAudit, silentLogger } from '../../files/__tests__/fakes.js';
+import type { Digester } from '../local-scanner.js';
+import type { SyncEnv } from '../pair-admin.js';
+import { PairStore } from '../pair-store.js';
+import { selectReleasable } from '../release.js';
+import type { RemoteItem, SyncRemote } from '../remote/sync-remote.js';
+import { gatherInput } from '../scan-select.js';
+import type { PairFile } from '../types.js';
+import { googleRemoteOver } from './fake-remote.js';
+import { makePairFile, record } from './fixtures.js';
+import { memoryDrive } from './memory-drive.js';
+
+const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
+
+/** Test-only "quickXor": `QX-` + the md5 of the content (the real one arrives in stage 3). */
+const qx = (md5hex: string): string => `QX-${md5hex}`;
+const stubDigester = (): Digester => {
+  const h = createHash('md5');
+  return { update: (c) => void h.update(c), digest: () => qx(h.digest('hex')) };
+};
+
+/** A remote that reports quickXor hashes (derived from the memory Drive's md5). */
+function quickXorRemote(inner: SyncRemote): SyncRemote {
+  const convert = (i: RemoteItem): RemoteItem =>
+    i.hash ? { ...i, hash: { kind: 'quickXor', value: qx(i.hash.value) } } : i;
+  return Object.assign(Object.create(inner) as SyncRemote, {
+    hashKind: 'quickXor' as const,
+    listChildren: async (id: string, token: string | undefined) => {
+      const page = await inner.listChildren(id, token);
+      return { ...page, items: page.items.map(convert) };
+    },
+  });
+}
+
+let dir: string;
+beforeEach(async () => {
+  dir = await mkdtemp(path.join(os.tmpdir(), 'sync-digests-'));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe('gatherInput on a non-md5 remote (spec §3.1 stat-unchanged files)', () => {
+  it('a stat-unchanged file gets a remote-kind digest only when release asks for it', async () => {
+    const mem = memoryDrive('ROOT');
+    mem.addFile('r1', 'a.pdf', 'ROOT', 'hello');
+    await writeFile(path.join(dir, 'a.pdf'), 'hello');
+    const info = await lstat(path.join(dir, 'a.pdf'));
+    const file: PairFile = makePairFile({ localDir: dir, remoteFolderId: 'ROOT' }, [
+      record('r1', 'a.pdf', {
+        remoteParentId: 'ROOT',
+        localMd5: md5('hello'),
+        localSize: info.size,
+        localMtimeMs: info.mtimeMs,
+        localCtimeMs: info.ctimeMs,
+        remoteHash: { kind: 'quickXor', value: qx(md5('hello')) },
+        remoteSize: 5,
+        remoteModifiedTime: mem.files.get('r1')?.modifiedTime ?? '',
+      }),
+    ]);
+    const remote = quickXorRemote(googleRemoteOver(mem.drive));
+    const env: SyncEnv = {
+      audit: createAudit(),
+      log: silentLogger(),
+      clock: () => new Date('2026-11-03T12:00:00.000Z'),
+      store: new PairStore({ dir: path.join(dir, '.store'), logger: silentLogger() }),
+      remoteFor: () => remote,
+      openRemote: async () => remote,
+      assertSupportedAccount: async () => {},
+      digesters: stubDigester,
+    };
+    const plain = await gatherInput(env, file);
+    expect(plain.input.digests.size).toBe(0);
+    expect(selectReleasable(plain.input, { all: true }).skipped).toEqual([
+      { path: 'a.pdf', reason: 'not in sync (changed locally or in Drive); run sync_run first' },
+    ]);
+    const asked = await gatherInput(env, file, 'all');
+    expect(asked.input.digests.get('a.pdf')).toEqual({
+      md5: md5('hello'),
+      remote: { kind: 'quickXor', value: qx(md5('hello')) },
+    });
+    expect(selectReleasable(asked.input, { all: true }).eligible.map((c) => c.record.path)).toEqual(
+      ['a.pdf'],
+    );
+  });
+});
+```
+
+`src/sync/__tests__/plan-input.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/plan-input.ts b/src/sync/__tests__/plan-input.ts
+index 7073f9b..193cdd6 100644
+--- a/src/sync/__tests__/plan-input.ts
++++ b/src/sync/__tests__/plan-input.ts
+@@ -25,6 +25,7 @@ export interface InputOptions {
+   md5s?: Array<[string, string]>;
+   digests?: Array<[string, LocalDigests]>;
+   remoteHashKind?: HashKind;
++  releaseNames?: PlanInput['releaseNames'];
+   onDisk?: Array<[string, OnDiskProbe]>;
+   blocking?: string[];
+   folders?: Array<[string, string]>;
+@@ -68,6 +69,7 @@ export function planInput(o: InputOptions = {}): PlanInput {
+       ...(o.digests ?? []),
+     ]),
+     remoteHashKind: o.remoteHashKind ?? 'md5',
++    releaseNames: o.releaseNames ?? null,
+     onDisk: new Map(o.onDisk ?? []),
+   };
+ }
+```
+
+`src/sync/__tests__/resolve.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/resolve.test.ts b/src/sync/__tests__/resolve.test.ts
+index ae5c38d..17c4d8f 100644
+--- a/src/sync/__tests__/resolve.test.ts
++++ b/src/sync/__tests__/resolve.test.ts
+@@ -8,7 +8,7 @@ import {
+   resolveRemote,
+ } from '../resolve.js';
+ import { localEntry, record, remoteEntry } from './fixtures.js';
+-import { md5Digests, planInput } from './plan-input.js';
++import { md5Digests, planInput, type InputOptions } from './plan-input.js';
+ 
+ const NFD = 'şartname.pdf'.normalize('NFD');
+ 
+@@ -154,6 +154,47 @@ describe('hashTargets', () => {
+     });
+     expect(hashTargets(input)).toEqual(['new.pdf', 'touched.pdf']);
+   });
++
++  const releaseCase = (o: Partial<InputOptions> = {}) =>
++    planInput({
++      records: [
++        record('r1', 'same.pdf'),
++        record('r2', 'nohash.pdf'),
++        record('r3', 'gone.pdf'),
++        record('r4', 'released.pdf', { remoteOnly: true }),
++      ],
++      local: [
++        localEntry('same.pdf'),
++        localEntry('nohash.pdf'),
++        localEntry('released.pdf'),
++        localEntry('adopt.pdf'),
++        localEntry('lonely.pdf'),
++      ],
++      remote: [
++        remoteEntry('r1', 'same.pdf'),
++        remoteEntry('r2', 'nohash.pdf', { hash: null }),
++        remoteEntry('r4', 'released.pdf'),
++        remoteEntry('n1', 'Adopt.pdf'),
++      ],
++      ...o,
++    });
++
++  it('on an md5 remote, release requests and adopt candidates add nothing', () => {
++    const base = hashTargets(releaseCase());
++    expect(base).toEqual([]);
++    expect(hashTargets({ ...releaseCase(), releaseNames: 'all' })).toEqual(base);
++    expect(hashTargets({ ...releaseCase(), releaseNames: ['same.pdf'] })).toEqual(base);
++  });
++
++  it('on another hash kind, adds release candidates and untracked same-key files', () => {
++    const qx = releaseCase({ remoteHashKind: 'quickXor' });
++    expect(hashTargets(qx)).toEqual(['adopt.pdf']);
++    expect(hashTargets({ ...qx, releaseNames: 'all' })).toEqual(['adopt.pdf', 'same.pdf']);
++    expect(hashTargets({ ...qx, releaseNames: ['NOHASH.pdf', 'gone.pdf'] })).toEqual([
++      'adopt.pdf',
++      'nohash.pdf',
++    ]);
++  });
+ });
+ 
+ describe('resolveLocal safety (blocking ancestors, on-disk probe)', () => {
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/resolve.test.ts src/sync/__tests__/gather-digests.test.ts`
+
+Expected: FAIL. `AssertionError: expected [] to deeply equal [ 'adopt.pdf' ]` in resolve.test.ts; gather-digests.test.ts fails on `asked.input.digests.get('a.pdf')` being undefined.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/pair-admin.ts` (modify):
+
+```diff
+diff --git a/src/sync/pair-admin.ts b/src/sync/pair-admin.ts
+index 5dbc977..122d42b 100644
+--- a/src/sync/pair-admin.ts
++++ b/src/sync/pair-admin.ts
+@@ -6,6 +6,7 @@ import type { AuditSink } from '../audit/audit-log.js';
+ import { NotFoundError, ValidationError } from '../errors.js';
+ import { expandHome } from '../files/destination.js';
+ import type { Logger } from '../logger.js';
++import type { DigesterFactory } from './local-scanner.js';
+ import { SyncRootError } from './errors.js';
+ import {
+   checkOverlap,
+@@ -31,6 +32,8 @@ export interface SyncEnv {
+   openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
+   /** Throws when the account cannot be synced, before anything touches the user's folder. */
+   assertSupportedAccount: (ref: string | undefined) => Promise<void>;
++  /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
++  digesters: DigesterFactory;
+ }
+ 
+ export interface CreatePairInput {
+```
+
+`src/sync/resolve.ts` (modify):
+
+```diff
+diff --git a/src/sync/resolve.ts b/src/sync/resolve.ts
+index 69d900a..bb78dec 100644
+--- a/src/sync/resolve.ts
++++ b/src/sync/resolve.ts
+@@ -24,6 +24,8 @@ export interface PlanInput {
+   digests: ReadonlyMap<string, LocalDigests>;
+   /** The pair remote's hash kind (local digests of this kind are compared with it). */
+   remoteHashKind: HashKind;
++  /** sync_release's request (`all` or the given paths); null for scans and runs. */
++  releaseNames: readonly string[] | 'all' | null;
+   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
+   onDisk: ReadonlyMap<string, OnDiskProbe>;
+ }
+@@ -247,6 +249,9 @@ export function onDiskProbeKeys(
+  * On-disk names the service must hash before planning (spec §5 step 3): tracked
+  * files whose stat differs from the record, selected files not yet recorded, and a
+  * local file already at a vanished record's Drive-move target (crash after a move).
++ * On a remote whose hash kind is not md5 it also asks for the files whose remote-kind
++ * digest is needed only to adopt or release (OneDrive sync spec §3.1): release candidates
++ * and untracked files with a same-key remote file. With md5 the set is exactly the above.
+  */
+ export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
+   const ctx = buildContext({ ...input, digests: new Map() });
+@@ -266,5 +271,30 @@ export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
+     if (recordFolds.has(fold)) continue;
+     for (const e of ctx.localByFold.get(fold) ?? []) names.add(e.name);
+   }
++  if (input.remoteHashKind !== 'md5') {
++    for (const name of digestOnlyTargets(ctx, recordFolds)) names.add(name);
++  }
+   return [...names].sort();
+ }
++
++/** Release candidates and untracked same-key files (non-md5 remotes only). */
++function digestOnlyTargets(ctx: PlanContext, recordFolds: ReadonlySet<string>): string[] {
++  const { input } = ctx;
++  const names: string[] = [];
++  const release = input.releaseNames;
++  const named = Array.isArray(release) ? new Set(release.map(foldKey)) : null;
++  for (const record of input.records) {
++    const wanted =
++      release === 'all'
++        ? !record.remoteOnly && (ctx.remoteById.get(record.remoteId)?.hash ?? null) !== null
++        : named !== null && named.has(foldKey(record.path));
++    if (!wanted) continue;
++    const l = resolveLocal(ctx, record.path);
++    if (l.kind === 'present') names.push(l.entry.name);
++  }
++  for (const e of input.local.entries) {
++    if (recordFolds.has(e.foldKey)) continue;
++    if ((ctx.remoteByFold.get(e.foldKey) ?? []).length > 0) names.push(e.name);
++  }
++  return names;
++}
+```
+
+`src/sync/scan-select.ts` (modify):
+
+```diff
+diff --git a/src/sync/scan-select.ts b/src/sync/scan-select.ts
+index 5b67c7f..17a2bd2 100644
+--- a/src/sync/scan-select.ts
++++ b/src/sync/scan-select.ts
+@@ -92,6 +92,7 @@ export async function scanBoth(
+ export async function gatherInput(
+   env: SyncEnv,
+   file: PairFile,
++  releaseNames: PlanInput['releaseNames'] = null,
+ ): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan }> {
+   const { pair, records } = file;
+   const { local, remote } = await scanBoth(env, pair);
+@@ -110,11 +111,13 @@ export async function gatherInput(
+     probes: new Map(),
+     onDisk,
+     remoteHashKind: syncRemote.hashKind,
++    releaseNames,
+   };
+   const { digests, failed } = await hashLocal(
+     pair.localDir,
+     hashTargets(base),
+     syncRemote.hashKind,
++    env.digesters,
+   );
+   for (const name of failed) local.unknownSubtrees.push(toKey(name));
+   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index d7f2a52..aaa8a76 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -3,6 +3,7 @@ import { OperationRunner, type OperationDeps } from '../core/operation.js';
+ import { ValidationError } from '../errors.js';
+ import { logger as defaultLogger, type Logger } from '../logger.js';
+ import { Executor } from './executor.js';
++import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
+ import {
+   checkRoots,
+   createPair,
+@@ -57,6 +58,8 @@ export interface SyncServiceDeps extends OperationDeps {
+   clock?: () => Date;
+   /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
+   assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
++  /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
++  digesters?: DigesterFactory;
+ }
+ 
+ export interface RunInput {
+@@ -98,6 +101,7 @@ export class SyncService {
+       openRemote: (ref, prefs): Promise<SyncRemote> => GoogleSyncRemote.open(this.ops, ref, prefs),
+       assertSupportedAccount:
+         deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
++      digesters: deps.digesters ?? defaultDigesters,
+     };
+   }
+ 
+@@ -255,7 +259,11 @@ export class SyncService {
+     return this.store.withLock(input.name, async () => {
+       const file = await this.store.load(input.name);
+       await checkRoots(this.env, file.pair);
+-      const { input: planInput } = await gatherInput(this.env, file);
++      const { input: planInput } = await gatherInput(
++        this.env,
++        file,
++        all ? 'all' : (input.paths ?? []),
++      );
+       const selection = await withoutTrash(
+         selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] }),
+         file.pair.localDir,
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/resolve.test.ts src/sync/__tests__/gather-digests.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/plan-input.ts src/sync/__tests__/resolve.test.ts src/sync/pair-admin.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1361 passed | 6 skipped (1367)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/gather-digests.test.ts src/sync/__tests__/plan-input.ts src/sync/__tests__/resolve.test.ts src/sync/pair-admin.ts src/sync/resolve.ts src/sync/scan-select.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): hashTargets asks for remote-kind digests to adopt or release
+
+PlanInput gains releaseNames; sync_release passes 'all' or its paths. On a remote
+whose hash kind is not md5, hashTargets also returns release candidates (with
+'all': records whose remote hash is known) and untracked local files with a
+same-key remote file. On md5 the set is exactly as before. SyncEnv carries the
+digesters so tests (and stage 3's quickXor) can plug a kind in.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 17: Uploads compare through sameContent; localMd5 is always local
+
+**Spec:** §3.1 last bullet (`localMd5` invariant), §3.2 (`findDuplicateUpload` size + `sameContent`, quiet `changed-during-upload` on a null hash). Commit `081b1f2` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/executor.test.ts`
+- Modify: `src/sync/content-compare.ts`
+- Modify: `src/sync/executor.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.test.ts b/src/sync/__tests__/executor.test.ts
+index 570b5f4..7b7aa4b 100644
+--- a/src/sync/__tests__/executor.test.ts
++++ b/src/sync/__tests__/executor.test.ts
+@@ -237,13 +237,48 @@ describe('Executor', () => {
+       action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+     ]);
+     expect(out[0]?.warning).toBe('changed-during-upload');
++    // localMd5 is always the local md5, never the remote's value (OneDrive sync spec §3.1).
+     expect(file.records[0]).toMatchObject({
+-      localMd5: 'other',
++      localMd5: md5('hello'),
+       remoteHash: { kind: 'md5', value: 'other' },
+       localSize: l.size,
+     });
+   });
+ 
++  it('is quiet when the remote reports no hash for the upload', async () => {
++    const l = await put('a.pdf', 'hello');
++    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf' });
++    const file = pairFile([], ['a.pdf']);
++    const out = await executor(file).run([
++      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
++    ]);
++    expect(out[0]).toEqual({ kind: 'upload-new', path: 'a.pdf', status: 'done' });
++    expect(file.records[0]).toMatchObject({ localMd5: md5('hello'), remoteHash: null });
++  });
++
++  it('does not adopt a same-hash duplicate whose size differs', async () => {
++    const l = await put('a.pdf', 'hello');
++    drive.createFile.mockRejectedValueOnce(httpError(500));
++    drive.listFiles.mockResolvedValueOnce({
++      files: [
++        {
++          id: 'n1',
++          name: 'a.pdf',
++          md5Checksum: md5('hello'),
++          size: '6',
++          createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
++          parents: [ROOT_ID],
++        },
++      ],
++    });
++    const file = pairFile([], ['a.pdf']);
++    const out = await executor(file).run([
++      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
++    ]);
++    expect(out[0]?.status).toBe('failed');
++    expect(file.records).toEqual([]);
++  });
++
+   it('adopts its own upload after an ambiguous upload error (duplicate-safe)', async () => {
+     const l = await put('a.pdf', 'hello');
+     drive.createFile.mockRejectedValueOnce(httpError(500));
+@@ -253,6 +288,7 @@ describe('Executor', () => {
+           id: 'n1',
+           name: 'a.pdf',
+           md5Checksum: md5('hello'),
++          size: '5',
+           createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
+           parents: [ROOT_ID],
+         },
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts`
+
+Expected: FAIL. 2 failed: the changed-during-upload record still has `localMd5: 'other'`, and the size-mismatched duplicate is adopted (`expected 'done' to be 'failed'`).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/content-compare.ts` (modify):
+
+```diff
+diff --git a/src/sync/content-compare.ts b/src/sync/content-compare.ts
+index a394b53..c59b496 100644
+--- a/src/sync/content-compare.ts
++++ b/src/sync/content-compare.ts
+@@ -2,11 +2,6 @@ import { ValidationError } from '../errors.js';
+ import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+ import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
+ 
+-/** The item's md5, or null when it reports none (or another hash kind). */
+-export function md5Of(item: RemoteItem): string | null {
+-  return md5Value(item.hash);
+-}
+-
+ /** The value of an md5 hash; null for none or another kind. */
+ export function md5Value(hash: ContentHash | null): string | null {
+   return hash?.kind === 'md5' ? hash.value : null;
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index fb2dd8a..57e4861 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -3,7 +3,7 @@ import path from 'node:path';
+ import type { AuditOp, AuditSink } from '../audit/audit-log.js';
+ import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
+ import type { Logger } from '../logger.js';
+-import { md5Of, md5Value, remoteUnchangedSince } from './content-compare.js';
++import { md5Value, remoteUnchangedSince, sameContent } from './content-compare.js';
+ import {
+   CollisionError,
+   LocalEditKeptError,
+@@ -23,9 +23,10 @@ import {
+   putRecord,
+   statOf,
+   type LocalFields,
++  type RemoteFields,
+ } from './exec-records.js';
+ import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-export.js';
+-import { md5File } from './local-scanner.js';
++import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, parentKey, prepareParent } from './paths.js';
+ import { RemoteFolders } from './remote-folders.js';
+ import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+@@ -35,6 +36,7 @@ import {
+   type Action,
+   type ActionKind,
+   type ActionOutcome,
++  type LocalDigests,
+   type LocalEntry,
+   type PairFile,
+   type RemoteEntry,
+@@ -65,6 +67,8 @@ export interface ExecutorDeps {
+   save: (file: PairFile) => Promise<void>;
+   /** Moves local files to the OS trash (tests pass a fake). */
+   trash: LocalTrash;
++  /** Local digests of the remote's hash kind (default: built-in digesters). */
++  digesters?: DigesterFactory;
+ }
+ 
+ /** Executes a plan in spec §7 order, persisting the pair file after every success. */
+@@ -79,6 +83,10 @@ export class Executor {
+     this.folders = new RemoteFolders(deps, file.pair, folders);
+   }
+ 
++  private get digesters(): DigesterFactory {
++    return this.deps.digesters ?? defaultDigesters;
++  }
++
+   private get pair(): PairFile['pair'] {
+     return this.file.pair;
+   }
+@@ -274,9 +282,24 @@ export class Executor {
+ 
+   // ---- uploads ----------------------------------------------------------------------
+ 
++  /** The planned local content; actions built without digests carry the md5 alone. */
++  private plannedDigests(action: Action): LocalDigests {
++    if (action.localDigests) return action.localDigests;
++    const md5 = need(action.localMd5, 'local md5');
++    return {
++      md5,
++      remote: this.deps.remote.hashKind === 'md5' ? { kind: 'md5', value: md5 } : null,
++    };
++  }
++
++  /** Only a hash that differs warns; a missing or other-kind hash is not a warning (§3.2). */
++  private changedDuringUpload(planned: LocalDigests, fields: RemoteFields): string | undefined {
++    return sameContent(planned, fields.hash) === false ? 'changed-during-upload' : undefined;
++  }
++
+   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
+     const local = need(action.local, 'local');
+-    const planned = need(action.localMd5, 'local md5');
++    const planned = this.plannedDigests(action);
+     const parentId = await this.folders.folderFor(parentKey(action.key));
+     const abs = absInside(this.pair.localDir, local.name);
+     const name = baseName(action.key);
+@@ -285,18 +308,16 @@ export class Executor {
+       uploaded = await this.deps.remote.uploadNew(parentId, name, abs);
+     } catch (err) {
+       if (isAbortError(err)) throw err;
+-      const adopted = await this.findDuplicateUpload(parentId, name, planned);
++      const adopted = await this.findDuplicateUpload(parentId, name, planned, local.size);
+       if (!adopted) throw err;
+       uploaded = adopted;
+     }
+     const remote = fromRemote(uploaded, parentId);
+-    const uploadedMd5 = md5Value(remote.hash);
+-    const warning =
+-      uploadedMd5 !== null && uploadedMd5 !== planned ? 'changed-during-upload' : undefined;
++    const warning = this.changedDuringUpload(planned, remote);
+     await this.commit(action, () =>
+       putRecord(
+         this.file,
+-        makeRecord(action.key, this.localFields(local, uploadedMd5 ?? planned), remote),
++        makeRecord(action.key, this.localFields(local, planned.md5), remote),
+         action.rebaseFrom,
+       ),
+     );
+@@ -304,11 +325,15 @@ export class Executor {
+     return warning ? { warning } : {};
+   }
+ 
+-  /** After an upload error: a same-name, same-md5 file created within 10 minutes is ours (spec §7). */
++  /**
++   * After an upload error: a same-name file with the planned size and content, created
++   * within 10 minutes, is ours (spec §7; OneDrive sync spec §3.2).
++   */
+   private async findDuplicateUpload(
+     parentId: string,
+     name: string,
+-    md5: string,
++    planned: LocalDigests,
++    size: number,
+   ): Promise<RemoteItem | null> {
+     try {
+       const list = await this.deps.remote.findChildren(parentId, name);
+@@ -316,7 +341,8 @@ export class Executor {
+       return (
+         list.find(
+           (f) =>
+-            md5Of(f) === md5 &&
++            f.size === size &&
++            sameContent(planned, f.hash) === true &&
+             f.name === name &&
+             Math.abs(now - Date.parse(f.createdTime)) <= DUPLICATE_WINDOW_MS,
+         ) ?? null
+@@ -329,20 +355,15 @@ export class Executor {
+ 
+   private async updateRemote(action: Action): Promise<Partial<ActionOutcome>> {
+     const local = need(action.local, 'local');
+-    const planned = need(action.localMd5, 'local md5');
++    const planned = this.plannedDigests(action);
+     const remote = need(action.remote, 'remote');
+     const current = await this.verifyRemote(remote);
+     const abs = absInside(this.pair.localDir, local.name);
+     const updated = await this.deps.remote.replaceContent(current, abs);
+     const fields = fromRemote(updated, remote.parentId);
+-    const updatedMd5 = md5Value(fields.hash);
+-    const warning =
+-      updatedMd5 !== null && updatedMd5 !== planned ? 'changed-during-upload' : undefined;
++    const warning = this.changedDuringUpload(planned, fields);
+     await this.commit(action, () =>
+-      putRecord(
+-        this.file,
+-        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
+-      ),
++      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
+     );
+     await this.audit('sync_update', action, remote.id);
+     return warning ? { warning } : {};
+@@ -424,7 +445,7 @@ export class Executor {
+   private async conflict(action: Action): Promise<Partial<ActionOutcome>> {
+     const local = need(action.local, 'local');
+     const remote = need(action.remote, 'remote');
+-    const planned = need(action.localMd5, 'local md5');
++    const planned = this.plannedDigests(action);
+     const abs = absInside(this.pair.localDir, local.name);
+     const at = this.deps.clock();
+     const base = path.basename(abs);
+@@ -453,20 +474,12 @@ export class Executor {
+     const current = await this.verifyRemote(remote);
+     const updated = await this.deps.remote.replaceContent(current, abs);
+     const fields = fromRemote(updated, remote.parentId);
+-    const updatedMd5 = md5Value(fields.hash);
++    const warning = this.changedDuringUpload(planned, fields);
+     await this.commit(action, () =>
+-      putRecord(
+-        this.file,
+-        makeRecord(action.key, this.localFields(local, updatedMd5 ?? planned), fields),
+-      ),
++      putRecord(this.file, makeRecord(action.key, this.localFields(local, planned.md5), fields)),
+     );
+     await this.audit('sync_update', action, remote.id);
+-    return {
+-      conflictCopy,
+-      ...(updatedMd5 !== null && updatedMd5 !== planned
+-        ? { warning: 'changed-during-upload' }
+-        : {}),
+-    };
++    return { conflictCopy, ...(warning ? { warning } : {}) };
+   }
+ 
+   // ---- deletions --------------------------------------------------------------------
+@@ -500,7 +513,7 @@ export class Executor {
+     const abs = absInside(this.pair.localDir, local.name);
+     let md5: string;
+     try {
+-      md5 = await md5File(abs);
++      md5 = (await hashFileDigests(abs, 'md5', this.digesters)).md5;
+     } catch (err) {
+       if (hasErrorCode(err, 'ENOENT'))
+         throw new TargetChangedError(`${action.key} is already gone`);
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/executor.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/executor.test.ts src/sync/content-compare.ts src/sync/executor.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1363 passed | 6 skipped (1369)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/executor.test.ts src/sync/content-compare.ts src/sync/executor.ts
+git commit -F - <<'MSG'
+feat(sync): uploads compare through sameContent; localMd5 is always local
+
+changed-during-upload warns only when sameContent is false (no hash: quiet).
+The duplicate-upload check matches the planned size and sameContent. Records
+take the planned local md5 after an upload, never the remote's value (this
+changes the changed-during-upload record from the remote md5 to the local one,
+as OneDrive sync spec §3.1 asks). trash-local re-hashes with hashFileDigests.
+md5Of is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 18: Downloads verify the remote hash kind and size
+
+**Spec:** §3.3 (`expected: ContentHash | null`, `expectedSize`, mismatch fails the action, both providers). Commit `d9384a3` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/executor.test.ts`
+- Test: `src/sync/__tests__/transfer.test.ts`
+- Modify: `src/sync/content-compare.ts`
+- Modify: `src/sync/errors.ts`
+- Modify: `src/sync/exec-export.ts`
+- Modify: `src/sync/executor.ts`
+- Modify: `src/sync/transfer.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/executor.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/executor.test.ts b/src/sync/__tests__/executor.test.ts
+index 7b7aa4b..4a97287 100644
+--- a/src/sync/__tests__/executor.test.ts
++++ b/src/sync/__tests__/executor.test.ts
+@@ -512,6 +512,19 @@ describe('Executor', () => {
+     expect(saves).toEqual([]);
+   });
+ 
++  it('fails a download whose size differs from the remote size; nothing is placed', async () => {
++    serve('R');
++    const r = remote('r1', 'a.pdf', 'R', { size: 7 });
++    const out = await executor(pairFile([], ['a.pdf'])).run([
++      action('download-new', 'a.pdf', { remote: r }),
++    ]);
++    expect(out[0]).toMatchObject({
++      status: 'failed',
++      message: expect.stringMatching(/7 bytes, got 1/),
++    });
++    expect(await readdir(dir)).toEqual([]);
++  });
++
+   it('isolates failures and aborts on run-ending errors', async () => {
+     const a = await put('a.pdf', 'A');
+     const b = await put('b.pdf', 'B');
+```
+
+`src/sync/__tests__/transfer.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/transfer.test.ts b/src/sync/__tests__/transfer.test.ts
+index d7504ac..a9e48c1 100644
+--- a/src/sync/__tests__/transfer.test.ts
++++ b/src/sync/__tests__/transfer.test.ts
+@@ -4,7 +4,13 @@ import os from 'node:os';
+ import path from 'node:path';
+ import { Readable } from 'node:stream';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+-import { ChecksumMismatchError, CollisionError, TargetChangedError } from '../errors.js';
++import {
++  ChecksumMismatchError,
++  CollisionError,
++  SizeMismatchError,
++  TargetChangedError,
++} from '../errors.js';
++import { md5Hash } from './fixtures.js';
+ import {
+   downloadReplace,
+   moveLocal,
+@@ -36,7 +42,7 @@ async function leftovers(): Promise<string[]> {
+ describe('placeExclusive', () => {
+   it('writes a new file and verifies md5', async () => {
+     const out = await placeExclusive(dir, () => 'a.pdf', source('hello'), {
+-      expectedMd5: md5('hello'),
++      expected: md5Hash(md5('hello')),
+     });
+     expect(out).toEqual({ path: path.join(dir, 'a.pdf'), md5: md5('hello'), size: 5 });
+     expect(await readFile(out.path, 'utf8')).toBe('hello');
+@@ -61,11 +67,34 @@ describe('placeExclusive', () => {
+ 
+   it('removes the temp file on a checksum mismatch', async () => {
+     await expect(
+-      placeExclusive(dir, () => 'a.pdf', source('hello'), { expectedMd5: 'nope' }),
++      placeExclusive(dir, () => 'a.pdf', source('hello'), { expected: md5Hash('nope') }),
+     ).rejects.toBeInstanceOf(ChecksumMismatchError);
+     expect(await readdir(dir)).toEqual([]);
+   });
+ 
++  it('removes the temp file on a size mismatch', async () => {
++    await expect(
++      placeExclusive(dir, () => 'a.pdf', source('hello'), { expectedSize: 4 }),
++    ).rejects.toBeInstanceOf(SizeMismatchError);
++    expect(await readdir(dir)).toEqual([]);
++  });
++
++  it('verifies a non-md5 remote hash with the injected digester, md5 still returned', async () => {
++    const digesters = () => ({ update: () => {}, digest: () => 'QX' });
++    const out = await placeExclusive(dir, () => 'a.pdf', source('hello'), {
++      expected: { kind: 'quickXor', value: 'QX' },
++      digesters,
++    });
++    expect(out.md5).toBe(md5('hello'));
++    await expect(
++      placeExclusive(dir, () => 'b.pdf', source('hello'), {
++        expected: { kind: 'quickXor', value: 'other' },
++        digesters,
++      }),
++    ).rejects.toThrow('expected quickXor other, got QX');
++    expect(await leftovers()).toEqual([]);
++  });
++
+   it('falls back to exists-check + rename where hard links are unsupported', async () => {
+     const noLink = async (): Promise<void> => {
+       throw Object.assign(new Error('nope'), { code: 'ENOTSUP' });
+@@ -84,7 +113,7 @@ describe('downloadReplace', () => {
+     await writeFile(target, 'old');
+     const res = await downloadReplace(target, source('new'), {
+       expect: await statOf(target),
+-      expectedMd5: md5('new'),
++      expected: md5Hash(md5('new')),
+     });
+     expect(res).toEqual({ md5: md5('new'), size: 3 });
+     expect(await readFile(target, 'utf8')).toBe('new');
+@@ -97,7 +126,7 @@ describe('downloadReplace', () => {
+     const expect0 = await statOf(target);
+     await writeFile(target, 'edited!');
+     await expect(
+-      downloadReplace(target, source('new'), { expect: expect0, expectedMd5: null }),
++      downloadReplace(target, source('new'), { expect: expect0 }),
+     ).rejects.toBeInstanceOf(TargetChangedError);
+     expect(await readFile(target, 'utf8')).toBe('edited!');
+   });
+@@ -110,18 +139,31 @@ describe('downloadReplace', () => {
+       await writeFile(target, 'edited during download');
+       return Readable.from([Buffer.from('new')]);
+     };
+-    await expect(
+-      downloadReplace(target, racing, { expect: expect0, expectedMd5: null }),
+-    ).rejects.toBeInstanceOf(TargetChangedError);
++    await expect(downloadReplace(target, racing, { expect: expect0 })).rejects.toBeInstanceOf(
++      TargetChangedError,
++    );
+     expect(await readFile(target, 'utf8')).toBe('edited during download');
+     expect(await leftovers()).toEqual([]);
+   });
+ 
++  it('keeps the old file on a size mismatch', async () => {
++    const target = path.join(dir, 'a.pdf');
++    await writeFile(target, 'old');
++    await expect(
++      downloadReplace(target, source('new'), { expect: await statOf(target), expectedSize: 9 }),
++    ).rejects.toBeInstanceOf(SizeMismatchError);
++    expect(await readFile(target, 'utf8')).toBe('old');
++    expect(await leftovers()).toEqual([]);
++  });
++
+   it('keeps the old file on a checksum mismatch', async () => {
+     const target = path.join(dir, 'a.pdf');
+     await writeFile(target, 'old');
+     await expect(
+-      downloadReplace(target, source('new'), { expect: await statOf(target), expectedMd5: 'x' }),
++      downloadReplace(target, source('new'), {
++        expect: await statOf(target),
++        expected: md5Hash('x'),
++      }),
+     ).rejects.toBeInstanceOf(ChecksumMismatchError);
+     expect(await readFile(target, 'utf8')).toBe('old');
+   });
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/transfer.test.ts src/sync/__tests__/executor.test.ts`
+
+Expected: FAIL. The old `placeExclusive`/`downloadReplace` ignore `expected` and `expectedSize`, so the mismatch tests fail with `promise resolved "{ …(3) }" instead of rejecting` and the executor size test ends `done` instead of `failed`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/content-compare.ts` (modify):
+
+```diff
+diff --git a/src/sync/content-compare.ts b/src/sync/content-compare.ts
+index c59b496..97b8eed 100644
+--- a/src/sync/content-compare.ts
++++ b/src/sync/content-compare.ts
+@@ -2,11 +2,6 @@ import { ValidationError } from '../errors.js';
+ import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+ import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
+ 
+-/** The value of an md5 hash; null for none or another kind. */
+-export function md5Value(hash: ContentHash | null): string | null {
+-  return hash?.kind === 'md5' ? hash.value : null;
+-}
+-
+ /** Equal hashes, or both missing (record bookkeeping: did the remote's hash change?). */
+ export function sameHashOrNone(a: ContentHash | null, b: ContentHash | null): boolean {
+   if (a === null || b === null) return a === b;
+```
+
+`src/sync/errors.ts` (modify):
+
+```diff
+diff --git a/src/sync/errors.ts b/src/sync/errors.ts
+index 55721fb..f929492 100644
+--- a/src/sync/errors.ts
++++ b/src/sync/errors.ts
+@@ -1,3 +1,4 @@
++import type { HashKind } from './remote/sync-remote.js';
+ import {
+   ApiDisabledError,
+   AppError,
+@@ -28,8 +29,17 @@ export class TargetChangedError extends AppError {
+ export class ChecksumMismatchError extends AppError {
+   readonly code = 'SYNC_CHECKSUM_MISMATCH';
+ 
+-  constructor(what: string, expected: string, actual: string) {
+-    super(`${what}: expected md5 ${expected}, got ${actual}`);
++  constructor(what: string, expected: string, actual: string, kind: HashKind = 'md5') {
++    super(`${what}: expected ${kind} ${expected}, got ${actual}`);
++  }
++}
++
++/** Downloaded bytes differ in length from the size the remote reported (spec §3.3). */
++export class SizeMismatchError extends AppError {
++  readonly code = 'SYNC_SIZE_MISMATCH';
++
++  constructor(what: string, expected: number, actual: number) {
++    super(`${what}: expected ${expected} bytes, got ${actual}`);
+   }
+ }
+```
+
+`src/sync/exec-export.ts` (modify):
+
+```diff
+diff --git a/src/sync/exec-export.ts b/src/sync/exec-export.ts
+index 59cdfed..6ba3ed1 100644
+--- a/src/sync/exec-export.ts
++++ b/src/sync/exec-export.ts
+@@ -63,7 +63,7 @@ export async function exportOver(
+ ): Promise<{ md5: string; size: number }> {
+   const current = await reread(host, remote);
+   return host.remote.exportNative(current, planOf(remote), (open) =>
+-    downloadReplace(abs, open, { expect, expectedMd5: null }),
++    downloadReplace(abs, open, { expect }),
+   );
+ }
+```
+
+`src/sync/executor.ts` (modify):
+
+```diff
+diff --git a/src/sync/executor.ts b/src/sync/executor.ts
+index 57e4861..34914ce 100644
+--- a/src/sync/executor.ts
++++ b/src/sync/executor.ts
+@@ -3,7 +3,7 @@ import path from 'node:path';
+ import type { AuditOp, AuditSink } from '../audit/audit-log.js';
+ import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
+ import type { Logger } from '../logger.js';
+-import { md5Value, remoteUnchangedSince, sameContent } from './content-compare.js';
++import { remoteUnchangedSince, sameContent } from './content-compare.js';
+ import {
+   CollisionError,
+   LocalEditKeptError,
+@@ -30,7 +30,7 @@ import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local
+ import { absInside, baseName, parentKey, prepareParent } from './paths.js';
+ import { RemoteFolders } from './remote-folders.js';
+ import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+-import { downloadReplace, moveLocal, placeExclusive } from './transfer.js';
++import { downloadReplace, moveLocal, placeExclusive, type DownloadCheck } from './transfer.js';
+ import type { LocalTrash } from './trash.js';
+ import {
+   type Action,
+@@ -282,6 +282,11 @@ export class Executor {
+ 
+   // ---- uploads ----------------------------------------------------------------------
+ 
++  /** A download must match R's hash and size (OneDrive sync spec §3.3). */
++  private check(remote: RemoteEntry): DownloadCheck {
++    return { expected: remote.hash, expectedSize: remote.size, digesters: this.digesters };
++  }
++
+   /** The planned local content; actions built without digests carry the md5 alone. */
+   private plannedDigests(action: Action): LocalDigests {
+     if (action.localDigests) return action.localDigests;
+@@ -401,7 +406,7 @@ export class Executor {
+     const written = remote.native
+       ? await exportOver(this.host(), to, expect, remote)
+       : await this.deps.remote.download(remote.id, (open) =>
+-          downloadReplace(to, open, { expect, expectedMd5: md5Value(remote.hash) }),
++          downloadReplace(to, open, { expect, ...this.check(remote) }),
+         );
+     const after = await this.statFields(action.key, written.md5);
+     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
+@@ -415,7 +420,7 @@ export class Executor {
+     const abs = await prepareParent(this.pair.localDir, action.key);
+     const written = await this.deps.remote.download(remote.id, (open) =>
+       placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
+-        expectedMd5: md5Value(remote.hash),
++        ...this.check(remote),
+       }),
+     );
+     const local = await this.statFields(action.key, written.md5);
+@@ -431,7 +436,7 @@ export class Executor {
+     const remote = need(action.remote, 'remote');
+     const abs = absInside(this.pair.localDir, local.name);
+     const written = await this.deps.remote.download(remote.id, (open) =>
+-      downloadReplace(abs, open, { expect: statOf(local), expectedMd5: md5Value(remote.hash) }),
++      downloadReplace(abs, open, { expect: statOf(local), ...this.check(remote) }),
+     );
+     const after = await this.statFields(local.name, written.md5);
+     await this.commit(action, () =>
+@@ -451,7 +456,7 @@ export class Executor {
+     const base = path.basename(abs);
+     const copy = await this.deps.remote.download(remote.id, (open) =>
+       placeExclusive(path.dirname(abs), (i) => conflictName(base, at, i), open, {
+-        expectedMd5: md5Value(remote.hash),
++        ...this.check(remote),
+         maxAttempts: MAX_CONFLICT_NAMES,
+       }),
+     );
+```
+
+`src/sync/transfer.ts` (modify):
+
+```diff
+diff --git a/src/sync/transfer.ts b/src/sync/transfer.ts
+index 1127e17..848dcfc 100644
+--- a/src/sync/transfer.ts
++++ b/src/sync/transfer.ts
+@@ -3,8 +3,15 @@ import { link as fsLink, lstat, open, readdir, rename, rm, unlink } from 'node:f
+ import path from 'node:path';
+ import type { Readable } from 'node:stream';
+ import { hasErrorCode } from '../errors.js';
+-import { ChecksumMismatchError, CollisionError, TargetChangedError } from './errors.js';
++import {
++  ChecksumMismatchError,
++  CollisionError,
++  SizeMismatchError,
++  TargetChangedError,
++} from './errors.js';
++import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
+ import { PART_SUFFIX } from './paths.js';
++import type { ContentHash } from './remote/sync-remote.js';
+ import { renameReplacing } from '../files/rename-replacing.js';
+ 
+ export type LinkFn = (existingPath: string, newPath: string) => Promise<void>;
+@@ -33,19 +40,39 @@ async function exists(p: string): Promise<boolean> {
+   }
+ }
+ 
+-/** Streams `source` into a fresh `.<uuid>.marvin-part` in `dir`, hashing and fsyncing it. */
++/** What a download must match (OneDrive sync spec §3.3); null/undefined: no check. */
++export interface DownloadCheck {
++  /** The remote's hash: md5 is always computed, another kind through `digesters`. */
++  expected?: ContentHash | null;
++  /** The remote's size; a different byte count fails the write. */
++  expectedSize?: number | null;
++  digesters?: DigesterFactory;
++}
++
++/**
++ * Streams `source` into a fresh `.<uuid>.marvin-part` in `dir`, hashing and fsyncing it,
++ * then checks it against `check`. On a mismatch or error the temp file is removed.
++ */
+ async function writeTemp(
+   dir: string,
+   source: Readable,
++  what: string,
++  check: DownloadCheck,
+ ): Promise<{ tmp: string; md5: string; size: number }> {
+   const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
+   const handle = await open(tmp, 'wx', 0o644);
+   const hash = createHash('md5');
++  const expected = check.expected ?? null;
++  const other =
++    expected !== null && expected.kind !== 'md5'
++      ? (check.digesters ?? defaultDigesters)(expected.kind)
++      : null;
+   let size = 0;
+   try {
+     for await (const chunk of source) {
+       const buf = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
+       hash.update(buf);
++      other?.update(buf);
+       size += buf.length;
+       await handle.write(buf);
+     }
+@@ -57,7 +84,23 @@ async function writeTemp(
+     throw err;
+   }
+   await handle.close();
+-  return { tmp, md5: hash.digest('hex'), size };
++  const md5 = hash.digest('hex');
++  try {
++    if (expected !== null) {
++      const actual = other ? other.digest() : md5;
++      if (actual !== expected.value) {
++        throw new ChecksumMismatchError(what, expected.value, actual, expected.kind);
++      }
++    }
++    const expectedSize = check.expectedSize ?? null;
++    if (expectedSize !== null && size !== expectedSize) {
++      throw new SizeMismatchError(what, expectedSize, size);
++    }
++  } catch (err) {
++    await rm(tmp, { force: true });
++    throw err;
++  }
++  return { tmp, md5, size };
+ }
+ 
+ /** fsync a directory so a new entry survives a crash (best effort where unsupported). */
+@@ -95,9 +138,7 @@ export async function assertUnchanged(target: string, expect: StatExpect): Promi
+   }
+ }
+ 
+-export interface PlaceOptions {
+-  /** Verify the written bytes (null/undefined: no check). */
+-  expectedMd5?: string | null;
++export interface PlaceOptions extends DownloadCheck {
+   /** Names tried: nameFor(0), nameFor(1)…; default 1 (plain exclusive create). */
+   maxAttempts?: number;
+   link?: LinkFn;
+@@ -114,11 +155,8 @@ export async function placeExclusive(
+   opts: PlaceOptions = {},
+ ): Promise<Written> {
+   const link = opts.link ?? fsLink;
+-  const { tmp, md5, size } = await writeTemp(dir, await openSource());
++  const { tmp, md5, size } = await writeTemp(dir, await openSource(), nameFor(0), opts);
+   try {
+-    if (opts.expectedMd5 && md5 !== opts.expectedMd5) {
+-      throw new ChecksumMismatchError(nameFor(0), opts.expectedMd5, md5);
+-    }
+     const attempts = opts.maxAttempts ?? 1;
+     for (let i = 0; i < attempts; i++) {
+       const target = path.join(dir, nameFor(i));
+@@ -146,14 +184,16 @@ export async function placeExclusive(
+ export async function downloadReplace(
+   target: string,
+   openSource: () => Promise<Readable>,
+-  opts: { expect: StatExpect; expectedMd5: string | null },
++  opts: DownloadCheck & { expect: StatExpect },
+ ): Promise<{ md5: string; size: number }> {
+   await assertUnchanged(target, opts.expect);
+-  const { tmp, md5, size } = await writeTemp(path.dirname(target), await openSource());
++  const { tmp, md5, size } = await writeTemp(
++    path.dirname(target),
++    await openSource(),
++    target,
++    opts,
++  );
+   try {
+-    if (opts.expectedMd5 && md5 !== opts.expectedMd5) {
+-      throw new ChecksumMismatchError(target, opts.expectedMd5, md5);
+-    }
+     await assertUnchanged(target, opts.expect);
+     await renameReplacing(tmp, target);
+   } finally {
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/transfer.test.ts src/sync/__tests__/executor.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/executor.test.ts src/sync/__tests__/transfer.test.ts src/sync/content-compare.ts src/sync/errors.ts src/sync/exec-export.ts src/sync/executor.ts src/sync/transfer.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1367 passed | 6 skipped (1373)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/executor.test.ts src/sync/__tests__/transfer.test.ts src/sync/content-compare.ts src/sync/errors.ts src/sync/exec-export.ts src/sync/executor.ts src/sync/transfer.ts
+git commit -F - <<'MSG'
+feat(sync): downloads verify the remote hash kind and size
+
+writeTemp takes expected (ContentHash) and expectedSize. It always computes md5
+for the record and the expected kind through the digesters; a hash or size
+mismatch removes the temp file and fails the action (SizeMismatchError is new,
+for both providers). md5Value is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 19: Release re-hashes the local copy in the remote's hash kind
+
+**Spec:** §3.1 (release `verifyLocal` through `hashFileDigests`). Commit `daa7b9b` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/local-scanner.test.ts`
+- Test: `src/sync/__tests__/release.test.ts`
+- Modify: `src/sync/local-scanner.ts`
+- Modify: `src/sync/release.ts`
+- Modify: `src/sync/sync-service.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/local-scanner.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/local-scanner.test.ts b/src/sync/__tests__/local-scanner.test.ts
+index e6988eb..c3a5f91 100644
+--- a/src/sync/__tests__/local-scanner.test.ts
++++ b/src/sync/__tests__/local-scanner.test.ts
+@@ -5,7 +5,7 @@ import os from 'node:os';
+ import path from 'node:path';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { linkDir, linkFileOrSkip } from '../../__tests__/links.js';
+-import { hashFileDigests, hashLocal, md5File, probeOnDisk, scanLocal } from '../local-scanner.js';
++import { hashFileDigests, hashLocal, probeOnDisk, scanLocal } from '../local-scanner.js';
+ 
+ const NFD = 'şartname.pdf'.normalize('NFD');
+ const isRoot = process.getuid?.() === 0;
+@@ -115,7 +115,6 @@ describe('hashing', () => {
+   it('computes md5 and reports failures', async () => {
+     await writeFile(path.join(root, 'a.txt'), 'hello');
+     const expected = createHash('md5').update('hello').digest('hex');
+-    expect(await md5File(path.join(root, 'a.txt'))).toBe(expected);
+     const { digests, failed } = await hashLocal(root, ['a.txt', 'gone.txt'], 'md5');
+     expect(digests.get('a.txt')).toEqual({
+       md5: expected,
+```
+
+`src/sync/__tests__/release.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/release.test.ts b/src/sync/__tests__/release.test.ts
+index d01dd9e..4876838 100644
+--- a/src/sync/__tests__/release.test.ts
++++ b/src/sync/__tests__/release.test.ts
+@@ -1,4 +1,9 @@
++import { createHash } from 'node:crypto';
++import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
++import os from 'node:os';
++import path from 'node:path';
+ import { describe, expect, it } from 'vitest';
++import type { SyncRemote } from '../remote/sync-remote.js';
+ import { createAudit, createFakeDrive, silentLogger } from '../../files/__tests__/fakes.js';
+ import { applyRelease, selectReleasable, type ReleaseSelection } from '../release.js';
+ import { binary } from './drive-tree.js';
+@@ -8,6 +13,7 @@ import {
+   makePairFile,
+   nativeEntry,
+   nativeRecord,
++  dirTrash,
+   record,
+   refuseTrash,
+   remoteEntry,
+@@ -179,3 +185,57 @@ describe('applyRelease re-reads R through the remote', () => {
+     expect(drive.getFile).toHaveBeenCalledWith('r1', expect.stringContaining('md5Checksum'));
+   });
+ });
++
++describe('applyRelease re-hashes L with the remote hash kind (spec §3.1)', () => {
++  const md5 = (t: string): string => createHash('md5').update(t).digest('hex');
++  const qx = (t: string): string => `QX-${md5(t)}`;
++  const digesters = () => {
++    const h = createHash('md5');
++    return { update: (c: Buffer) => void h.update(c), digest: () => `QX-${h.digest('hex')}` };
++  };
++
++  async function releaseOnQuickXor(localContent: string) {
++    const dir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-'));
++    const trashDir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-trash-'));
++    try {
++      await writeFile(path.join(dir, 'a.pdf'), localContent);
++      const remote = remoteEntry('r1', 'a.pdf', { hash: { kind: 'quickXor', value: qx('hello') } });
++      const rec = record('r1', 'a.pdf', { localMd5: md5('hello'), remoteHash: remote.hash });
++      const drive = createFakeDrive();
++      drive.getFile.mockResolvedValueOnce(binary('r1', 'a.pdf', remote.parentId));
++      const inner = googleRemoteOver(drive);
++      const fake = Object.assign(Object.create(inner) as SyncRemote, {
++        hashKind: 'quickXor' as const,
++        read: async () => ({ ...(await inner.read('r1')), hash: remote.hash }),
++      });
++      const out = await applyRelease(
++        {
++          remote: fake,
++          digesters,
++          audit: createAudit(),
++          logger: silentLogger(),
++          trash: dirTrash(trashDir),
++          save: async () => {},
++        },
++        makePairFile({ localDir: dir }, [rec]),
++        [{ record: rec, remote, kind: 'present', localName: 'a.pdf' }],
++      );
++      return { out, left: await readdir(dir) };
++    } finally {
++      await rm(dir, { recursive: true, force: true });
++      await rm(trashDir, { recursive: true, force: true });
++    }
++  }
++
++  it('releases when the local quickXor digest equals the remote hash', async () => {
++    const { out, left } = await releaseOnQuickXor('hello');
++    expect(out.released).toEqual([{ path: 'a.pdf', status: 'released' }]);
++    expect(left).toEqual([]);
++  });
++
++  it('refuses when the local content changed', async () => {
++    const { out, left } = await releaseOnQuickXor('edited');
++    expect(out.failed).toEqual([{ path: 'a.pdf', reason: 'a.pdf changed locally since the scan' }]);
++    expect(left).toEqual(['a.pdf']);
++  });
++});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/release.test.ts`
+
+Expected: FAIL. 1 failed: `AssertionError: expected [] to deeply equal [ { path: 'a.pdf', …(1) } ]` (the md5-only re-hash cannot match a quickXor remote hash).
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/local-scanner.ts` (modify):
+
+```diff
+diff --git a/src/sync/local-scanner.ts b/src/sync/local-scanner.ts
+index 306412c..2953639 100644
+--- a/src/sync/local-scanner.ts
++++ b/src/sync/local-scanner.ts
+@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
+ import { createReadStream, type Stats } from 'node:fs';
+ import { lstat, readdir } from 'node:fs/promises';
+ import path from 'node:path';
+-import { pipeline } from 'node:stream/promises';
+ import { ValidationError, hasErrorCode } from '../errors.js';
+ import { PART_SUFFIX, absInside, ancestorKeys, foldKey, isIgnoredName, toKey } from './paths.js';
+ import type { HashKind } from './remote/sync-remote.js';
+@@ -180,12 +179,6 @@ async function blockedByNonDirectory(
+   return false;
+ }
+ 
+-export async function md5File(abs: string): Promise<string> {
+-  const hash = createHash('md5');
+-  await pipeline(createReadStream(abs), hash);
+-  return hash.digest('hex');
+-}
+-
+ /** Digests of the given on-disk relative names; failures are returned, not thrown. */
+ export async function hashLocal(
+   root: string,
+```
+
+`src/sync/release.ts` (modify):
+
+```diff
+diff --git a/src/sync/release.ts b/src/sync/release.ts
+index 1798201..c4ffe27 100644
+--- a/src/sync/release.ts
++++ b/src/sync/release.ts
+@@ -5,7 +5,7 @@ import { AppError, hasErrorCode } from '../errors.js';
+ import type { Logger } from '../logger.js';
+ import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from './content-compare.js';
+ import { isAbortError, messageOf, PersistenceError, TargetChangedError } from './errors.js';
+-import { md5File } from './local-scanner.js';
++import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
+ import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
+ import { TYPE_CHANGED } from './plan-tracked.js';
+ import type { SyncRemote } from './remote/sync-remote.js';
+@@ -158,6 +158,8 @@ export async function withoutTrash(
+ export interface ReleaseDeps {
+   /** The pair's remote. */
+   remote: SyncRemote;
++  /** Local digests of the remote's hash kind (default: built-in digesters). */
++  digesters?: DigesterFactory;
+   audit: AuditSink;
+   logger: Logger;
+   trash: LocalTrash;
+@@ -182,15 +184,21 @@ async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<vo
+   }
+ }
+ 
+-/** Present: L re-hashed must equal the record (binary: and R's md5) — never trash an edit. */
+-async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
++/**
++ * Present: L re-hashed must equal the record (md5) and, for a binary file, R's hash in R's
++ * kind — never trash an edit.
++ */
++async function verifyLocal(deps: ReleaseDeps, abs: string, c: ReleaseCandidate): Promise<void> {
+   const key = c.record.path;
+-  const md5 = await md5File(abs).catch((err: unknown) => {
++  const digests = await hashFileDigests(
++    abs,
++    deps.remote.hashKind,
++    deps.digesters ?? defaultDigesters,
++  ).catch((err: unknown) => {
+     if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
+     throw err;
+   });
+-  const digests = { md5, remote: { kind: 'md5' as const, value: md5 } };
+-  if (md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
++  if (digests.md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
+     throw new TargetChangedError(`${key} changed locally since the scan`);
+   }
+ }
+@@ -281,7 +289,7 @@ export async function applyRelease(
+       if (c.kind === 'present') {
+         name = c.localName ?? key;
+         abs = absInside(pair.localDir, name);
+-        await verifyLocal(abs, c);
++        await verifyLocal(deps, abs, c);
+       } else {
+         await assertStillAbsent(pair, key);
+       }
+```
+
+`src/sync/sync-service.ts` (modify):
+
+```diff
+diff --git a/src/sync/sync-service.ts b/src/sync/sync-service.ts
+index aaa8a76..69f38f1 100644
+--- a/src/sync/sync-service.ts
++++ b/src/sync/sync-service.ts
+@@ -209,6 +209,7 @@ export class SyncService {
+       const executor = new Executor(
+         {
+           remote: this.env.remoteFor(file.pair),
++          digesters: this.env.digesters,
+           audit: this.deps.audit,
+           logger: this.log,
+           clock: this.clock,
+@@ -286,6 +287,7 @@ export class SyncService {
+       const done = await applyRelease(
+         {
+           remote: this.env.remoteFor(file.pair),
++          digesters: this.env.digesters,
+           audit: this.deps.audit,
+           logger: this.log,
+           trash: this.deps.trash,
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/release.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/release.test.ts src/sync/local-scanner.ts src/sync/release.ts src/sync/sync-service.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1369 passed | 6 skipped (1375)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/local-scanner.test.ts src/sync/__tests__/release.test.ts src/sync/local-scanner.ts src/sync/release.ts src/sync/sync-service.ts
+git commit -F - <<'MSG'
+feat(sync): release re-hashes the local copy in the remote's hash kind
+
+verifyLocal uses hashFileDigests with the pair remote's kind and compares through
+localMatchesRemote, so a non-md5 remote can release by its own hash. The
+executor and release get the SyncEnv digesters. md5File is gone; hashFileDigests
+is the one hashing helper.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 20: Review fixes for chunk 1 (a): findChildren contract, signals, quickXor re-verification
+
+**Spec:** review items 1, 3 and 5 (port docs; `remoteUnchangedSince` with a quickXor item). Commit `a5043ec` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/content-compare.test.ts`
+- Modify: `src/sync/remote/sync-remote.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/content-compare.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/content-compare.test.ts b/src/sync/__tests__/content-compare.test.ts
+index 8fd1472..fed5c7d 100644
+--- a/src/sync/__tests__/content-compare.test.ts
++++ b/src/sync/__tests__/content-compare.test.ts
+@@ -53,6 +53,14 @@ describe('remoteUnchangedSince', () => {
+     );
+     expect(remoteUnchangedSince(r, item({ md5Checksum, modifiedTime: LATER }))).toBe(false);
+   });
++  it('a quickXor hash compares by kind and value (never always-changed)', () => {
++    const hash = { kind: 'quickXor' as const, value: 'QX' };
++    const r = remoteEntry('r1', 'a.pdf', { hash });
++    const current = { ...item({ modifiedTime: r.modifiedTime }), hash };
++    expect(remoteUnchangedSince(r, current)).toBe(true);
++    expect(remoteUnchangedSince(r, { ...current, hash: { ...hash, value: 'other' } })).toBe(false);
++    expect(remoteUnchangedSince(r, { ...current, hash: { kind: 'md5', value: 'QX' } })).toBe(false);
++  });
+   it('native needs modifiedTime equal', () => {
+     const r = nativeEntry('g1', 'Plan.docx');
+     expect(remoteUnchangedSince(r, item({ modifiedTime: r.modifiedTime }))).toBe(true);
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/content-compare.test.ts`
+
+Expected: PASS already (the ContentHash work of Tasks 13–19 covers it); this task pins it with a test and fixes the doc comments.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote/sync-remote.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote/sync-remote.ts b/src/sync/remote/sync-remote.ts
+index c07042c..a8790bd 100644
+--- a/src/sync/remote/sync-remote.ts
++++ b/src/sync/remote/sync-remote.ts
+@@ -58,6 +58,10 @@ export interface DeletionFeed {
+   read(cursor: string): Promise<{ deletedIds: string[]; cursor: string } | { expired: true }>;
+ }
+ 
++/**
++ * Optional `signal` parameters are honoured by OneDrive (stage 3) and ignored by Google,
++ * whose OperationRunner has no cancellation.
++ */
+ export interface SyncRemote {
+   readonly provider: 'google' | 'microsoft';
+   /** The hash kind this remote reports for files. */
+@@ -75,7 +79,14 @@ export interface SyncRemote {
+     pageToken: string | undefined,
+     signal?: AbortSignal,
+   ): Promise<{ items: RemoteItem[]; next?: string }>;
+-  /** Children whose name folds to `name`'s fold key; the engine decides what to do. */
++  /**
++   * Candidate children named `name`; callers re-check the names they accept.
++   * - Google, `kind: 'folder'`: every folder of the parent (all pages) whose name folds to
++   *   `name`'s fold key.
++   * - Google, files: the first page (100) of Drive's exact-name query, as the duplicate
++   *   upload check always read it; not paged.
++   * - OneDrive (stage 3): every child whose name folds to `name`'s fold key.
++   */
+   findChildren(parentId: string, name: string, kind?: 'folder'): Promise<RemoteItem[]>;
+   createFolder(parentId: string, name: string): Promise<RemoteItem>;
+   uploadNew(parentId: string, name: string, localPath: string): Promise<RemoteItem>;
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/content-compare.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/content-compare.test.ts src/sync/remote/sync-remote.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1370 passed | 6 skipped (1376)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/content-compare.test.ts src/sync/remote/sync-remote.ts
+git commit -F - <<'MSG'
+docs(sync): per-provider findChildren contract, ignored signals on Google
+
+Review fixes for chunk 1: the port documents what Google's findChildren returns
+(all fold-matching folders; the first page of the exact-name file query) and that
+the optional signals are honoured by OneDrive only. A test pins that a quickXor
+hash compares by kind and value in remoteUnchangedSince.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 21: Review fixes for chunk 1 (b): a NativeSource exports through any remote
+
+**Spec:** review item 4 (`env.remoteFor` builds one remote per call). Commit `113f376` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/google-remote.test.ts`
+- Modify: `src/sync/remote/google-remote.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/google-remote.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/google-remote.test.ts b/src/sync/__tests__/google-remote.test.ts
+index 61dfa8e..a699399 100644
+--- a/src/sync/__tests__/google-remote.test.ts
++++ b/src/sync/__tests__/google-remote.test.ts
+@@ -199,6 +199,22 @@ describe('GoogleSyncRemote writes and content (pinned)', () => {
+     expect(drive.downloadMedia.mock.calls).toEqual([['r1'], ['r1']]);
+   });
+ 
++  it('a NativeSource read by one remote instance exports through another', async () => {
++    const drive = createFakeDrive();
++    drive.getFile.mockResolvedValueOnce({ id: 'g1', name: 'Plan', mimeType: GOOGLE_MIME.document });
++    drive.exportMedia.mockResolvedValueOnce(Readable.from([Buffer.from('doc')]));
++    const source = await googleRemoteOver(drive).readNative('g1');
++    const plan = { format: 'docx' as const, extension: 'docx', mimeType: DOCX_MIME };
++    const stream = await googleRemoteOver(drive).exportNative(source, plan, (open) => open());
++    let out = '';
++    for await (const chunk of stream) out += String(chunk);
++    expect(out).toBe('doc');
++    const forged = { item: source.item };
++    await expect(googleRemoteOver(drive).exportNative(forged, plan, (o) => o())).rejects.toThrow(
++      'export source was not read',
++    );
++  });
++
+   it('readNative reads the export fields; exportNative exports with them', async () => {
+     const drive = createFakeDrive();
+     drive.getFile.mockResolvedValueOnce({
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/google-remote.test.ts`
+
+Expected: FAIL. 1 failed: `ValidationError: Internal: export source was not read by this remote`.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote/google-remote.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote/google-remote.ts b/src/sync/remote/google-remote.ts
+index 1114819..1290a68 100644
+--- a/src/sync/remote/google-remote.ts
++++ b/src/sync/remote/google-remote.ts
+@@ -129,6 +129,12 @@ export function toRemoteItem(file: DriveFile, prefs: GoogleExportPrefs): RemoteI
+   };
+ }
+ 
++/**
++ * What `exportNative` needs from a `readNative` (the export links), shared by every
++ * GoogleSyncRemote so a source stays usable whichever instance exports it.
++ */
++const NATIVE_FILES = new WeakMap<NativeSource, { id: string; file: DriveFile }>();
++
+ /**
+  * SyncRemote over the Drive adapter (OneDrive sync spec §2.2). Every call goes through the
+  * OperationRunner with the operation kind and target the engine used before the port.
+@@ -137,7 +143,6 @@ export class GoogleSyncRemote implements SyncRemote {
+   readonly provider = 'google';
+   readonly hashKind = 'md5';
+   readonly rootId = 'root';
+-  private readonly nativeFiles = new WeakMap<NativeSource, { id: string; file: DriveFile }>();
+ 
+   constructor(
+     private readonly ops: OperationRunner,
+@@ -285,17 +290,17 @@ export class GoogleSyncRemote implements SyncRemote {
+       ctx.drive.getFile(id, SYNC_EXPORT_FIELDS),
+     );
+     const source: NativeSource = { item: this.item(file) };
+-    this.nativeFiles.set(source, { id, file });
++    NATIVE_FILES.set(source, { id, file });
+     return source;
+   }
+ 
+-  exportNative<T>(
++  async exportNative<T>(
+     source: NativeSource,
+     plan: ExportPlan,
+     consume: (open: OpenStream) => Promise<T>,
+   ): Promise<T> {
+-    const read = this.nativeFiles.get(source);
+-    if (!read) throw new ValidationError('Internal: export source was not read by this remote');
++    const read = NATIVE_FILES.get(source);
++    if (!read) throw new ValidationError('Internal: export source was not read by readNative');
+     return this.ops.exec(this.account, 'idempotent', read.id, (ctx) =>
+       consume(() => openExport(ctx.drive, read.file, plan, this.ops.log)),
+     );
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/google-remote.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/google-remote.test.ts src/sync/remote/google-remote.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1371 passed | 6 skipped (1377)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/google-remote.test.ts src/sync/remote/google-remote.ts
+git commit -F - <<'MSG'
+fix(sync): a NativeSource exports through any GoogleSyncRemote
+
+Review fix for chunk 1: env.remoteFor builds a new remote per call, so the
+export links read by readNative now live in one module-level WeakMap instead of
+per instance. A forged source is still refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### Task 22: Review fixes for chunk 1 (c): retry classes and the probe's parent-walk fields
+
+**Spec:** review item 6. Commit `3ee73b1` on the reference branch.
+
+**Files:**
+- Test: `src/sync/__tests__/google-remote.test.ts`
+- Test: `src/sync/__tests__/remote-probe.test.ts`
+- Modify: `src/sync/remote-probe.ts`
+
+- [ ] **Step 1: Write the failing test (and its setup).**
+
+`src/sync/__tests__/google-remote.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/google-remote.test.ts b/src/sync/__tests__/google-remote.test.ts
+index a699399..9a9839e 100644
+--- a/src/sync/__tests__/google-remote.test.ts
++++ b/src/sync/__tests__/google-remote.test.ts
+@@ -136,6 +136,27 @@ describe('GoogleSyncRemote writes and content (pinned)', () => {
+     await rm(dir, { recursive: true, force: true });
+   });
+ 
++  it('creates are never retried blindly; replaceContent runs as a mutate', async () => {
++    const abs = path.join(dir, 'a.pdf');
++    await writeFile(abs, 'x');
++    const drive = createFakeDrive();
++    const remote = googleRemoteOver(drive);
++    drive.createFile.mockRejectedValue(httpError(503, 'backendError'));
++    await expect(remote.createFolder('P', 'docs')).rejects.toThrow(
++      'The item may have been created anyway',
++    );
++    expect(drive.createFile).toHaveBeenCalledTimes(1);
++    await expect(remote.uploadNew('P', 'a.pdf', abs)).rejects.toThrow(
++      'The item may have been created anyway',
++    );
++    expect(drive.createFile).toHaveBeenCalledTimes(2);
++    drive.updateFile.mockRejectedValue(httpError(503, 'backendError'));
++    await expect(
++      remote.replaceContent(toRemoteItem({ id: 'r1' }, DEFAULT_GOOGLE_EXPORT), abs),
++    ).rejects.toThrow('The change may have been applied anyway');
++    expect(drive.updateFile).toHaveBeenCalledTimes(1);
++  });
++
+   it('createFolder: folder MIME type, the parent, id and name fields', async () => {
+     const drive = createFakeDrive();
+     drive.createFile.mockResolvedValueOnce({ id: 'f9', name: 'docs' });
+```
+
+`src/sync/__tests__/remote-probe.test.ts` (modify):
+
+```diff
+diff --git a/src/sync/__tests__/remote-probe.test.ts b/src/sync/__tests__/remote-probe.test.ts
+index cab9c45..27849e5 100644
+--- a/src/sync/__tests__/remote-probe.test.ts
++++ b/src/sync/__tests__/remote-probe.test.ts
+@@ -8,6 +8,7 @@ import {
+ } from '../../errors.js';
+ import { createFakeDrive } from '../../files/__tests__/fakes.js';
+ import { GOOGLE_MIME } from '../../files/export-formats.js';
++import { SYNC_FILE_FIELDS } from '../remote/google-remote.js';
+ import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
+ import type { RemoteScan } from '../types.js';
+ import { binary } from './drive-tree.js';
+@@ -91,6 +92,25 @@ describe('probeRecord', () => {
+     });
+   });
+ 
++  it('reads each parent in the walk with the full sync fields (not just id, parents)', async () => {
++    const drive = createFakeDrive();
++    drive.getFile.mockImplementation(async (id) =>
++      id === 'r'
++        ? binary('r', 'a.pdf', 'elsewhere')
++        : id === 'elsewhere'
++          ? { id: 'elsewhere', parents: ['my-drive'] }
++          : { id: 'my-drive' },
++    );
++    expect(await probeRecord('r', scan(), googleRemoteOver(drive))).toEqual({
++      state: 'moved-out',
++    });
++    expect(drive.getFile.mock.calls).toEqual([
++      ['r', SYNC_FILE_FIELDS],
++      ['elsewhere', SYNC_FILE_FIELDS],
++      ['my-drive', SYNC_FILE_FIELDS],
++    ]);
++  });
++
+   it('reports moved-out when the ancestry leaves the pair', async () => {
+     const get = getter({
+       r: binary('r', 'a.pdf', 'elsewhere'),
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+Run: `npx vitest run src/sync/__tests__/google-remote.test.ts src/sync/__tests__/remote-probe.test.ts`
+
+Expected: PASS already (behaviour unchanged); the tests pin it.
+
+- [ ] **Step 3: Implement.**
+
+`src/sync/remote-probe.ts` (modify):
+
+```diff
+diff --git a/src/sync/remote-probe.ts b/src/sync/remote-probe.ts
+index b79666e..071ea23 100644
+--- a/src/sync/remote-probe.ts
++++ b/src/sync/remote-probe.ts
+@@ -55,6 +55,8 @@ export async function probeRecord(
+     }
+     return { state: 'present', entry };
+   }
++  // The parent walk reads each folder through `get`, so Google requests the full sync
++  // fields here (before the port: 'id, parents'); only `parentId` is used.
+   let current = parent;
+   for (let depth = 0; depth < MAX_DEPTH; depth++) {
+     let folder: RemoteItem | null;
+```
+
+- [ ] **Step 4: Run it and watch it pass.**
+
+Run: `npx vitest run src/sync/__tests__/google-remote.test.ts src/sync/__tests__/remote-probe.test.ts`
+
+Expected: PASS (every test in the files passes).
+
+- [ ] **Step 5: Format and run the whole check.**
+
+Run: `npx prettier --write src/sync/__tests__/google-remote.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/remote-probe.ts` then `npm run check`
+
+Expected: exit 0, `Test Files  128 passed (128); Tests  1373 passed | 6 skipped (1379)`.
+
+- [ ] **Step 6: Commit.**
+
+```bash
+git add src/sync/__tests__/google-remote.test.ts src/sync/__tests__/remote-probe.test.ts src/sync/remote-probe.ts
+git commit -F - <<'MSG'
+test(sync): pin retry classes and the probe's parent-walk fields
+
+Review fixes for chunk 1: createFolder and uploadNew are not retried on a 503
+(one call, the create hint), replaceContent runs as a mutate (one call, the mutate
+hint). The probe's parent walk reads full sync fields; a comment and a test say so.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+```
+
+### End of Chunk 2
+
+- [ ] Rerun the Google live sync E2E on the Chunk 2 head (the user runs it).
 
 ## Chunk 3: OneDrive
+
+Notes from Chunks 1–2 for this chunk:
+- Write-guarding re-reads use the throwing `read` (executor `verifyRemote` and trash-remote, release `verifyRemote`). On OneDrive they need per-caller null handling (spec §5): e.g. trash-remote of an item already gone with feed evidence drops the record; without evidence the action is skipped, not failed.
+- Plug quickXor into `defaultDigesters` (`src/sync/local-scanner.ts`); `writeTemp`, `hashLocal`, the executor and release already ask for the remote's kind.
+- `Pair.remoteCursor` / `remoteDeletedIds` exist and persist; nothing reads or writes them yet.
 
 To be written: `quickxor.ts`, `onedrive-remote.ts`, the deletion feed and its probe mapping, `remote-names.ts`, the ignored reasons, Microsoft pair settings, §5 error handling and account routing (spec §2.2, §4, §5, §8 item 3).
 
