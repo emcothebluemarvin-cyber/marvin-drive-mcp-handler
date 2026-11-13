@@ -16,11 +16,14 @@ import {
   type FakeDrive,
 } from '../../files/__tests__/fakes.js';
 import { Executor, conflictName } from '../executor.js';
+import { GoogleSyncRemote, SYNC_EXPORT_FIELDS } from '../remote/google-remote.js';
+import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
 import { buildReport } from '../report.js';
+import { hashTargets } from '../resolve.js';
+import { planInput } from './plan-input.js';
 import type { DriveFile } from '../../drive/drive-adapter.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { SYNC_EXPORT_FIELDS } from '../exec-export.js';
 import type { Action, LocalEntry, PairFile, Plan, RemoteEntry, SyncRecord } from '../types.js';
 import type { LocalTrash } from '../trash.js';
 import {
@@ -88,7 +91,7 @@ function executor(
   });
   return new Executor(
     {
-      ops,
+      remote: new GoogleSyncRemote(ops, 'emco', DEFAULT_GOOGLE_EXPORT),
       audit,
       logger: silentLogger(),
       clock: () => NOW,
@@ -236,11 +239,61 @@ describe('Executor', () => {
       action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
     ]);
     expect(out[0]?.warning).toBe('changed-during-upload');
+    // localMd5 is always the local md5, never the remote's value (OneDrive sync spec §3.1).
     expect(file.records[0]).toMatchObject({
-      localMd5: 'other',
-      remoteMd5: 'other',
+      localMd5: md5('hello'),
+      remoteHash: { kind: 'md5', value: 'other' },
       localSize: l.size,
+      localMtimeMs: -1,
     });
+  });
+
+  it('after changed-during-upload, a same-size same-stat edit is re-hashed next run', async () => {
+    const l = await put('a.pdf', 'hello');
+    // The file was edited to 'jello' during the upload: same size, and the next scan sees
+    // the same stat as the planned one (an editor that restores mtime).
+    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf', md5Checksum: md5('jello') });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]?.warning).toBe('changed-during-upload');
+    const input = planInput({ pair: { localDir: dir }, records: file.records, local: [l] });
+    expect(hashTargets(input)).toEqual(['a.pdf']);
+  });
+
+  it('is quiet when the remote reports no hash for the upload', async () => {
+    const l = await put('a.pdf', 'hello');
+    drive.createFile.mockResolvedValueOnce({ id: 'n1', name: 'a.pdf' });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]).toEqual({ kind: 'upload-new', path: 'a.pdf', status: 'done' });
+    expect(file.records[0]).toMatchObject({ localMd5: md5('hello'), remoteHash: null });
+  });
+
+  it('does not adopt a same-hash duplicate whose size differs', async () => {
+    const l = await put('a.pdf', 'hello');
+    drive.createFile.mockRejectedValueOnce(httpError(500));
+    drive.listFiles.mockResolvedValueOnce({
+      files: [
+        {
+          id: 'n1',
+          name: 'a.pdf',
+          md5Checksum: md5('hello'),
+          size: '6',
+          createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
+          parents: [ROOT_ID],
+        },
+      ],
+    });
+    const file = pairFile([], ['a.pdf']);
+    const out = await executor(file).run([
+      action('upload-new', 'a.pdf', { local: l, localMd5: md5('hello') }),
+    ]);
+    expect(out[0]?.status).toBe('failed');
+    expect(file.records).toEqual([]);
   });
 
   it('adopts its own upload after an ambiguous upload error (duplicate-safe)', async () => {
@@ -252,6 +305,7 @@ describe('Executor', () => {
           id: 'n1',
           name: 'a.pdf',
           md5Checksum: md5('hello'),
+          size: '5',
           createdTime: new Date(NOW.getTime() - 60_000).toISOString(),
           parents: [ROOT_ID],
         },
@@ -286,7 +340,7 @@ describe('Executor', () => {
     const r = remote('r1', 'a.pdf', 'R');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
     });
     drive.updateFile.mockResolvedValueOnce({
@@ -307,7 +361,7 @@ describe('Executor', () => {
     expect(drive.updateFile.mock.calls[0]?.[0]).toMatchObject({ fileId: 'r1' });
     expect(file.records[0]).toMatchObject({
       localMd5: md5('local edit'),
-      remoteMd5: md5('local edit'),
+      remoteHash: { kind: 'md5', value: md5('local edit') },
       remoteModifiedTime: 'new',
     });
   });
@@ -368,11 +422,11 @@ describe('Executor', () => {
     expect(file.records[0]).toMatchObject({
       path: 'sub/b.pdf',
       localMd5: md5('new'),
-      remoteMd5: md5('new'),
+      remoteHash: { kind: 'md5', value: md5('new') },
       remoteParentId: 'F',
     });
     expect(saves).toHaveLength(2);
-    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteMd5: k.remoteMd5 });
+    expect(saves[0]?.records[0]).toMatchObject({ path: 'sub/b.pdf', remoteHash: k.remoteHash });
   });
 
   it('places the conflict copy before uploading L (spec §6.9)', async () => {
@@ -381,7 +435,7 @@ describe('Executor', () => {
     serve('remote edit');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
     });
     drive.updateFile.mockResolvedValueOnce({
@@ -409,7 +463,7 @@ describe('Executor', () => {
     );
     expect(file.records[0]).toMatchObject({
       localMd5: md5('local edit'),
-      remoteMd5: md5('local edit'),
+      remoteHash: { kind: 'md5', value: md5('local edit') },
     });
     expect(file.pair.selection).toEqual(['a.pdf']);
   });
@@ -417,6 +471,9 @@ describe('Executor', () => {
   it('numbers conflict copies and skips the upload when the copy fails', async () => {
     expect(conflictName('a.pdf', NOW, 1)).toBe('a (Drive conflict 2026-11-03 10.15) 2.pdf');
     expect(conflictName('README', NOW, 0)).toBe('README (Drive conflict 2026-11-03 10.15)');
+    expect(conflictName('a.pdf', NOW, 0, 'microsoft')).toBe(
+      'a (OneDrive conflict 2026-11-03 10.15).pdf',
+    );
     const l = await put('a.pdf', 'local edit');
     serve('something else');
     const out = await executor(pairFile([record('r1', 'a.pdf')])).run([
@@ -473,6 +530,19 @@ describe('Executor', () => {
     ]);
     expect(out[0]).toMatchObject({ status: 'skipped', message: 'a.pdf is already gone' });
     expect(saves).toEqual([]);
+  });
+
+  it('fails a download whose size differs from the remote size; nothing is placed', async () => {
+    serve('R');
+    const r = remote('r1', 'a.pdf', 'R', { size: 7 });
+    const out = await executor(pairFile([], ['a.pdf'])).run([
+      action('download-new', 'a.pdf', { remote: r }),
+    ]);
+    expect(out[0]).toMatchObject({
+      status: 'failed',
+      message: expect.stringMatching(/7 bytes, got 1/),
+    });
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it('isolates failures and aborts on run-ending errors', async () => {
@@ -572,7 +642,7 @@ describe('Executor (review regressions)', () => {
     const k = record('r1', 'a.pdf');
     drive.getFile.mockResolvedValueOnce({
       id: 'r1',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: '2026-11-03T09:00:00.000Z',
       parents: [ROOT_ID],
     });
@@ -588,7 +658,7 @@ describe('Executor (review regressions)', () => {
     const r = remote('r2', 'moved.pdf', 'M');
     drive.getFile.mockResolvedValueOnce({
       id: 'r2',
-      md5Checksum: r.md5,
+      md5Checksum: r.hash?.value,
       modifiedTime: r.modifiedTime,
       parents: ['ELSEWHERE'],
     });
@@ -683,7 +753,7 @@ describe('Executor exports (Google-native)', () => {
         path: 'Plan.docx',
         remoteName: 'Plan',
         localMd5: md5('DOCX v1'),
-        remoteMd5: null,
+        remoteHash: null,
         native: { mimeType: GOOGLE_MIME.document, exportFormat: 'docx' },
       },
     ]);

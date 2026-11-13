@@ -1,8 +1,16 @@
-import { localMatchesRemote, remoteChanged } from './content-compare.js';
+import { localMatchesRemote, remoteChanged, sameContent } from './content-compare.js';
 import { foldKey } from './paths.js';
 import { planNative } from './plan-native.js';
 import { planRemoteOnly } from './plan-remote-only.js';
-import { makeScope, needsRefresh, planMoved, type TrackedResult } from './plan-shared.js';
+import { uploadKey } from './plan-untracked.js';
+import {
+  caseOnlyFolderMessage,
+  makeScope,
+  needsRefresh,
+  planMoved,
+  uploadNameProblem,
+  type TrackedResult,
+} from './plan-shared.js';
 import {
   isUnknownKey,
   localState,
@@ -10,7 +18,8 @@ import {
   resolveRemote,
   type PlanContext,
 } from './resolve.js';
-import type { SyncRecord } from './types.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { LocalDigests, SyncRecord } from './types.js';
 
 export type { TrackedResult } from './plan-shared.js';
 
@@ -50,14 +59,20 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
 
   const entry = L.kind === 'present' ? L.entry : null;
   let lChanged = false;
-  let lMd5: string | null = null;
+  let lDigests: LocalDigests | null = null;
   if (entry) {
     const ls = localState(ctx, record, entry);
     if (!ls) return note('unknown-state', 'unknown', 'local file could not be hashed');
     lChanged = ls.changed;
-    lMd5 = ls.md5;
+    lDigests = ls.digests;
   }
-  const base = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
+  const base = {
+    key: record.path,
+    local: entry,
+    localMd5: lDigests?.md5 ?? null,
+    localDigests: lDigests,
+    selection: {},
+  };
   // (d)
   if (record.native) return planNative(s, base, R, lChanged);
 
@@ -84,7 +99,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
     const others = (ctx.remoteByFold.get(foldKey(record.path)) ?? []).filter(
       (r) => !ctx.trackedIds.has(r.id),
     );
-    const reuploaded = others.find((r) => r.md5 !== null && r.md5 === lMd5);
+    const reuploaded = others.find((r) => lDigests !== null && sameContent(lDigests, r.hash));
     if (reuploaded)
       return act({
         ...base,
@@ -97,15 +112,33 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       return note(
         'collision',
         'B11',
-        'trashed in Drive, and a different Drive file now uses this name',
+        ctx.input.remoteProvider === 'microsoft'
+          ? 'deleted on OneDrive, and a different OneDrive file now uses this name'
+          : 'trashed in Drive, and a different Drive file now uses this name',
       );
+    }
+    // The same folder-spelling rule as a U1 upload: reuse a remote folder that differs only
+    // in case on a case-insensitive volume, refuse it on a case-sensitive one.
+    const target = uploadKey(ctx, record.path);
+    if (target === null) return note('ambiguous', 'B11', caseOnlyFolderMessage(ctx));
+    const bad = uploadNameProblem(ctx, target);
+    if (bad) {
+      out.notes.push({
+        code: 'remote-name-invalid',
+        path: bad.path,
+        rule: 'B11',
+        message: bad.message,
+      });
+      return out;
     }
     return act({
       ...base,
       kind: 'upload-new',
       rule: 'B11',
+      key: target,
       remote: null,
       rebaseFrom: record.remoteId,
+      selection: target === record.path ? {} : { remove: [record.path], add: [target] },
     });
   }
   if (R.kind === 'moved-out') {
@@ -124,7 +157,13 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
 
   const remote = R.entry;
   const rs = remoteChanged(record, remote);
-  if (rs.weak) note('weak-compare', 'R', 'Drive has no md5; compared size and modifiedTime');
+  if (rs.weak) {
+    const why =
+      ctx.input.remoteProvider === 'microsoft'
+        ? `${providerLabel('microsoft')} reports no hash`
+        : 'Drive has no md5';
+    note('weak-compare', 'R', `${why}; compared size and modifiedTime`);
+  }
 
   if (!R.moved) {
     if (entry) {
@@ -141,7 +180,7 @@ export function planTracked(ctx: PlanContext, record: SyncRecord): TrackedResult
       }
       if (rs.changed && !lChanged)
         return act({ ...base, kind: 'download-replace', rule: 'B3', remote });
-      if (lMd5 !== null && localMatchesRemote(lMd5, null, remote))
+      if (lDigests !== null && localMatchesRemote(lDigests, null, remote))
         return act({ ...base, kind: 'adopt', rule: 'B4', remote });
       if (!remote.canEdit)
         note('remote-readonly', 'B4', 'no edit permission; kept a conflict copy only');

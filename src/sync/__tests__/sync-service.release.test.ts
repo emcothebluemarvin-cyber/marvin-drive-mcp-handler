@@ -98,6 +98,23 @@ describe('sync_release', () => {
     expect((await apply()).actions).toEqual({ 'download-new': ['a.pdf'] });
     expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
   });
+  it('a file gone from Drive between select and apply fails; nothing is trashed', async () => {
+    const id = await idOf('a.pdf');
+    const get = mem.drive.getFile.getMockImplementation();
+    mem.drive.getFile.mockImplementation(async (fileId, ...rest) => {
+      if (fileId === id) mem.files.delete(id);
+      if (!get) throw new Error('memory drive has no getFile');
+      return get(fileId, ...rest);
+    });
+    const res = await sync.release({ name: 'docs', paths: ['a.pdf'], apply: true });
+    expect(res.released).toEqual([]);
+    expect(res.failed).toEqual([{ path: 'a.pdf', reason: 'a.pdf not found on Drive' }]);
+    expect(await readFile(at('a.pdf'), 'utf8')).toBe('A');
+    expect(await readdir(trashDir)).toEqual([]);
+    expect((await store.load('docs')).records.find((r) => r.path === 'a.pdf')?.remoteOnly).toBe(
+      false,
+    );
+  });
   it('a failing trash keeps the file and the record', async () => {
     const failing = new SyncService({
       runner: createRunner(mem.drive),

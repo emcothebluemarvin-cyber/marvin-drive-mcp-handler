@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 describe('buildApp', () => {
-  it('refuses a Microsoft account in sync before writeMarker', async () => {
+  it('routes a Microsoft account in sync to OneDrive, failing before writeMarker', async () => {
     const app = buildApp({ MARVIN_DRIVE_CONFIG_DIR: tmp, MARVIN_DRIVE_TOKEN_STORE: 'file' });
     await new AccountRegistry(app.paths.accounts).add({
       alias: 'ms',
@@ -33,9 +33,15 @@ describe('buildApp', () => {
     });
     const localDir = path.join(tmp, 'Local');
     await mkdir(localDir);
-    await expect(
-      app.sync.createPair({ name: 'docs', localDir, remoteFolderId: 'R', account: 'ms' }),
-    ).rejects.toThrow(ProviderNotSupportedError);
+    // No Microsoft client or token here: the first Graph call (the delta cursor) fails.
+    const failure = await app.sync
+      .createPair({ name: 'docs', localDir, remoteFolderId: 'R', account: 'ms' })
+      .then(
+        () => null,
+        (err: unknown) => err,
+      );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(ProviderNotSupportedError);
     expect(writeMarker).not.toHaveBeenCalled();
   });
 

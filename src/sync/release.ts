@@ -1,14 +1,15 @@
 import { lstat, readdir, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
 import { AppError, hasErrorCode } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { localMatchesRemote, remoteChanged, remoteUnchangedSince } from './content-compare.js';
 import { isAbortError, messageOf, PersistenceError, TargetChangedError } from './errors.js';
-import { md5File } from './local-scanner.js';
+import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, foldKey, parentKey, toKey, validateRelPath } from './paths.js';
 import { TYPE_CHANGED } from './plan-tracked.js';
+import { providerIn, providerLabel } from './remote/remote-names.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import {
   buildContext,
   isUnknownKey,
@@ -19,13 +20,7 @@ import {
   type PlanInput,
 } from './resolve.js';
 import type { LocalTrash } from './trash.js';
-import {
-  SYNC_FILE_FIELDS,
-  type Pair,
-  type PairFile,
-  type RemoteEntry,
-  type SyncRecord,
-} from './types.js';
+import type { Pair, PairFile, RemoteEntry, SyncRecord } from './types.js';
 
 export type ReleaseStatus =
   | 'released'
@@ -69,13 +64,16 @@ export function releaseStatus(kind: ReleaseCandidate['kind'], dryRun: boolean): 
 
 /** Spec §10 eligibility, or R0 (addendum §3.2) for an explicitly named, deleted file. */
 function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): ReleaseCandidate | string {
-  if (record.remoteOnly) return 'already in Drive only';
+  const provider = ctx.input.remoteProvider ?? 'google';
+  const label = providerLabel(provider);
+  const where = providerIn(provider);
+  if (record.remoteOnly) return `already in ${label} only`;
   if (isUnknownKey(ctx, record.path)) return 'inside a folder that could not be read';
   if (ctx.ambiguousFolds.has(foldKey(record.path))) return 'several files share this name';
   const R = resolveRemote(ctx, record);
   if (R.kind === 'unknown') return R.reason;
-  if (R.kind !== 'present') return `the Drive file is ${R.kind}`;
-  if (R.moved) return 'moved or renamed in Drive since the last sync; run sync_run first';
+  if (R.kind !== 'present') return `the ${label} file is ${R.kind}`;
+  if (R.moved) return `moved or renamed ${where} since the last sync; run sync_run first`;
   if ((record.native !== null) !== (R.entry.native !== null)) return TYPE_CHANGED;
   const L = resolveLocal(ctx, record.path);
   // Native: a Drive change since the last export does not block release. This is intentional
@@ -83,8 +81,11 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
   if (L.kind === 'present') {
     const st = localState(ctx, record, L.entry);
     if (!st) return 'local file could not be hashed';
-    if (st.changed || !localMatchesRemote(st.md5, record, R.entry)) {
-      return 'not in sync (changed locally or in Drive); run sync_run first';
+    if (!st.changed && R.entry.native === null && R.entry.hash === null) {
+      return `${label} reports no hash for this file; it cannot be released safely`;
+    }
+    if (st.changed || !localMatchesRemote(st.digests, record, R.entry)) {
+      return `not in sync (changed locally or ${where}); run sync_run first`;
     }
     return { record, remote: R.entry, kind: 'present', localName: L.entry.name };
   }
@@ -92,9 +93,9 @@ function check(ctx: PlanContext, record: SyncRecord, explicit: boolean): Release
   // matches resolve to `unknown` / `ambiguous` and are refused here.
   if (L.kind === 'unknown') return L.reason;
   if (L.kind === 'ambiguous') return 'a local file with a similar name exists';
-  if (!explicit) return 'deleted locally; name it in paths to keep it in Drive only';
+  if (!explicit) return `deleted locally; name it in paths to keep it in ${label} only`;
   if (remoteChanged(record, R.entry).changed) {
-    return 'changed in Drive since the last sync; run sync_run first';
+    return `changed ${where} since the last sync; run sync_run first`;
   }
   return { record, remote: R.entry, kind: 'deleted', localName: null };
 }
@@ -162,7 +163,10 @@ export async function withoutTrash(
 }
 
 export interface ReleaseDeps {
-  ops: OperationRunner;
+  /** The pair's remote. */
+  remote: SyncRemote;
+  /** Local digests of the remote's hash kind (default: built-in digesters). */
+  digesters?: DigesterFactory;
   audit: AuditSink;
   logger: Logger;
   trash: LocalTrash;
@@ -173,30 +177,37 @@ export interface ReleaseDeps {
 const KEEP_DIR = ['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'];
 
 /** R must still be present-same: not trashed, content unchanged, same name and parent. */
-async function verifyRemote(deps: ReleaseDeps, pair: Pair, planned: RemoteEntry): Promise<void> {
-  const current = await deps.ops.exec(pair.account, 'idempotent', planned.id, (ctx) =>
-    ctx.drive.getFile(planned.id, SYNC_FILE_FIELDS),
-  );
+async function verifyRemote(deps: ReleaseDeps, planned: RemoteEntry): Promise<void> {
+  const label = providerLabel(deps.remote.provider);
+  const current = await deps.remote.get(planned.id);
+  if (current === null) throw new TargetChangedError(`${planned.key} not found on ${label}`);
   if (
     current.trashed ||
     !remoteUnchangedSince(planned, current) ||
-    (current.name ?? '') !== planned.name ||
-    (current.parents?.[0] ?? '') !== planned.parentId
+    current.name !== planned.name ||
+    (current.parentId ?? '') !== planned.parentId
   ) {
     throw new TargetChangedError(
-      `${planned.key} changed, moved or was trashed in Drive since the scan`,
+      `${planned.key} changed, moved or was trashed in ${label} since the scan`,
     );
   }
 }
 
-/** Present: L re-hashed must equal the record (binary: and R's md5) — never trash an edit. */
-async function verifyLocal(abs: string, c: ReleaseCandidate): Promise<void> {
+/**
+ * Present: L re-hashed must equal the record (md5) and, for a binary file, R's hash in R's
+ * kind — never trash an edit.
+ */
+async function verifyLocal(deps: ReleaseDeps, abs: string, c: ReleaseCandidate): Promise<void> {
   const key = c.record.path;
-  const md5 = await md5File(abs).catch((err: unknown) => {
+  const digests = await hashFileDigests(
+    abs,
+    deps.remote.hashKind,
+    deps.digesters ?? defaultDigesters,
+  ).catch((err: unknown) => {
     if (hasErrorCode(err, 'ENOENT')) throw new TargetChangedError(`${key} is already gone`);
     throw err;
   });
-  if (md5 !== c.record.localMd5 || !localMatchesRemote(md5, c.record, c.remote)) {
+  if (digests.md5 !== c.record.localMd5 || !localMatchesRemote(digests, c.record, c.remote)) {
     throw new TargetChangedError(`${key} changed locally since the scan`);
   }
 }
@@ -283,11 +294,11 @@ export async function applyRelease(
     let name: string | null = null;
     let abs = '';
     try {
-      await verifyRemote(deps, pair, c.remote);
+      await verifyRemote(deps, c.remote);
       if (c.kind === 'present') {
         name = c.localName ?? key;
         abs = absInside(pair.localDir, name);
-        await verifyLocal(abs, c);
+        await verifyLocal(deps, abs, c);
       } else {
         await assertStillAbsent(pair, key);
       }

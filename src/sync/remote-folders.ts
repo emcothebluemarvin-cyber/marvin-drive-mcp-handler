@@ -1,21 +1,19 @@
 import type { AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
-import { ValidationError } from '../errors.js';
-import { GOOGLE_MIME } from '../files/export-formats.js';
-import { escapeQueryValue } from '../files/query.js';
+import { NameConflictError, ValidationError } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { isAbortError, messageOf } from './errors.js';
 import { baseName, foldKey, parentKey } from './paths.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import type { Action, Pair } from './types.js';
 
 export interface RemoteFolderDeps {
-  ops: OperationRunner;
+  remote: SyncRemote;
   audit: AuditSink;
   logger: Logger;
 }
 
-/** Drive folders for uploads: scanned ids first, then reuse-or-create (spec §4). */
+/** Remote folders for uploads: scanned ids first, then reuse-or-create (spec §4). */
 export class RemoteFolders {
   private readonly folderIds = new Map<string, string>();
   private readonly folderErrors = new Map<string, string>();
@@ -26,6 +24,11 @@ export class RemoteFolders {
     folders: ReadonlyMap<string, string>,
   ) {
     for (const [id, key] of folders) this.folderIds.set(key, id);
+  }
+
+  /** Folder names compare by fold key: case-insensitive volume, or OneDrive (spec §4.3). */
+  private get foldNames(): boolean {
+    return this.pair.caseInsensitive || this.deps.remote.provider === 'microsoft';
   }
 
   async ensureAll(uploads: readonly Action[]): Promise<void> {
@@ -45,7 +48,7 @@ export class RemoteFolders {
   async folderFor(dir: string): Promise<string> {
     const known =
       this.folderIds.get(dir) ??
-      (this.pair.caseInsensitive
+      (this.foldNames
         ? [...this.folderIds].find(([key]) => foldKey(key) === foldKey(dir))?.[1]
         : undefined);
     if (known) return known;
@@ -57,40 +60,36 @@ export class RemoteFolders {
     return id;
   }
 
-  /** Reuses exactly one non-trashed same-name folder; several → refuse (spec §4). */
-  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
-    const q = `'${escapeQueryValue(parentId)}' in parents and trashed = false and mimeType = '${GOOGLE_MIME.folder}'`;
-    const folders: DriveFile[] = [];
-    let pageToken: string | undefined;
-    do {
-      const page = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
-        ctx.drive.listFiles({
-          q,
-          pageSize: 1000,
-          ...(pageToken ? { pageToken } : {}),
-          fields: 'nextPageToken, files(id, name)',
-        }),
-      );
-      folders.push(...(page.files ?? []));
-      pageToken = page.nextPageToken ?? undefined;
-    } while (pageToken);
-    const same = folders.filter((f) =>
-      this.pair.caseInsensitive
-        ? foldKey(f.name ?? '') === foldKey(name)
-        : (f.name ?? '').normalize('NFC') === name.normalize('NFC'),
-    );
-    if (same.length > 1)
+  /** The one existing folder named `name`, null for none; several → refuse (spec §4). */
+  private async existingFolder(parentId: string, name: string): Promise<string | null> {
+    // findChildren already matched the fold key; a case-sensitive volume needs the NFC name.
+    const folders = await this.deps.remote.findChildren(parentId, name, 'folder');
+    const same = this.foldNames
+      ? folders
+      : folders.filter((f) => f.name.normalize('NFC') === name.normalize('NFC'));
+    if (same.length > 1) {
+      const label = providerLabel(this.deps.remote.provider);
       throw new ValidationError(
-        `Several Drive folders named "${name}"; resolve the duplicate first`,
+        `Several ${label} folders named "${name}"; resolve the duplicate first`,
       );
-    const existing = same[0]?.id;
+    }
+    return same[0]?.id ?? null;
+  }
+
+  /** Reuses exactly one non-trashed same-name folder, else creates it. */
+  private async ensureRemoteFolder(parentId: string, name: string): Promise<string> {
+    const existing = await this.existingFolder(parentId, name);
     if (existing) return existing;
-    const created = await this.deps.ops.exec(this.pair.account, 'create', parentId, (ctx) =>
-      ctx.drive.createFile({
-        requestBody: { name, mimeType: GOOGLE_MIME.folder, parents: [parentId] },
-        fields: 'id, name',
-      }),
-    );
+    let created;
+    try {
+      created = await this.deps.remote.createFolder(parentId, name);
+    } catch (err) {
+      // OneDrive (spec §5): the name was taken meanwhile; look again, reuse exactly one.
+      if (!(err instanceof NameConflictError)) throw err;
+      const appeared = await this.existingFolder(parentId, name);
+      if (appeared) return appeared;
+      throw err;
+    }
     const id = created.id;
     if (!id) throw new ValidationError('Internal: folder id missing for sync action');
     try {

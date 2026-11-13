@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- OneDrive sync (sub-project 2): the `sync_*` tools and `sync` CLI commands work for Microsoft accounts with the Google sync rules (except Google-file exports): QuickXorHash content comparison, `If-Match` on updates and deletions, deletions applied only with evidence from OneDrive's drive-wide change history (`deletion-history-unavailable` warns when it cannot be read), OneDrive name rules (`remote-name-invalid`), OneNote / Personal Vault / shared items reported as ignored, and "(OneDrive conflict …)" copies. `googleExport` is rejected on Microsoft accounts. No new dependencies.
+- Sync (both providers): a pair whose local folder is, is inside or contains a OneDrive or Google Drive desktop app folder is refused at `sync_create_pair` and `sync repair-marker`; existing such pairs show a warning in `sync list` / `sync_list_pairs` and are not synced.
 - OneDrive accounts (sub-project 1): `auth add --provider microsoft` registers a personal or work/school Microsoft account, and the `drive_*` tools work on its own OneDrive. Provider shown in `auth list` and `drive_list_accounts`. Upload name conflicts ask Overwrite / Cancel through MCP elicitation. No new dependencies.
 - Drive watch: `drive_watch` / `drive_changes` MCP tools (34 tools in total) and CLI `marvin-drive watch add|remove|list|delivery` and `marvin-drive changes`. Watched files and folders are polled through the Drive Changes API; Claude learns who changed what and when (diffs for Docs, Sheets and Slides, and new comments when the file also changed; comment-only changes are not detected yet) and only informs. Delivery by a `UserPromptSubmit` hook (`changes --hook`, default) or by Claude Code channel push (`--dangerously-load-development-channels server:marvin-drive`).
 - New dependency: `diff` (jsdiff, BSD-3) for line diffs. `MARVIN_WATCH_POLL_SECONDS` sets the poll interval (default 30, between 15 and 3600).
@@ -18,6 +20,8 @@
 - Sync deletions of local files work on Windows (Recycle Bin) and Linux/other Unix (freedesktop.org trash), without new dependencies. The file is moved with one rename after its trash record is reserved; when no trash can be used with certainty the action fails and the file stays.
 
 ### Changed
+- Sync (both providers): an action whose remote item is gone since planning is now `skipped` ("gone from Drive since planning") instead of `failed`; a name taken meanwhile (`NAME_CONFLICT`) and a file locked by Office (`FILE_LOCKED`) are skipped too. A full OneDrive (`ONEDRIVE_FULL`) stops the run like an expired session (`REAUTH_REQUIRED`, which already stopped Google runs) and Drive's full storage.
+- Sync pair files move to version 2 (content hashes with their kind; OneDrive deletion cursor and evidence). A version-1 file is read and upgraded on the first save; after that, older marvin-drive versions refuse it ("this pair was saved by a newer marvin-drive; update it"). To roll back, keep the new version or re-create the pairs.
 - Tool descriptions are provider-neutral and mark Google-only parameters. Accounts are shown with their provider in `auth list`.
 - The sync pair lock now uses the shared `src/core/file-lock.ts` helper (same behaviour; a busy lock error is now named `FileLockBusyError` in logs).
 - `src/cli/main.ts` is a small entry that loads the rest of the CLI lazily, so the hook path starts fast; the former entry is `src/cli/program.ts`.

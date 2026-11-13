@@ -74,6 +74,15 @@ describe('sync CLI', () => {
     expect(lines[0]).toContain('docs');
     expect(lines[0]).toContain('/Users/x/Docs ⇄ F1 (emco)');
     expect(lines[0]).toContain('baseline 3');
+    expect(lines[0]).not.toContain('warning');
+  });
+
+  it('lists a pair inside a cloud desktop folder with its warning', async () => {
+    const { lines, run, service } = setup();
+    const warning = '/Users/x/Docs is synced by the OneDrive desktop app; pick a folder outside it';
+    service.listPairs.mockResolvedValueOnce([{ ...SUMMARY, warning }]);
+    await run('list');
+    expect(lines[0]).toContain(`\n  warning: ${warning}`);
   });
 
   it('runs a dry run by default and applies with flags', async () => {

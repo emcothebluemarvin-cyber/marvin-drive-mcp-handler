@@ -1,6 +1,7 @@
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { ValidationError } from '../errors.js';
 import { foldKey } from './paths.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { ContentHash, RemoteItem, SyncRemote } from './remote/sync-remote.js';
 import type { StatExpect } from './transfer.js';
 import type { LocalEntry, PairFile, RemoteEntry, SelectionChange, SyncRecord } from './types.js';
 
@@ -8,7 +9,7 @@ export interface RemoteFields {
   id: string;
   name: string;
   parentId: string;
-  md5: string | null;
+  hash: ContentHash | null;
   size: number | null;
   modifiedTime: string;
   native: SyncRecord['native'];
@@ -27,21 +28,22 @@ export function fromEntry(e: RemoteEntry): RemoteFields {
     id: e.id,
     name: e.name,
     parentId: e.parentId,
-    md5: e.md5,
+    hash: e.hash,
     size: e.size,
     modifiedTime: e.modifiedTime,
     native: e.native ? { mimeType: e.native.mimeType, exportFormat: e.native.exportFormat } : null,
   };
 }
 
-export function fromDrive(f: DriveFile, fallbackParent: string): RemoteFields {
+/** Record fields from an upload's result; `fallbackParent` when the remote names none. */
+export function fromRemote(item: RemoteItem, fallbackParent: string): RemoteFields {
   return {
-    id: f.id ?? '',
-    name: f.name ?? '',
-    parentId: f.parents?.[0] ?? fallbackParent,
-    md5: f.md5Checksum ?? null,
-    size: f.size ? Number(f.size) : null,
-    modifiedTime: f.modifiedTime ?? '',
+    id: item.id,
+    name: item.name,
+    parentId: item.parentId ?? fallbackParent,
+    hash: item.hash,
+    size: item.size,
+    modifiedTime: item.modifiedTime,
     // Uploads are binary files.
     native: null,
   };
@@ -62,7 +64,7 @@ export function makeRecord(key: string, local: LocalFields, remote: RemoteFields
     localSize: local.size,
     localMtimeMs: local.mtimeMs,
     localCtimeMs: local.ctimeMs,
-    remoteMd5: remote.md5,
+    remoteHash: remote.hash,
     remoteSize: remote.size,
     remoteModifiedTime: remote.modifiedTime,
     native: remote.native,
@@ -84,9 +86,17 @@ function stamped(base: string, label: string, at: Date, attempt: number): string
   return `${stem} (${label} ${stamp})${attempt === 0 ? '' : ` ${attempt + 1}`}${ext}`;
 }
 
-/** `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time). */
-export function conflictName(base: string, at: Date, attempt: number): string {
-  return stamped(base, 'Drive conflict', at, attempt);
+/**
+ * `<stem> (Drive conflict YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.9, local time);
+ * "OneDrive conflict" on a OneDrive pair.
+ */
+export function conflictName(
+  base: string,
+  at: Date,
+  attempt: number,
+  provider: SyncRemote['provider'] = 'google',
+): string {
+  return stamped(base, `${providerLabel(provider)} conflict`, at, attempt);
 }
 
 /** `<stem> (local edit YYYY-MM-DD HH.mm)<ext>`, then ` 2`, ` 3`… (spec §6.6 N5). */

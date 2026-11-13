@@ -61,12 +61,33 @@ describe('remote-only records (spec §6.7)', () => {
       expect(p.notes[0]?.rule).toBe('O2');
     }
   });
+  it('O2/O5 name the OneDrive recycle bin on OneDrive pairs', () => {
+    const restore = run(
+      { probes: [['r1', { state: 'trashed' }]], remoteProvider: 'microsoft' },
+      PENDING,
+    );
+    expect(restore.notes[0]?.message).toBe(
+      'cannot restore: the only copy is in the OneDrive recycle bin; restore it there first',
+    );
+    const trashed = run({ probes: [['r1', { state: 'trashed' }]], remoteProvider: 'microsoft' });
+    expect(trashed.notes[0]?.message).toBe(
+      'the only copy is in the OneDrive recycle bin; it is removed by OneDrive after 30 days',
+    );
+    const google = run({ probes: [['r1', { state: 'trashed' }]] });
+    expect(google.notes[0]?.message).toBe(
+      'the only copy is in the Drive trash; it is purged after 30 days',
+    );
+  });
   it('O3 L absent, R present-same → nothing; a changed R only refreshes the record', () => {
     expect(run({ remote: [R] }).actions).toEqual([]);
     expect(
       run({ remote: [remoteEntry('r1', 'a.pdf', { md5: 'new', modifiedTime: NEWER })] }).actions,
     ).toMatchObject([
-      { kind: 'refresh', rule: 'O3', patch: { remoteMd5: 'new', remoteModifiedTime: NEWER } },
+      {
+        kind: 'refresh',
+        rule: 'O3',
+        patch: { remoteHash: { kind: 'md5', value: 'new' }, remoteModifiedTime: NEWER },
+      },
     ]);
   });
   it('a released Google Doc modified in Drive is never exported', () => {

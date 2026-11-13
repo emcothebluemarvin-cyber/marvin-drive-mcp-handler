@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { NotFoundError, ReauthRequiredError } from '../../errors.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { childrenQuery, scanRemote } from '../remote-scanner.js';
+import { childrenQuery } from '../remote/google-remote.js';
+import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
+import { exportKey, scanRemote, toRemoteEntry } from '../remote-scanner.js';
+import { graphFile } from './fake-onedrive.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { binary, folder, treeLister } from './drive-tree.js';
 
@@ -11,6 +14,28 @@ const NFD = 'şartname.pdf'.normalize('NFD');
 describe('childrenQuery', () => {
   it('escapes the folder id', () => {
     expect(childrenQuery("a'b")).toBe("'a\\'b' in parents and trashed = false");
+  });
+});
+
+describe('toRemoteEntry', () => {
+  it('carries the OneDrive eTag as version; Google entries have none', () => {
+    const od = toRemoteEntry(toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), '', 'P', ['P']);
+    expect(od.version).toBe('"{f1},1"');
+    const google = toRemoteEntry(
+      { ...toRemoteItemFromGraph(graphFile('f1', 'a.pdf')), version: null },
+      '',
+      'P',
+      ['P'],
+    );
+    expect('version' in google).toBe(false);
+  });
+});
+
+describe('exportKey', () => {
+  it('adds the extension unless present, NFC, under the parent key', () => {
+    expect(exportKey('', 'Plan', 'docx')).toBe('Plan.docx');
+    expect(exportKey('a/b', 'Report.DOCX', 'docx')).toBe('a/b/Report.DOCX');
+    expect(exportKey('', 'şartname'.normalize('NFD'), 'docx')).toBe('şartname.docx');
   });
 });
 
@@ -30,7 +55,7 @@ describe('scanRemote', () => {
     expect(scan.entries[1]).toMatchObject({
       canEdit: false,
       canTrash: false,
-      md5: 'md5-b',
+      hash: { kind: 'md5', value: 'md5-b' },
       size: 10,
     });
     expect([...scan.folders.entries()]).toEqual([
@@ -82,16 +107,23 @@ describe('scanRemote', () => {
   it('keys Google-native files by their export name; unsupported types are ignored', async () => {
     const scan = await scanRemote(
       ROOT,
-      treeLister([
-        { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
-        { id: 's', name: 'Budget', mimeType: GOOGLE_MIME.spreadsheet, parents: [ROOT] },
-        { id: 'f', name: 'Survey', mimeType: 'application/vnd.google-apps.form', parents: [ROOT] },
-        { id: 'l', name: 'x'.repeat(252), mimeType: GOOGLE_MIME.document, parents: [ROOT] },
-      ]),
-      { ...DEFAULT_GOOGLE_EXPORT, spreadsheet: 'csv' },
+      treeLister(
+        [
+          { id: 'g', name: 'Plan', mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+          { id: 's', name: 'Budget', mimeType: GOOGLE_MIME.spreadsheet, parents: [ROOT] },
+          {
+            id: 'f',
+            name: 'Survey',
+            mimeType: 'application/vnd.google-apps.form',
+            parents: [ROOT],
+          },
+          { id: 'l', name: 'x'.repeat(252), mimeType: GOOGLE_MIME.document, parents: [ROOT] },
+        ],
+        { prefs: { ...DEFAULT_GOOGLE_EXPORT, spreadsheet: 'csv' } },
+      ),
     );
     expect(
-      scan.entries.map((e) => [e.id, e.key, e.name, e.md5, e.size, e.native?.exportFormat]),
+      scan.entries.map((e) => [e.id, e.key, e.name, e.hash, e.size, e.native?.exportFormat]),
     ).toEqual([
       ['s', 'Budget.csv', 'Budget', null, null, 'csv'],
       ['g', 'Plan.docx', 'Plan', null, null, 'docx'],

@@ -1,10 +1,6 @@
 import path from 'node:path';
 import type { AuditOp } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
 import type { ExportPlan } from '../files/export-formats.js';
-import { openExport } from '../files/export-stream.js';
-import type { Logger } from '../logger.js';
 import { remoteUnchangedSince } from './content-compare.js';
 import { CollisionError, LocalEditKeptError, TargetChangedError } from './errors.js';
 import {
@@ -17,6 +13,7 @@ import {
   type LocalFields,
 } from './exec-records.js';
 import { absInside, prepareParent } from './paths.js';
+import type { NativeSource, SyncRemote } from './remote/sync-remote.js';
 import {
   downloadReplace,
   moveLocal,
@@ -25,23 +22,14 @@ import {
   type StatExpect,
   type Written,
 } from './transfer.js';
-import {
-  SYNC_FILE_FIELDS,
-  type Action,
-  type ActionOutcome,
-  type PairFile,
-  type RemoteEntry,
-} from './types.js';
+import type { Action, ActionOutcome, PairFile, RemoteEntry } from './types.js';
 
-/** The export re-read also needs the 10 MB fallback link and the web link (addendum §4.3). */
-export const SYNC_EXPORT_FIELDS = `${SYNC_FILE_FIELDS}, exportLinks, webViewLink`;
 const MAX_LOCAL_EDIT_NAMES = 100;
 
 /** What the export actions need from the Executor. */
 export interface ExportHost {
   file: PairFile;
-  ops: OperationRunner;
-  logger: Logger;
+  remote: SyncRemote;
   clock: () => Date;
   commit(action: Action, mutate: () => void): Promise<void>;
   audit(op: AuditOp, action: Action, remoteId: string): Promise<void>;
@@ -58,11 +46,9 @@ function planOf(remote: RemoteEntry): ExportPlan {
 }
 
 /** Re-read right before an export; doubles as re-verification (changed/trashed → skip). */
-async function reread(host: ExportHost, remote: RemoteEntry): Promise<DriveFile> {
-  const current = await host.ops.exec(host.file.pair.account, 'idempotent', remote.id, (ctx) =>
-    ctx.drive.getFile(remote.id, SYNC_EXPORT_FIELDS),
-  );
-  if (current.trashed || !remoteUnchangedSince(remote, current)) {
+async function reread(host: ExportHost, remote: RemoteEntry): Promise<NativeSource> {
+  const current = await host.remote.readNative(remote.id);
+  if (current.item.trashed || !remoteUnchangedSince(remote, current.item)) {
     throw new TargetChangedError(`${remote.key} changed in Drive since planning`);
   }
   return current;
@@ -76,11 +62,8 @@ export async function exportOver(
   remote: RemoteEntry,
 ): Promise<{ md5: string; size: number }> {
   const current = await reread(host, remote);
-  return host.ops.exec(host.file.pair.account, 'idempotent', remote.id, (ctx) =>
-    downloadReplace(abs, () => openExport(ctx.drive, current, planOf(remote), host.logger), {
-      expect,
-      expectedMd5: null,
-    }),
+  return host.remote.exportNative(current, planOf(remote), (open) =>
+    downloadReplace(abs, open, { expect }),
   );
 }
 
@@ -126,9 +109,7 @@ export async function exportNew(host: ExportHost, action: Action): Promise<Parti
   const remote = need(action.remote, 'remote');
   const current = await reread(host, remote);
   const abs = await prepareParent(host.file.pair.localDir, action.key);
-  const source = await host.ops.exec(host.file.pair.account, 'idempotent', remote.id, (ctx) =>
-    openExport(ctx.drive, current, planOf(remote), host.logger),
-  );
+  const source = await host.remote.exportNative(current, planOf(remote), (open) => open());
   let kept: string | null = null;
   try {
     if (action.localEdit) kept = await moveLocalEditAside(host, action);

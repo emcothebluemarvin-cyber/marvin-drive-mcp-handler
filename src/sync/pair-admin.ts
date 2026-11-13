@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
+import type { AuditSink } from '../audit/audit-log.js';
 import { NotFoundError, ValidationError } from '../errors.js';
 import { expandHome } from '../files/destination.js';
-import { GOOGLE_MIME } from '../files/export-formats.js';
 import type { Logger } from '../logger.js';
+import type { DigesterFactory } from './local-scanner.js';
+import { cloudFolderCheck, type CloudFolder } from './cloud-folders.js';
 import { SyncRootError } from './errors.js';
 import {
   checkOverlap,
@@ -17,24 +17,32 @@ import {
   writeMarker,
   type PairStore,
 } from './pair-store.js';
-import { validateGoogleExport } from './remote-kinds.js';
-import {
-  PAIR_NAME,
-  SYNC_FILE_FIELDS,
-  type GoogleExportPrefs,
-  type Pair,
-  type PairFile,
-} from './types.js';
+import { validateGoogleExport } from './remote/google-remote.js';
+import { providerLabel, remoteNameProblem } from './remote/remote-names.js';
+import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+import { PAIR_NAME, type GoogleExportPrefs, type Pair, type PairFile } from './types.js';
 
 /** What the split service modules share (one per SyncService). */
 export interface SyncEnv {
-  ops: OperationRunner;
+  audit: AuditSink;
   log: Logger;
   clock: () => Date;
   store: PairStore;
-  /** Throws when the account cannot be synced, before anything touches the user's folder. */
-  assertSupportedAccount: (ref: string | undefined) => Promise<void>;
+  /** The remote of an existing pair: OneDrive for a Microsoft account, else Google. */
+  remoteFor: (pair: Pair) => Promise<SyncRemote>;
+  /**
+   * The remote for an account reference (alias, email or default) before a pair exists.
+   * It fails before anything touches the user's folder when the account cannot be synced.
+   */
+  openRemote: (accountRef: string | undefined, prefs: GoogleExportPrefs) => Promise<SyncRemote>;
+  /** Local digests of the remote's hash kind (md5 built in; tests inject others). */
+  digesters: DigesterFactory;
+  /** Cloud desktop client folders on this machine (OneDrive sync spec §6). */
+  cloudFolders: () => Promise<CloudFolder[]>;
 }
+
+/** Volumes of a new folder fold case by default here (the marker probe comes later). */
+const DEFAULT_CI = process.platform === 'darwin' || process.platform === 'win32';
 
 export interface CreatePairInput {
   name: string;
@@ -61,6 +69,8 @@ export interface PairSummary {
   };
   createdAt: string;
   lastAppliedRunAt: string | null;
+  /** Set when localDir is inside (or contains) a cloud desktop client's folder (spec §6). */
+  warning?: string;
 }
 
 export function summarize(file: PairFile): PairSummary {
@@ -83,11 +93,11 @@ export function summarize(file: PairFile): PairSummary {
   };
 }
 
-/** Why a Drive folder cannot be a pair root, or null (spec §5 step 2). */
-export function remoteRootProblem(file: DriveFile): string | null {
-  if (file.mimeType !== GOOGLE_MIME.folder) return 'is not a folder';
-  if (file.trashed) return 'is in the Drive trash';
-  if (file.capabilities?.canAddChildren === false) return 'does not allow adding files';
+/** Why a remote folder cannot be a pair root, or null (spec §5 step 2). */
+export function remoteRootProblem(item: RemoteItem): string | null {
+  if (item.kind !== 'folder') return 'is not a folder';
+  if (item.trashed) return 'is in the Drive trash';
+  if (!item.canAddChildren) return 'does not allow adding files';
   return null;
 }
 
@@ -115,6 +125,8 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
   }
   const googleExport = validateGoogleExport(input.googleExport ?? {});
   const localDir = await resolveLocalDir(input.localDir);
+  const inCloud = await cloudFolderCheck(localDir, DEFAULT_CI, env.cloudFolders);
+  if (inCloud) throw new ValidationError(inCloud);
   return env.store.withLock(input.name, async () => {
     const existing = (await env.store.list()).map((f) => f.pair);
     checkOverlap(existing, {
@@ -122,13 +134,17 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       localDir,
       remoteFolderId: input.remoteFolderId ?? '',
     });
-    await env.assertSupportedAccount(input.account);
+    const remote = await env.openRemote(input.account, googleExport);
+    checkProviderSettings(remote, input);
+    // OneDrive (spec §4.1): the deletion cursor starts "from now on"; a failure creates nothing.
+    const feed = remote.deletionFeed();
+    const remoteCursor = feed ? await feed.start() : null;
     const id = randomUUID();
     await writeMarker(localDir, input.name, id);
-    let remote: { folderId: string; alias: string };
+    let folderId: string;
     try {
-      remote = await resolveRemoteRoot(env, input);
-      checkOverlap(existing, { name: input.name, localDir, remoteFolderId: remote.folderId });
+      folderId = await resolveRemoteRoot(env, remote, input);
+      checkOverlap(existing, { name: input.name, localDir, remoteFolderId: folderId });
     } catch (err) {
       await removeMarker(localDir, input.name);
       throw err;
@@ -136,10 +152,10 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
     const pair: Pair = {
       name: input.name,
       id,
-      account: remote.alias,
+      account: remote.account,
       localDir,
       caseInsensitive: await probeCaseInsensitive(localDir, input.name),
-      remoteFolderId: remote.folderId,
+      remoteFolderId: folderId,
       googleExport,
       selection: [],
       excluded: [],
@@ -148,44 +164,86 @@ export async function createPair(env: SyncEnv, input: CreatePairInput): Promise<
       createdAt: env.clock().toISOString(),
       lastAppliedRunAt: null,
       firstAppliedRunAt: null,
-      nativeBaselineDone: false,
+      // Microsoft pairs have no Google-native files to baseline (spec §4.4).
+      nativeBaselineDone: remote.provider === 'microsoft',
+      remoteCursor,
+      remoteDeletedIds: [],
     };
-    const file: PairFile = { version: 1, pair, records: [] };
+    const file: PairFile = { version: 2, pair, records: [] };
     await env.store.save(file);
     return summarize(file);
   });
 }
 
-function resolveRemoteRoot(
+/** Settings and names the pair's provider cannot take (spec §4.3, §4.4). */
+function checkProviderSettings(remote: SyncRemote, input: CreatePairInput): void {
+  if (remote.provider === 'microsoft' && input.googleExport !== undefined) {
+    throw new ValidationError(
+      'googleExport is for Google accounts only; OneDrive has no Google files to export',
+    );
+  }
+  if (input.remoteFolderName !== undefined) {
+    const problem = remoteNameProblem(remote.provider, input.remoteFolderName);
+    if (problem) {
+      throw new ValidationError(
+        `remoteFolderName cannot be created on ${providerLabel(remote.provider)}: ${problem}`,
+      );
+    }
+  }
+}
+
+/** The pair root's id: checked when given, created (and audited) from a name otherwise. */
+async function resolveRemoteRoot(
   env: SyncEnv,
+  remote: SyncRemote,
   input: CreatePairInput,
-): Promise<{ folderId: string; alias: string }> {
+): Promise<string> {
+  const label = providerLabel(remote.provider);
   const folderId = input.remoteFolderId;
   if (folderId) {
-    return env.ops.exec(input.account, 'idempotent', folderId, async (ctx) => {
-      const root = await ctx.drive.getFile(folderId, SYNC_FILE_FIELDS);
-      const problem = remoteRootProblem(root);
-      if (problem) throw new ValidationError(`Drive folder ${folderId} ${problem}`);
-      return { folderId, alias: ctx.account.alias };
-    });
+    let root: RemoteItem;
+    try {
+      root = await remote.read(folderId);
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        throw new ValidationError(`${label} folder ${folderId} not found on ${label}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
+    const problem = remoteRootProblem(root);
+    if (problem) throw new ValidationError(`${label} folder ${folderId} ${problem}`);
+    // OneDrive: store the real id ('root' is an alias; children name the real one).
+    return remote.provider === 'microsoft' ? root.id : folderId;
   }
-  const parentId = input.remoteParentId ?? 'root';
-  return env.ops.exec(input.account, 'create', input.remoteParentId, async (ctx) => {
-    const folder = await ctx.drive.createFile({
-      requestBody: {
-        name: input.remoteFolderName ?? '',
-        mimeType: GOOGLE_MIME.folder,
-        parents: [parentId],
-      },
-      fields: 'id, name',
+  const parentId = input.remoteParentId ?? remote.rootId;
+  const folder = await remote.createFolder(parentId, input.remoteFolderName ?? '');
+  const details = { parentId, pair: input.name };
+  try {
+    await env.audit.record({
+      account: remote.account,
+      op: 'create_folder',
+      fileId: folder.id,
+      ...(folder.name ? { name: folder.name } : {}),
+      details,
     });
-    await env.ops.audit(ctx, 'create_folder', folder, { parentId, pair: input.name });
-    return { folderId: folder.id ?? '', alias: ctx.account.alias };
-  });
+  } catch (err) {
+    env.log.warn('Audit log write failed', { op: 'create_folder', fileId: folder.id, error: err });
+  }
+  return folder.id;
 }
 
 export async function listPairs(env: SyncEnv): Promise<PairSummary[]> {
-  return (await env.store.list()).map(summarize);
+  const folders = await env.cloudFolders();
+  const out: PairSummary[] = [];
+  for (const file of await env.store.list()) {
+    const summary = summarize(file);
+    const { localDir, caseInsensitive } = file.pair;
+    const warning = await cloudFolderCheck(localDir, caseInsensitive, async () => folders);
+    out.push(warning ? { ...summary, warning } : summary);
+  }
+  return out;
 }
 
 export async function removePair(
@@ -222,6 +280,8 @@ export async function repairMarker(
     const info = await stat(pair.localDir).catch(() => null);
     if (!info?.isDirectory())
       throw new ValidationError(`${pair.localDir} is not an available folder`);
+    const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
+    if (inCloud) throw new ValidationError(inCloud);
     if (!(await confirm(pair))) {
       return { repaired: false, localDir: pair.localDir, caseInsensitive: pair.caseInsensitive };
     }
@@ -235,6 +295,9 @@ export async function repairMarker(
 /** Spec §5 step 2: any failure aborts the whole run. */
 export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
   const hint = `run: marvin-drive sync repair-marker ${pair.name}`;
+  // Spec §6: a pair inside a cloud desktop folder is never synced (it is left untouched).
+  const inCloud = await cloudFolderCheck(pair.localDir, pair.caseInsensitive, env.cloudFolders);
+  if (inCloud) throw new SyncRootError(inCloud);
   const info = await stat(pair.localDir).catch(() => null);
   if (!info?.isDirectory()) {
     throw new SyncRootError(`${pair.localDir} is not available (unmounted, moved or deleted?)`);
@@ -253,19 +316,19 @@ export async function checkRoots(env: SyncEnv, pair: Pair): Promise<void> {
   if ((await probeCaseInsensitive(pair.localDir, pair.name)) !== pair.caseInsensitive) {
     throw new SyncRootError(`Case sensitivity of ${pair.localDir} changed; ${hint}`);
   }
-  let root: DriveFile;
+  const remote = await env.remoteFor(pair);
+  const label = providerLabel(remote.provider);
+  let root: RemoteItem;
   try {
-    root = await env.ops.exec(pair.account, 'idempotent', pair.remoteFolderId, (ctx) =>
-      ctx.drive.getFile(pair.remoteFolderId, SYNC_FILE_FIELDS),
-    );
+    root = await remote.read(pair.remoteFolderId);
   } catch (err) {
     if (err instanceof NotFoundError) {
-      throw new SyncRootError(`The Drive folder ${pair.remoteFolderId} no longer exists`, {
+      throw new SyncRootError(`The ${label} folder ${pair.remoteFolderId} no longer exists`, {
         cause: err,
       });
     }
     throw err;
   }
   const problem = remoteRootProblem(root);
-  if (problem) throw new SyncRootError(`The Drive folder ${pair.remoteFolderId} ${problem}`);
+  if (problem) throw new SyncRootError(`The ${label} folder ${pair.remoteFolderId} ${problem}`);
 }

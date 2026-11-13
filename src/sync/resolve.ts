@@ -1,5 +1,7 @@
 import { ancestorKeys, foldKey, isUnder } from './paths.js';
+import type { HashKind, RemoteUnsupported, SyncRemote } from './remote/sync-remote.js';
 import type {
+  LocalDigests,
   LocalEntry,
   LocalScan,
   OnDiskProbe,
@@ -10,6 +12,7 @@ import type {
   RemoteScan,
   SyncRecord,
 } from './types.js';
+import { UNSUPPORTED_TEXT } from './types.js';
 
 export interface PlanInput {
   pair: Pair;
@@ -18,8 +21,14 @@ export interface PlanInput {
   remote: RemoteScan;
   /** Probe results for records missing from the remote scan (spec §6.2). */
   probes: ReadonlyMap<string, Probe>;
-  /** md5 by on-disk relative name, for the names `hashTargets` asked for. */
-  md5s: ReadonlyMap<string, string>;
+  /** Digests by on-disk relative name, for the names `hashTargets` asked for. */
+  digests: ReadonlyMap<string, LocalDigests>;
+  /** The pair remote's hash kind (local digests of this kind are compared with it). */
+  remoteHashKind: HashKind;
+  /** The pair's provider, for remote name rules (OneDrive sync spec §4.3); default google. */
+  remoteProvider?: SyncRemote['provider'];
+  /** sync_release's request (`all` or the given paths); null for scans and runs. */
+  releaseNames: readonly string[] | 'all' | null;
   /** lstat of record keys that have no exact scan match (absent keys are omitted). */
   onDisk: ReadonlyMap<string, OnDiskProbe>;
 }
@@ -171,12 +180,13 @@ export function resolveRemote(ctx: PlanContext, record: SyncRecord): RemoteResol
   if (scanned) return { kind: 'present', entry: scanned, moved: scanned.key !== record.path };
   const ignored = ctx.ignoredById.get(record.remoteId);
   if (ignored) {
+    const unsupported = UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported];
     return {
       kind: 'unknown',
       reason:
         ignored.reason === 'native-unsupported'
           ? 'is a Google file type that cannot be exported'
-          : 'renamed in Drive to a name that cannot be synced',
+          : (unsupported ?? 'renamed in Drive to a name that cannot be synced'),
     };
   }
   const probe = ctx.input.probes.get(record.remoteId);
@@ -204,11 +214,19 @@ export function localState(
   ctx: PlanContext,
   record: SyncRecord,
   entry: LocalEntry,
-): { changed: boolean; md5: string } | null {
-  if (statMatches(entry, record)) return { changed: false, md5: record.localMd5 };
-  const md5 = ctx.input.md5s.get(entry.name);
-  if (md5 === undefined) return null;
-  return { changed: md5 !== record.localMd5, md5 };
+): { changed: boolean; digests: LocalDigests } | null {
+  const hashed = ctx.input.digests.get(entry.name);
+  if (statMatches(entry, record)) {
+    // Not re-hashed for change detection: the record md5 stands (spec §3.1).
+    const md5 = record.localMd5;
+    const remote =
+      ctx.input.remoteHashKind === 'md5'
+        ? { kind: 'md5' as const, value: md5 }
+        : (hashed?.remote ?? null);
+    return { changed: false, digests: { md5, remote } };
+  }
+  if (hashed === undefined) return null;
+  return { changed: hashed.md5 !== record.localMd5, digests: hashed };
 }
 
 /**
@@ -235,9 +253,12 @@ export function onDiskProbeKeys(
  * On-disk names the service must hash before planning (spec §5 step 3): tracked
  * files whose stat differs from the record, selected files not yet recorded, and a
  * local file already at a vanished record's Drive-move target (crash after a move).
+ * On a remote whose hash kind is not md5 it also asks for the files whose remote-kind
+ * digest is needed only to adopt or release (OneDrive sync spec §3.1): release candidates
+ * and untracked files with a same-key remote file. With md5 the set is exactly the above.
  */
-export function hashTargets(input: Omit<PlanInput, 'md5s'>): string[] {
-  const ctx = buildContext({ ...input, md5s: new Map() });
+export function hashTargets(input: Omit<PlanInput, 'digests'>): string[] {
+  const ctx = buildContext({ ...input, digests: new Map() });
   const names = new Set<string>();
   const recordFolds = new Set<string>();
   for (const record of input.records) {
@@ -254,5 +275,30 @@ export function hashTargets(input: Omit<PlanInput, 'md5s'>): string[] {
     if (recordFolds.has(fold)) continue;
     for (const e of ctx.localByFold.get(fold) ?? []) names.add(e.name);
   }
+  if (input.remoteHashKind !== 'md5') {
+    for (const name of digestOnlyTargets(ctx, recordFolds)) names.add(name);
+  }
   return [...names].sort();
+}
+
+/** Release candidates and untracked same-key files (non-md5 remotes only). */
+function digestOnlyTargets(ctx: PlanContext, recordFolds: ReadonlySet<string>): string[] {
+  const { input } = ctx;
+  const names: string[] = [];
+  const release = input.releaseNames;
+  const named = Array.isArray(release) ? new Set(release.map(foldKey)) : null;
+  for (const record of input.records) {
+    const wanted =
+      release === 'all'
+        ? !record.remoteOnly && (ctx.remoteById.get(record.remoteId)?.hash ?? null) !== null
+        : named !== null && named.has(foldKey(record.path));
+    if (!wanted) continue;
+    const l = resolveLocal(ctx, record.path);
+    if (l.kind === 'present') names.push(l.entry.name);
+  }
+  for (const e of input.local.entries) {
+    if (recordFolds.has(e.foldKey)) continue;
+    if ((ctx.remoteByFold.get(e.foldKey) ?? []).length > 0) names.push(e.name);
+  }
+  return names;
 }

@@ -1,6 +1,8 @@
+import type { HashKind } from './remote/sync-remote.js';
 import {
   ApiDisabledError,
   AppError,
+  OneDriveFullError,
   QuotaExceededError,
   RateLimitError,
   ReauthRequiredError,
@@ -28,8 +30,17 @@ export class TargetChangedError extends AppError {
 export class ChecksumMismatchError extends AppError {
   readonly code = 'SYNC_CHECKSUM_MISMATCH';
 
-  constructor(what: string, expected: string, actual: string) {
-    super(`${what}: expected md5 ${expected}, got ${actual}`);
+  constructor(what: string, expected: string, actual: string, kind: HashKind = 'md5') {
+    super(`${what}: expected ${kind} ${expected}, got ${actual}`);
+  }
+}
+
+/** Downloaded bytes differ in length from the size the remote reported (spec §3.3). */
+export class SizeMismatchError extends AppError {
+  readonly code = 'SYNC_SIZE_MISMATCH';
+
+  constructor(what: string, expected: number, actual: number) {
+    super(`${what}: expected ${expected} bytes, got ${actual}`);
   }
 }
 
@@ -51,13 +62,17 @@ export class PersistenceError extends AppError {
   readonly code = 'SYNC_PERSISTENCE';
 }
 
-/** Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). */
+/**
+ * Errors that stop the whole run; remaining actions are reported `not-run` (spec §7). Both
+ * providers raise ReauthRequiredError; OneDriveFullError is OneDrive's full storage (§5).
+ */
 export function isAbortError(err: unknown): boolean {
   return (
     err instanceof ReauthRequiredError ||
     err instanceof QuotaExceededError ||
     err instanceof ApiDisabledError ||
     err instanceof RateLimitError ||
+    err instanceof OneDriveFullError ||
     err instanceof PersistenceError
   );
 }

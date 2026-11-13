@@ -8,7 +8,7 @@ import {
   resolveRemote,
 } from '../resolve.js';
 import { localEntry, record, remoteEntry } from './fixtures.js';
-import { planInput } from './plan-input.js';
+import { md5Digests, planInput, type InputOptions } from './plan-input.js';
 
 const NFD = 'şartname.pdf'.normalize('NFD');
 
@@ -109,12 +109,34 @@ describe('content state', () => {
   it('local: unchanged by stat, else by md5; null when not hashed', () => {
     const k = record('r1', 'a.pdf');
     const ctx = buildContext(planInput({ md5s: [['b.pdf', 'md5-r1']] }));
-    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({ changed: false, md5: 'md5-r1' });
+    expect(localState(ctx, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: md5Digests('md5-r1'),
+    });
     expect(localState(ctx, k, localEntry('b.pdf', { mtimeMs: 5 }))).toEqual({
       changed: false,
-      md5: 'md5-r1',
+      digests: md5Digests('md5-r1'),
     });
     expect(localState(ctx, k, localEntry('a.pdf', { mtimeMs: 5 }))).toBeNull();
+  });
+  it('local on a non-md5 remote: stat-unchanged keeps the record md5, remote digest only if hashed', () => {
+    const k = record('r1', 'a.pdf');
+    const qx = { kind: 'quickXor' as const, value: 'QX' };
+    const plain = buildContext(planInput({ remoteHashKind: 'quickXor' }));
+    expect(localState(plain, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: { md5: 'md5-r1', remote: null },
+    });
+    const hashed = buildContext(
+      planInput({
+        remoteHashKind: 'quickXor',
+        digests: [['a.pdf', { md5: 'md5-r1', remote: qx }]],
+      }),
+    );
+    expect(localState(hashed, k, localEntry('a.pdf'))).toEqual({
+      changed: false,
+      digests: { md5: 'md5-r1', remote: qx },
+    });
   });
 });
 
@@ -131,6 +153,64 @@ describe('hashTargets', () => {
       ],
     });
     expect(hashTargets(input)).toEqual(['new.pdf', 'touched.pdf']);
+  });
+
+  const releaseCase = (o: Partial<InputOptions> = {}) =>
+    planInput({
+      records: [
+        record('r1', 'same.pdf'),
+        record('r2', 'nohash.pdf'),
+        record('r3', 'gone.pdf'),
+        record('r4', 'released.pdf', { remoteOnly: true }),
+      ],
+      local: [
+        localEntry('same.pdf'),
+        localEntry('nohash.pdf'),
+        localEntry('released.pdf'),
+        localEntry('adopt.pdf'),
+        localEntry('lonely.pdf'),
+      ],
+      remote: [
+        remoteEntry('r1', 'same.pdf'),
+        remoteEntry('r2', 'nohash.pdf', { hash: null }),
+        remoteEntry('r4', 'released.pdf'),
+        remoteEntry('n1', 'Adopt.pdf'),
+      ],
+      ...o,
+    });
+
+  it('on an md5 remote, release requests and adopt candidates add nothing', () => {
+    // Also a stat-changed tracked file and a new selected file, so the base set is not empty.
+    const md5Case = (o: Partial<InputOptions> = {}) => {
+      const base = releaseCase(o);
+      return {
+        ...base,
+        records: [...base.records, record('r5', 'touched.pdf')],
+        pair: { ...base.pair, selection: [...base.pair.selection, 'touched.pdf', 'new.pdf'] },
+        local: {
+          ...base.local,
+          entries: [
+            ...base.local.entries,
+            localEntry('touched.pdf', { ctimeMs: 2 }),
+            localEntry('new.pdf'),
+          ],
+        },
+      };
+    };
+    const base = hashTargets(md5Case());
+    expect(base).toEqual(['new.pdf', 'touched.pdf']);
+    expect(hashTargets({ ...md5Case(), releaseNames: 'all' })).toEqual(base);
+    expect(hashTargets({ ...md5Case(), releaseNames: ['same.pdf'] })).toEqual(base);
+  });
+
+  it('on another hash kind, adds release candidates and untracked same-key files', () => {
+    const qx = releaseCase({ remoteHashKind: 'quickXor' });
+    expect(hashTargets(qx)).toEqual(['adopt.pdf']);
+    expect(hashTargets({ ...qx, releaseNames: 'all' })).toEqual(['adopt.pdf', 'same.pdf']);
+    expect(hashTargets({ ...qx, releaseNames: ['NOHASH.pdf', 'gone.pdf'] })).toEqual([
+      'adopt.pdf',
+      'nohash.pdf',
+    ]);
   });
 });
 

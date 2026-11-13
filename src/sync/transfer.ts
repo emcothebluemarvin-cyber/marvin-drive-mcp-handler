@@ -1,14 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { link as fsLink, lstat, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import type { DriveAdapter, DriveFile } from '../drive/drive-adapter.js';
 import { hasErrorCode } from '../errors.js';
-import { uploadMimeType } from '../files/upload-mime.js';
-import { ChecksumMismatchError, CollisionError, TargetChangedError } from './errors.js';
+import {
+  ChecksumMismatchError,
+  CollisionError,
+  SizeMismatchError,
+  TargetChangedError,
+} from './errors.js';
+import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
 import { PART_SUFFIX } from './paths.js';
-import { SYNC_FILE_FIELDS } from './types.js';
+import type { ContentHash } from './remote/sync-remote.js';
 import { renameReplacing } from '../files/rename-replacing.js';
 
 export type LinkFn = (existingPath: string, newPath: string) => Promise<void>;
@@ -37,19 +40,40 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-/** Streams `source` into a fresh `.<uuid>.marvin-part` in `dir`, hashing and fsyncing it. */
+/** What a download must match (OneDrive sync spec §3.3); null/undefined: no check. */
+export interface DownloadCheck {
+  /** The remote's hash: md5 is always computed, another kind through `digesters`. */
+  expected?: ContentHash | null;
+  /** The remote's size; a different byte count fails the write. */
+  expectedSize?: number | null;
+  digesters?: DigesterFactory;
+}
+
+/**
+ * Streams `source` into a fresh `.<uuid>.marvin-part` in `dir`, hashing and fsyncing it,
+ * then checks it against `check`. On a mismatch or error the temp file is removed.
+ */
 async function writeTemp(
   dir: string,
   source: Readable,
+  what: string,
+  check: DownloadCheck,
 ): Promise<{ tmp: string; md5: string; size: number }> {
+  // Digesters first: one that throws must not leave an open handle or a temp file.
+  const hash = createHash('md5');
+  const expected = check.expected ?? null;
+  const other =
+    expected !== null && expected.kind !== 'md5'
+      ? (check.digesters ?? defaultDigesters)(expected.kind)
+      : null;
   const tmp = path.join(dir, `.${randomUUID()}${PART_SUFFIX}`);
   const handle = await open(tmp, 'wx', 0o644);
-  const hash = createHash('md5');
   let size = 0;
   try {
     for await (const chunk of source) {
       const buf = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
       hash.update(buf);
+      other?.update(buf);
       size += buf.length;
       await handle.write(buf);
     }
@@ -61,7 +85,23 @@ async function writeTemp(
     throw err;
   }
   await handle.close();
-  return { tmp, md5: hash.digest('hex'), size };
+  const md5 = hash.digest('hex');
+  try {
+    if (expected !== null) {
+      const actual = other ? other.digest() : md5;
+      if (actual !== expected.value) {
+        throw new ChecksumMismatchError(what, expected.value, actual, expected.kind);
+      }
+    }
+    const expectedSize = check.expectedSize ?? null;
+    if (expectedSize !== null && size !== expectedSize) {
+      throw new SizeMismatchError(what, expectedSize, size);
+    }
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
+  return { tmp, md5, size };
 }
 
 /** fsync a directory so a new entry survives a crash (best effort where unsupported). */
@@ -99,9 +139,7 @@ export async function assertUnchanged(target: string, expect: StatExpect): Promi
   }
 }
 
-export interface PlaceOptions {
-  /** Verify the written bytes (null/undefined: no check). */
-  expectedMd5?: string | null;
+export interface PlaceOptions extends DownloadCheck {
   /** Names tried: nameFor(0), nameFor(1)…; default 1 (plain exclusive create). */
   maxAttempts?: number;
   link?: LinkFn;
@@ -118,11 +156,8 @@ export async function placeExclusive(
   opts: PlaceOptions = {},
 ): Promise<Written> {
   const link = opts.link ?? fsLink;
-  const { tmp, md5, size } = await writeTemp(dir, await openSource());
+  const { tmp, md5, size } = await writeTemp(dir, await openSource(), nameFor(0), opts);
   try {
-    if (opts.expectedMd5 && md5 !== opts.expectedMd5) {
-      throw new ChecksumMismatchError(nameFor(0), opts.expectedMd5, md5);
-    }
     const attempts = opts.maxAttempts ?? 1;
     for (let i = 0; i < attempts; i++) {
       const target = path.join(dir, nameFor(i));
@@ -150,14 +185,16 @@ export async function placeExclusive(
 export async function downloadReplace(
   target: string,
   openSource: () => Promise<Readable>,
-  opts: { expect: StatExpect; expectedMd5: string | null },
+  opts: DownloadCheck & { expect: StatExpect },
 ): Promise<{ md5: string; size: number }> {
   await assertUnchanged(target, opts.expect);
-  const { tmp, md5, size } = await writeTemp(path.dirname(target), await openSource());
+  const { tmp, md5, size } = await writeTemp(
+    path.dirname(target),
+    await openSource(),
+    target,
+    opts,
+  );
   try {
-    if (opts.expectedMd5 && md5 !== opts.expectedMd5) {
-      throw new ChecksumMismatchError(target, opts.expectedMd5, md5);
-    }
     await assertUnchanged(target, opts.expect);
     await renameReplacing(tmp, target);
   } finally {
@@ -217,39 +254,4 @@ export async function moveLocal(
     }
   }
   await unlink(from);
-}
-
-export async function uploadNew(
-  drive: DriveAdapter,
-  input: { abs: string; name: string; parentId: string },
-): Promise<DriveFile> {
-  const body = createReadStream(input.abs);
-  try {
-    return await drive.createFile({
-      requestBody: { name: input.name, parents: [input.parentId] },
-      media: { mimeType: uploadMimeType(input.abs), body },
-      fields: SYNC_FILE_FIELDS,
-    });
-  } catch (err) {
-    body.destroy();
-    throw err;
-  }
-}
-
-/** New content for the same fileId (Drive keeps a revision). */
-export async function updateContent(
-  drive: DriveAdapter,
-  input: { fileId: string; abs: string },
-): Promise<DriveFile> {
-  const body = createReadStream(input.abs);
-  try {
-    return await drive.updateFile({
-      fileId: input.fileId,
-      media: { mimeType: uploadMimeType(input.abs), body },
-      fields: SYNC_FILE_FIELDS,
-    });
-  } catch (err) {
-    body.destroy();
-    throw err;
-  }
 }

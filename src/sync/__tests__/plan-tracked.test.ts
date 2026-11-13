@@ -240,6 +240,66 @@ describe('binary tracked records (spec §6.4)', () => {
     expect(a).toMatchObject({ kind: 'upload-new', rule: 'B11', rebaseFrom: 'r1' });
   });
 
+  it('B11 on OneDrive with a name OneDrive refuses → remote-name-invalid, no upload', () => {
+    const k = record('r1', 'a?.pdf');
+    const result = run(
+      {
+        local: [localEntry('a?.pdf', { mtimeMs: 2000, size: 12 })],
+        probes: [['r1', { state: 'trashed' }]],
+        md5s: [['a?.pdf', 'edit']],
+        remoteProvider: 'microsoft',
+      },
+      k,
+    );
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toEqual([
+      {
+        code: 'remote-name-invalid',
+        path: 'a?.pdf',
+        rule: 'B11',
+        message:
+          'cannot be uploaded to OneDrive: the name contains a character OneDrive does not allow (" * : < > ? / \\ |)',
+      },
+    ]);
+  });
+
+  describe('B11 re-upload follows the uploadKey case rule', () => {
+    const KD = record('r1', 'docs/a.pdf');
+    const opts = (o: InputOptions = {}): InputOptions => ({
+      local: [localEntry('docs/a.pdf', { mtimeMs: 2000, size: 12 })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['docs/a.pdf', 'edit']],
+      folders: [['F-Docs', 'Docs']],
+      ...o,
+    });
+
+    it('case-sensitive volume: a case-only folder mismatch is ambiguous, nothing uploads', () => {
+      const result = run(opts({ pair: { caseInsensitive: false } }), KD);
+      expect(result.actions).toEqual([]);
+      expect(result.notes).toEqual([
+        {
+          code: 'ambiguous',
+          path: 'docs/a.pdf',
+          rule: 'B11',
+          remoteId: 'r1',
+          message: 'a Drive folder name differs only in case',
+        },
+      ]);
+      const od = run(opts({ pair: { caseInsensitive: false }, remoteProvider: 'microsoft' }), KD);
+      expect(od.notes[0]?.message).toBe('a OneDrive folder name differs only in case');
+    });
+
+    it('case-insensitive volume: the remote folder spelling is reused', () => {
+      expect(only(opts(), KD)).toMatchObject({
+        kind: 'upload-new',
+        rule: 'B11',
+        key: 'Docs/a.pdf',
+        rebaseFrom: 'r1',
+        selection: { remove: ['docs/a.pdf'], add: ['Docs/a.pdf'] },
+      });
+    });
+  });
+
   it('B11 after a crash adopts the identical re-upload instead of uploading twice', () => {
     const a = only({
       local: [L_EDITED],
@@ -276,7 +336,7 @@ describe('binary tracked records (spec §6.4)', () => {
   it('warns weak-compare when Drive has no md5', () => {
     const result = run(
       { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
-      { ...K, remoteMd5: null },
+      { ...K, remoteHash: null },
     );
     expect(result.notes.map((n) => n.code)).toEqual(['weak-compare']);
   });
@@ -341,6 +401,45 @@ describe('review regressions', () => {
     });
     expect(result.actions).toEqual([]);
     expect(result.notes[0]).toMatchObject({ code: 'collision', rule: 'B11' });
+  });
+
+  it('B11 collision and weak-compare texts name OneDrive on a OneDrive pair', () => {
+    const collision = run({
+      local: [L_EDITED],
+      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['a.pdf', 'edit']],
+      remoteProvider: 'microsoft',
+    });
+    expect(collision.notes[0]?.message).toBe(
+      'deleted on OneDrive, and a different OneDrive file now uses this name',
+    );
+    const google = run({
+      local: [L_EDITED],
+      remote: [remoteEntry('r2', 'a.pdf', { md5: 'someone-else' })],
+      probes: [['r1', { state: 'trashed' }]],
+      md5s: [['a.pdf', 'edit']],
+    });
+    expect(google.notes[0]?.message).toBe(
+      'trashed in Drive, and a different Drive file now uses this name',
+    );
+    const weak = run(
+      {
+        local: [L],
+        remote: [remoteEntry('r1', 'a.pdf', { md5: null })],
+        remoteProvider: 'microsoft',
+      },
+      { ...K, remoteHash: null },
+    );
+    expect(weak.notes[0]).toMatchObject({
+      code: 'weak-compare',
+      message: 'OneDrive reports no hash; compared size and modifiedTime',
+    });
+    const weakGoogle = run(
+      { local: [L], remote: [remoteEntry('r1', 'a.pdf', { md5: null })] },
+      { ...K, remoteHash: null },
+    );
+    expect(weakGoogle.notes[0]?.message).toBe('Drive has no md5; compared size and modifiedTime');
   });
 
   it('resumes a move that crashed after unlink: adopts the file already at the target', () => {

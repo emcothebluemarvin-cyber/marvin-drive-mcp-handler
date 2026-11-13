@@ -1,5 +1,6 @@
 import { localMatchesRemote } from './content-compare.js';
 import { baseName, foldKey, parentKey } from './paths.js';
+import { caseOnlyFolderMessage, uploadNameProblem } from './plan-shared.js';
 import {
   isBlocked,
   isExcluded,
@@ -156,7 +157,12 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
       if (L && !R) {
         const target = uploadKey(ctx, L.key);
         if (target === null) {
-          note('ambiguous', 'U1', 'a Drive folder name differs only in case');
+          note('ambiguous', 'U1', caseOnlyFolderMessage(ctx));
+          continue;
+        }
+        const bad = uploadNameProblem(ctx, target);
+        if (bad) {
+          note('remote-name-invalid', 'U1', bad.message, bad.path);
           continue;
         }
         out.actions.push({
@@ -165,21 +171,23 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
           rule: 'U1',
           key: target,
           local: L,
-          localMd5: ctx.input.md5s.get(L.name) ?? null,
+          localMd5: ctx.input.digests.get(L.name)?.md5 ?? null,
+          localDigests: ctx.input.digests.get(L.name) ?? null,
           remote: null,
           selection: rename(sel, target),
         });
       } else if (L && R) {
-        const lMd5 = ctx.input.md5s.get(L.name);
-        if (lMd5 === undefined) note('unknown-state', 'U2', 'local file could not be hashed');
-        else if (localMatchesRemote(lMd5, null, R)) {
+        const lDigests = ctx.input.digests.get(L.name);
+        if (lDigests === undefined) note('unknown-state', 'U2', 'local file could not be hashed');
+        else if (localMatchesRemote(lDigests, null, R)) {
           out.actions.push({
             ...base,
             kind: 'adopt',
             rule: 'U2',
             key: R.key,
             local: L,
-            localMd5: lMd5,
+            localMd5: lDigests.md5,
+            localDigests: lDigests,
             remote: R,
             selection: rename(sel, R.key),
           });
@@ -192,7 +200,8 @@ export function planUntracked(ctx: PlanContext, claims: Claims): UntrackedResult
             rule: 'U2',
             key: R.key,
             local: L,
-            localMd5: lMd5,
+            localMd5: lDigests.md5,
+            localDigests: lDigests,
             remote: R,
             updateRemote: true,
             selection: rename(sel, R.key),

@@ -32,9 +32,17 @@ const pairSchema = z.object({
   lastAppliedRunAt: z.string().nullable(),
   firstAppliedRunAt: z.string().nullable(),
   nativeBaselineDone: z.boolean().default(false),
+  // Added in version 2 (OneDrive sync spec §4.5); version-1 files start empty.
+  remoteCursor: z.string().nullable().default(null),
+  remoteDeletedIds: z.array(z.string()).default([]),
 });
 
-const recordSchema = z.object({
+/** The pair file version this binary writes; a higher one comes from a newer release. */
+const PAIR_FILE_VERSION = 2;
+
+const contentHash = z.object({ kind: z.enum(['md5', 'quickXor']), value: z.string() });
+
+const recordFields = {
   remoteId: z.string().min(1),
   path: z.string().min(1),
   localName: z.string().min(1),
@@ -44,20 +52,44 @@ const recordSchema = z.object({
   localSize: z.number(),
   localMtimeMs: z.number(),
   localCtimeMs: z.number(),
-  remoteMd5: z.string().nullable(),
   remoteSize: z.number().nullable(),
   remoteModifiedTime: z.string(),
   native: z.object({ mimeType: z.string(), exportFormat }).nullable(),
   remoteOnly: z.boolean(),
   restorePending: z.boolean(),
   remoteTrashed: z.boolean(),
-});
+};
 
 const pairFileSchema = z.object({
+  version: z.literal(2),
+  pair: pairSchema,
+  records: z.array(z.object({ ...recordFields, remoteHash: contentHash.nullable() })),
+});
+
+/** Version 1 (before OneDrive sync): `remoteMd5` instead of `remoteHash` (spec §4.5). */
+const pairFileV1Schema = z.object({
   version: z.literal(1),
   pair: pairSchema,
-  records: z.array(recordSchema),
+  records: z.array(z.object({ ...recordFields, remoteMd5: z.string().nullable() })),
 });
+
+/** Reads a stored pair file; version 1 is migrated in memory and saved as version 2. */
+function parsePairFile(
+  json: unknown,
+): { success: true; data: PairFile } | { success: false; error: z.ZodError } {
+  if ((json as { version?: unknown } | null)?.version !== 1) return pairFileSchema.safeParse(json);
+  // A version-1 file is reported against the version-1 schema, not as a version mismatch.
+  const v1 = pairFileV1Schema.safeParse(json);
+  if (!v1.success) return v1;
+  return pairFileSchema.safeParse({
+    ...v1.data,
+    version: 2,
+    records: v1.data.records.map(({ remoteMd5, ...r }) => ({
+      ...r,
+      remoteHash: remoteMd5 === null ? null : { kind: 'md5', value: remoteMd5 },
+    })),
+  });
+}
 
 export interface PairStoreOptions {
   dir: string;
@@ -120,7 +152,13 @@ export class PairStore {
     } catch (err) {
       throw new ValidationError(`Sync pair file for "${name}" is not valid JSON`, { cause: err });
     }
-    const parsed = pairFileSchema.safeParse(json);
+    const version = (json as { version?: unknown } | null)?.version;
+    if (typeof version === 'number' && version > PAIR_FILE_VERSION) {
+      throw new ValidationError(
+        `Sync pair file for "${name}": this pair was saved by a newer marvin-drive; update it`,
+      );
+    }
+    const parsed = parsePairFile(json);
     if (!parsed.success) {
       throw new ValidationError(`Sync pair file for "${name}" is invalid: ${parsed.error.message}`);
     }

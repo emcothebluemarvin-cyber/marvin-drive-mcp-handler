@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brakeFor, computePlanId, plan } from '../planner.js';
+import { buildReport } from '../report.js';
 import type { Action } from '../types.js';
 import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
-import { planInput } from './plan-input.js';
+import { md5Digests, planInput } from './plan-input.js';
 
 function trash(kind: 'trash-remote' | 'trash-local', n: number): Action[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -38,6 +39,45 @@ describe('plan composition', () => {
       ['download-new', 'a.pdf'],
       ['trash-local', 'b.pdf'],
     ]);
+  });
+
+  it('reports OneNote, special and shared OneDrive items as ignored (spec §4.2)', () => {
+    const p = plan(
+      planInput({
+        ignored: [
+          { id: 'n1', path: 'Notes', reason: 'onenote', isFolder: false },
+          { id: 'v1', path: 'Personal Vault', reason: 'special', isFolder: false },
+          { id: 'x1', path: 'From Ann', reason: 'shared', isFolder: false },
+        ],
+      }),
+    );
+    expect(p.notes.map((n) => [n.code, n.path, n.message])).toEqual([
+      ['ignored', 'Notes', 'OneNote notebook, cannot be synced'],
+      ['ignored', 'Personal Vault', 'special item, cannot be synced'],
+      ['ignored', 'From Ann', 'shared item, out of scope'],
+    ]);
+    const report = buildReport('docs', p, { dryRun: true });
+    expect(report.warnings).toContainEqual({
+      path: 'Notes',
+      code: 'ignored',
+      message: 'OneNote notebook, cannot be synced',
+    });
+  });
+
+  it('a tracked file that became a OneNote item is unknown with that text', () => {
+    const p = plan(
+      planInput({
+        records: [record('n1', 'a.one')],
+        local: [localEntry('a.one')],
+        ignored: [{ id: 'n1', path: 'a.one', reason: 'onenote', isFolder: false }],
+      }),
+    );
+    expect(p.notes).toContainEqual(
+      expect.objectContaining({
+        code: 'unknown-state',
+        message: 'OneNote notebook, cannot be synced',
+      }),
+    );
   });
 
   it('reports native-unsupported and unrepresentable Drive files', () => {
@@ -197,9 +237,9 @@ describe('planId (spec §5)', () => {
 
   it('changes when content changes', () => {
     const changed = input();
-    const md5s = new Map(changed.md5s);
-    md5s.set('a.pdf', 'local-2');
-    expect(plan({ ...changed, md5s }).planId).not.toBe(plan(input()).planId);
+    const digests = new Map(changed.digests);
+    digests.set('a.pdf', md5Digests('local-2'));
+    expect(plan({ ...changed, digests }).planId).not.toBe(plan(input()).planId);
   });
 });
 

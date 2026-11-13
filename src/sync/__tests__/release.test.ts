@@ -1,6 +1,23 @@
+import { createHash } from 'node:crypto';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { selectReleasable, type ReleaseSelection } from '../release.js';
-import { localEntry, nativeEntry, nativeRecord, record, remoteEntry } from './fixtures.js';
+import type { SyncRemote } from '../remote/sync-remote.js';
+import { createAudit, createFakeDrive, silentLogger } from '../../files/__tests__/fakes.js';
+import { applyRelease, selectReleasable, type ReleaseSelection } from '../release.js';
+import { binary } from './drive-tree.js';
+import { googleRemoteOver } from './fake-remote.js';
+import {
+  localEntry,
+  makePairFile,
+  nativeEntry,
+  nativeRecord,
+  dirTrash,
+  record,
+  refuseTrash,
+  remoteEntry,
+} from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
 
 const A = record('r1', 'a.pdf');
@@ -23,6 +40,59 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
     expect(eligible(r)).toEqual([['a.pdf', 'present']]);
     expect(r.skipped.map((s) => s.path)).toEqual(['b.pdf', 'c.pdf']);
     expect(r.skipped[1]?.reason).toMatch(/name it in paths/);
+  });
+  it('a file the remote reports no hash for is refused with that reason (OneDrive)', () => {
+    const r = sel(
+      {
+        records: [A],
+        local: [localEntry('a.pdf')],
+        remote: [remoteEntry('r1', 'a.pdf', { hash: null })],
+        remoteHashKind: 'quickXor',
+        remoteProvider: 'microsoft',
+      },
+      { paths: ['a.pdf'] },
+    );
+    expect(r.eligible).toEqual([]);
+    expect(r.skipped).toEqual([
+      {
+        path: 'a.pdf',
+        reason: 'OneDrive reports no hash for this file; it cannot be released safely',
+      },
+    ]);
+  });
+  it('refusal texts name OneDrive on a OneDrive pair (Google texts unchanged)', () => {
+    const od = { remoteHashKind: 'quickXor' as const, remoteProvider: 'microsoft' as const };
+    const hash = { kind: 'quickXor' as const, value: 'QX-remote' };
+    const notInSync = sel(
+      {
+        records: [record('r1', 'a.pdf', { remoteHash: hash })],
+        local: [localEntry('a.pdf')],
+        remote: [remoteEntry('r1', 'a.pdf', { hash })],
+        digests: [['a.pdf', { md5: 'md5-r1', remote: { kind: 'quickXor', value: 'QX-local' } }]],
+        ...od,
+      },
+      { paths: ['a.pdf'] },
+    );
+    expect(notInSync.skipped[0]?.reason).toBe(
+      'not in sync (changed locally or on OneDrive); run sync_run first',
+    );
+    const remoteOnly = sel(
+      { records: [record('r1', 'a.pdf', { remoteOnly: true })], ...od },
+      { paths: ['a.pdf'] },
+    );
+    expect(remoteOnly.skipped[0]?.reason).toBe('already in OneDrive only');
+    const moved = sel(
+      { records: [A], local: [localEntry('a.pdf')], remote: [remoteEntry('r1', 'b.pdf')], ...od },
+      { paths: ['a.pdf'] },
+    );
+    expect(moved.skipped[0]?.reason).toBe(
+      'moved or renamed on OneDrive since the last sync; run sync_run first',
+    );
+    const google = sel(
+      { records: [record('r1', 'a.pdf', { remoteOnly: true })] },
+      { paths: ['a.pdf'] },
+    );
+    expect(google.skipped[0]?.reason).toBe('already in Drive only');
   });
   it('binary needs L = record = Drive md5; native needs L = last export', () => {
     const r = sel(
@@ -135,5 +205,90 @@ describe('selectReleasable (spec §10, addendum §3)', () => {
   it('all: true leaves remote-only records out entirely', () => {
     const r = sel({ records: [{ ...A, remoteOnly: true }], remote: [RA] }, { all: true });
     expect(r).toEqual({ eligible: [], skipped: [] });
+  });
+});
+
+describe('applyRelease re-reads R through the remote', () => {
+  it('refuses a file moved in Drive since the scan; nothing is saved or trashed', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockResolvedValueOnce({
+      ...binary('r1', 'a.pdf', 'elsewhere'),
+      md5Checksum: RA.hash?.value,
+      modifiedTime: RA.modifiedTime,
+    });
+    const saves: unknown[] = [];
+    const file = makePairFile({}, [A]);
+    const out = await applyRelease(
+      {
+        remote: googleRemoteOver(drive),
+        audit: createAudit(),
+        logger: silentLogger(),
+        trash: refuseTrash,
+        save: async (f) => {
+          saves.push(f);
+        },
+      },
+      file,
+      [{ record: A, remote: RA, kind: 'deleted', localName: null }],
+    );
+    expect(out.failed).toEqual([
+      { path: 'a.pdf', reason: 'a.pdf changed, moved or was trashed in Drive since the scan' },
+    ]);
+    expect(saves).toEqual([]);
+    expect(drive.getFile).toHaveBeenCalledWith('r1', expect.stringContaining('md5Checksum'));
+  });
+});
+
+describe('applyRelease re-hashes L with the remote hash kind (spec §3.1)', () => {
+  const md5 = (t: string): string => createHash('md5').update(t).digest('hex');
+  const qx = (t: string): string => `QX-${md5(t)}`;
+  const digesters = () => {
+    const h = createHash('md5');
+    return { update: (c: Buffer) => void h.update(c), digest: () => `QX-${h.digest('hex')}` };
+  };
+
+  async function releaseOnQuickXor(localContent: string) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-'));
+    const trashDir = await mkdtemp(path.join(os.tmpdir(), 'sync-release-qx-trash-'));
+    try {
+      await writeFile(path.join(dir, 'a.pdf'), localContent);
+      const remote = remoteEntry('r1', 'a.pdf', { hash: { kind: 'quickXor', value: qx('hello') } });
+      const rec = record('r1', 'a.pdf', { localMd5: md5('hello'), remoteHash: remote.hash });
+      const drive = createFakeDrive();
+      drive.getFile.mockResolvedValueOnce(binary('r1', 'a.pdf', remote.parentId));
+      const inner = googleRemoteOver(drive);
+      const fake = Object.assign(Object.create(inner) as SyncRemote, {
+        hashKind: 'quickXor' as const,
+        read: async () => ({ ...(await inner.read('r1')), hash: remote.hash }),
+      });
+      const out = await applyRelease(
+        {
+          remote: fake,
+          digesters,
+          audit: createAudit(),
+          logger: silentLogger(),
+          trash: dirTrash(trashDir),
+          save: async () => {},
+        },
+        makePairFile({ localDir: dir }, [rec]),
+        [{ record: rec, remote, kind: 'present', localName: 'a.pdf' }],
+      );
+      return { out, left: await readdir(dir) };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(trashDir, { recursive: true, force: true });
+    }
+  }
+
+  it('releases when the local quickXor digest equals the remote hash', async () => {
+    const { out, left } = await releaseOnQuickXor('hello');
+    expect(out.released).toEqual([{ path: 'a.pdf', status: 'released' }]);
+    expect(left).toEqual([]);
+  });
+
+  it('refuses when the local content changed', async () => {
+    const { out, left } = await releaseOnQuickXor('edited');
+    expect(out.failed).toEqual([{ path: 'a.pdf', reason: 'a.pdf changed locally since the scan' }]);
+    expect(left).toEqual(['a.pdf']);
   });
 });

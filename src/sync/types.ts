@@ -1,11 +1,8 @@
 import type { ExportFormat } from '../files/export-formats.js';
+import type { ContentHash, RemoteUnsupported } from './remote/sync-remote.js';
 
 /** Pair names: lower-case letters, digits and dashes (spec §3). */
 export const PAIR_NAME = /^[a-z0-9-]{1,40}$/;
-
-/** Drive fields every sync read requests (spec §4). */
-export const SYNC_FILE_FIELDS =
-  'id, name, mimeType, md5Checksum, size, modifiedTime, createdTime, parents, trashed, capabilities(canEdit, canTrash, canAddChildren)';
 
 export interface GoogleExportPrefs {
   document: ExportFormat;
@@ -39,6 +36,10 @@ export interface Pair {
   firstAppliedRunAt: string | null;
   /** Addendum §4.1: false until the first applied run that baselined Google-native files. */
   nativeBaselineDone: boolean;
+  /** OneDrive deletion feed cursor (spec §4.1); always null on Google pairs. */
+  remoteCursor: string | null;
+  /** Remote ids the deletion feed reported deleted and not yet acted on; empty on Google. */
+  remoteDeletedIds: string[];
 }
 
 export interface SyncRecord {
@@ -51,7 +52,8 @@ export interface SyncRecord {
   localSize: number;
   localMtimeMs: number;
   localCtimeMs: number;
-  remoteMd5: string | null;
+  /** The remote's hash at the last sync (md5 on Google); null when it reported none. */
+  remoteHash: ContentHash | null;
   remoteSize: number | null;
   remoteModifiedTime: string;
   native: null | { mimeType: string; exportFormat: ExportFormat };
@@ -61,7 +63,7 @@ export interface SyncRecord {
 }
 
 export interface PairFile {
-  version: 1;
+  version: 2;
   pair: Pair;
   records: SyncRecord[];
 }
@@ -95,6 +97,16 @@ export interface OnDiskProbe {
   ino: number;
 }
 
+/**
+ * A local file's digests (OneDrive sync spec §3.1): its md5, and the digest of the remote's
+ * hash kind (the same md5 on Google). `remote` is null only when it was not computed: a
+ * stat-unchanged tracked file on a remote whose kind is not md5 (§3.1 "Stat-unchanged").
+ */
+export interface LocalDigests {
+  md5: string;
+  remote: ContentHash | null;
+}
+
 /** Export settings of a Google-native Drive file (addendum §4.1). */
 export interface NativeInfo {
   mimeType: string;
@@ -111,7 +123,8 @@ export interface RemoteEntry {
   /** Folder ids from the parent up to the pair root (inclusive). */
   ancestorIds: string[];
   mimeType: string;
-  md5: string | null;
+  /** Content hash of a binary file; null for natives and when the remote reports none. */
+  hash: ContentHash | null;
   size: number | null;
   modifiedTime: string;
   createdTime: string;
@@ -119,10 +132,21 @@ export interface RemoteEntry {
   canTrash: boolean;
   /** Google-native file synced as a read-only export; null for binary files. */
   native: NativeInfo | null;
+  /**
+   * OneDrive eTag at scan time, compared at the executor's re-read for files without a hash
+   * (a remote edit can keep modifiedTime). Absent on Google.
+   */
+  version?: string;
 }
 
-export type RemoteIgnoreReason =
-  'native-unsupported' | 'shortcut' | 'unrepresentable' | 'ignored-name';
+export type RemoteIgnoreReason = RemoteUnsupported | 'unrepresentable' | 'ignored-name';
+
+/** Report texts of the OneDrive items that are never synced (OneDrive sync spec §4.2). */
+export const UNSUPPORTED_TEXT: Readonly<Partial<Record<RemoteUnsupported, string>>> = {
+  onenote: 'OneNote notebook, cannot be synced',
+  special: 'special item, cannot be synced',
+  shared: 'shared item, out of scope',
+};
 
 export interface RemoteIgnored {
   id: string;
@@ -180,6 +204,8 @@ export interface Action {
   record: SyncRecord | null;
   local: LocalEntry | null;
   localMd5: string | null;
+  /** The planned local content (md5 and the remote's kind); null when no local file is read. */
+  localDigests?: LocalDigests | null;
   remote: RemoteEntry | null;
   selection: SelectionChange;
   /** move-local: rename in place (case-only change on a case-insensitive volume). */
@@ -217,6 +243,7 @@ export type NoteCode =
   | 'native-local-missing'
   | 'native-trashed-edited'
   | 'remote-only-trashed'
+  | 'remote-name-invalid'
   | 'ignored';
 
 export interface Note {

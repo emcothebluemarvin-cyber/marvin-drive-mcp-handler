@@ -1,13 +1,16 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ProviderNotSupportedError, ValidationError } from '../../errors.js';
+import { ValidationError } from '../../errors.js';
 import { createAudit, createRunner, noSleep, silentLogger } from '../../files/__tests__/fakes.js';
+import type { CloudFolder } from '../cloud-folders.js';
+import { SyncRootError } from '../errors.js';
 import { PairStore, markerName, probeCaseInsensitive } from '../pair-store.js';
 import { SyncService } from '../sync-service.js';
 import { record, refuseTrash } from './fixtures.js';
 import { memoryDrive, type MemoryDrive } from './memory-drive.js';
+import { memoryOneDrive, type MemoryOneDrive } from './memory-onedrive.js';
 
 let tmp: string;
 let local: string;
@@ -42,7 +45,7 @@ async function createDocs(): Promise<void> {
 }
 
 describe('createPair', () => {
-  it('rejects an unsupported account without touching the folder', async () => {
+  it('an account that cannot be opened fails without touching the folder', async () => {
     const guarded = new SyncService({
       runner: createRunner(mem.drive),
       audit,
@@ -50,13 +53,13 @@ describe('createPair', () => {
       logger: silentLogger(),
       store,
       trash: refuseTrash,
-      assertSupportedAccount: async (ref) => {
-        throw new ProviderNotSupportedError(ref ?? 'default');
+      openOneDrive: async (ref) => {
+        throw new ValidationError(`cannot open ${ref ?? 'default'}`);
       },
     });
     await expect(
       guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT', account: 'ms' }),
-    ).rejects.toThrow(ProviderNotSupportedError);
+    ).rejects.toThrow('cannot open ms');
     expect(await readdir(local)).toEqual([]);
   });
 
@@ -261,7 +264,7 @@ describe('select', () => {
       localSize: 1,
       localMtimeMs: 1,
       localCtimeMs: 1,
-      remoteMd5: 'x',
+      remoteHash: { kind: 'md5', value: 'x' },
       remoteSize: 1,
       remoteModifiedTime: 't',
       native: null,
@@ -345,5 +348,160 @@ describe('scan', () => {
     const limited = await sync.scan({ name: 'docs', limit: 1 });
     expect(limited.entries).toHaveLength(1);
     expect(limited.truncated).toBe(true);
+  });
+});
+
+describe('Microsoft pairs (OneDrive sync spec §4.1, §4.4)', () => {
+  let od: MemoryOneDrive;
+  let ms: SyncService;
+  beforeEach(() => {
+    od = memoryOneDrive();
+    ms = new SyncService({
+      runner: createRunner(mem.drive),
+      audit,
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      trash: refuseTrash,
+      openOneDrive: async (ref) => (ref === 'ms' ? od.remote() : null),
+    });
+  });
+
+  it('routes by account: a OneDrive pair starts its deletion cursor, no native baseline', async () => {
+    const docs = od.addFolder(od.rootId, 'Docs');
+    const summary = await ms.createPair({
+      name: 'docs',
+      localDir: local,
+      remoteFolderId: docs.id,
+      account: 'ms',
+    });
+    expect(summary).toMatchObject({ account: 'ms', remoteFolderId: docs.id });
+    const { pair } = await store.load('docs');
+    expect(pair.nativeBaselineDone).toBe(true);
+    expect(pair.remoteCursor).toMatch(/\/me\/drive\/root\/delta\?token=/);
+    expect(pair.remoteDeletedIds).toEqual([]);
+    expect(od.calls.some((c) => c.path === '/me/drive/root/delta?token=latest')).toBe(true);
+    // A Google account on the same service still gets a Google pair.
+    const g = path.join(tmp, 'G');
+    await mkdir(g);
+    await ms.createPair({ name: 'gdocs', localDir: g, remoteFolderId: 'ROOT' });
+    expect((await store.load('gdocs')).pair).toMatchObject({
+      remoteCursor: null,
+      nativeBaselineDone: false,
+    });
+  });
+
+  it('stores the real id when the pair root is given as root', async () => {
+    await ms.createPair({ name: 'docs', localDir: local, remoteFolderId: 'root', account: 'ms' });
+    expect((await store.load('docs')).pair.remoteFolderId).toBe(od.rootId);
+  });
+
+  it('creates a named root folder on OneDrive; refuses a name OneDrive cannot take', async () => {
+    await ms.createPair({ name: 'docs', localDir: local, remoteFolderName: 'Sync', account: 'ms' });
+    const created = [...od.items.values()].find((i) => i.name === 'Sync');
+    expect((await store.load('docs')).pair.remoteFolderId).toBe(created?.id);
+    const other = path.join(tmp, 'Other');
+    await mkdir(other);
+    await expect(
+      ms.createPair({ name: 'other', localDir: other, remoteFolderName: 'a:b', account: 'ms' }),
+    ).rejects.toThrow('remoteFolderName cannot be created on OneDrive');
+    expect(await readdir(other)).toEqual([]);
+  });
+
+  it('rejects googleExport on a Microsoft account without touching the folder', async () => {
+    await expect(
+      ms.createPair({
+        name: 'docs',
+        localDir: local,
+        remoteFolderId: 'root',
+        account: 'ms',
+        googleExport: { document: 'pdf' },
+      }),
+    ).rejects.toThrow('googleExport is for Google accounts only');
+    expect(await readdir(local)).toEqual([]);
+  });
+
+  it('a failing feed start creates nothing (no marker, no pair file)', async () => {
+    const failing = new SyncService({
+      runner: createRunner(mem.drive),
+      audit,
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      trash: refuseTrash,
+      openOneDrive: async () => {
+        const remote = od.remote();
+        const feed = remote.deletionFeed();
+        feed.start = async () => {
+          throw new ValidationError('delta is down');
+        };
+        remote.deletionFeed = () => feed;
+        return remote;
+      },
+    });
+    await expect(
+      failing.createPair({ name: 'docs', localDir: local, remoteFolderId: 'root', account: 'ms' }),
+    ).rejects.toThrow('delta is down');
+    expect(await readdir(local)).toEqual([]);
+    expect(await store.list()).toEqual([]);
+  });
+
+  it('an unknown OneDrive folder reads "not found on OneDrive"', async () => {
+    await expect(
+      ms.createPair({ name: 'docs', localDir: local, remoteFolderId: 'nope', account: 'ms' }),
+    ).rejects.toThrow('OneDrive folder nope not found on OneDrive');
+    expect(await readdir(local)).toEqual([]);
+  });
+});
+
+describe('cloud desktop folder guard (OneDrive sync spec §6)', () => {
+  const withCloud = (folders: () => Promise<CloudFolder[]>): SyncService =>
+    new SyncService({
+      runner: createRunner(mem.drive),
+      audit,
+      retry: noSleep,
+      logger: silentLogger(),
+      store,
+      trash: refuseTrash,
+      clock: () => new Date('2026-11-03T12:00:00.000Z'),
+      cloudFolders: folders,
+    });
+  const message = (dir: string, client: string): string =>
+    `${dir} is synced by the ${client} desktop app; pick a folder outside it so the two do not sync the same files`;
+
+  it('refuses a localDir inside a OneDrive folder; nothing is written', async () => {
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [{ path: path.dirname(real), client: 'OneDrive' }]);
+    await expect(
+      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
+    ).rejects.toThrow(new ValidationError(message(real, 'OneDrive')));
+    expect(await readdir(local)).toEqual([]);
+    expect(await store.exists('docs')).toBe(false);
+  });
+
+  it('refuses a localDir that contains a Google Drive folder', async () => {
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [
+      { path: path.join(real, 'My Drive'), client: 'Google Drive' },
+    ]);
+    await expect(
+      guarded.createPair({ name: 'docs', localDir: local, remoteFolderId: 'ROOT' }),
+    ).rejects.toThrow(message(real, 'Google Drive'));
+  });
+
+  it('an existing pair inside one: listed with a warning; run and repair-marker refuse', async () => {
+    await createDocs();
+    const real = await realpath(local);
+    const guarded = withCloud(async () => [{ path: real, client: 'OneDrive' }]);
+    expect(await guarded.listPairs()).toEqual([
+      expect.objectContaining({ name: 'docs', warning: message(real, 'OneDrive') }),
+    ]);
+    expect((await sync.listPairs())[0]).not.toHaveProperty('warning');
+    await expect(guarded.run({ name: 'docs' })).rejects.toThrow(
+      new SyncRootError(message(real, 'OneDrive')),
+    );
+    await expect(guarded.repairMarker('docs', async () => true)).rejects.toThrow(
+      message(real, 'OneDrive'),
+    );
   });
 });

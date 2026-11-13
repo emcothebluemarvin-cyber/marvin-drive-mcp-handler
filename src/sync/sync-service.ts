@@ -2,7 +2,15 @@ import { rm } from 'node:fs/promises';
 import { OperationRunner, type OperationDeps } from '../core/operation.js';
 import { ValidationError } from '../errors.js';
 import { logger as defaultLogger, type Logger } from '../logger.js';
+import {
+  HISTORY_UNAVAILABLE,
+  pruneEvidence,
+  storeFeed,
+  type FeedRead,
+} from './deletion-evidence.js';
+import { findCloudFolders, type CloudFolder } from './cloud-folders.js';
 import { Executor } from './executor.js';
+import { defaultDigesters, type DigesterFactory } from './local-scanner.js';
 import {
   checkRoots,
   createPair,
@@ -14,6 +22,9 @@ import {
   type SyncEnv,
 } from './pair-admin.js';
 import type { PairStore } from './pair-store.js';
+import { GoogleSyncRemote } from './remote/google-remote.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { SyncRemote } from './remote/sync-remote.js';
 import { absInside } from './paths.js';
 import { plan as makePlan } from './planner.js';
 import { buildReport, type ReportOptions } from './report.js';
@@ -53,8 +64,15 @@ export interface SyncServiceDeps extends OperationDeps {
   /** Moves local files to the OS trash (the app passes `createLocalTrash()`; tests pass a fake, never the real trash). */
   trash: LocalTrash;
   clock?: () => Date;
-  /** Rejects accounts sync cannot serve (the app rejects Microsoft accounts). */
-  assertSupportedAccount?: (ref: string | undefined) => Promise<void>;
+  /**
+   * Opens the OneDrive remote of a Microsoft account, or null for any other account (the
+   * app wires it; without it every pair is a Google pair).
+   */
+  openOneDrive?: (accountRef: string | undefined) => Promise<SyncRemote | null>;
+  /** Digests of non-md5 remote hash kinds (default: built-in digesters). */
+  digesters?: DigesterFactory;
+  /** Cloud desktop client folders (default: detected on this machine, spec §6). */
+  cloudFolders?: () => Promise<CloudFolder[]>;
 }
 
 export interface RunInput {
@@ -87,12 +105,17 @@ export class SyncService {
     this.log = deps.logger ?? defaultLogger;
     this.clock = deps.clock ?? ((): Date => new Date());
     this.env = {
-      ops: this.ops,
+      audit: deps.audit,
       log: this.log,
       clock: this.clock,
       store: deps.store,
-      assertSupportedAccount:
-        deps.assertSupportedAccount ?? ((): Promise<void> => Promise.resolve()),
+      remoteFor: async (pair): Promise<SyncRemote> =>
+        (await deps.openOneDrive?.(pair.account)) ??
+        new GoogleSyncRemote(this.ops, pair.account, pair.googleExport),
+      openRemote: async (ref, prefs): Promise<SyncRemote> =>
+        (await deps.openOneDrive?.(ref)) ?? GoogleSyncRemote.open(this.ops, ref, prefs),
+      digesters: deps.digesters ?? defaultDigesters,
+      cloudFolders: deps.cloudFolders ?? ((): Promise<CloudFolder[]> => findCloudFolders()),
     };
   }
 
@@ -133,9 +156,9 @@ export class SyncService {
   /** Spec §5 steps 3–5: scan, hash, probe, plan. */
   private async buildPlan(
     file: PairFile,
-  ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan }> {
-    const { input, local, remote } = await gatherInput(this.env, file);
-    return { plan: makePlan(input), remote, local };
+  ): Promise<{ plan: Plan; remote: RemoteScan; local: LocalScan; feed: FeedRead | null }> {
+    const { input, local, remote, feed } = await gatherInput(this.env, file);
+    return { plan: makePlan(input), remote, local, feed };
   }
 
   private async removeStaleParts(pair: Pair, local: LocalScan): Promise<void> {
@@ -158,8 +181,15 @@ export class SyncService {
       const startedAt = this.clock().toISOString();
       const file = await this.store.load(input.name);
       await checkRoots(this.env, file.pair);
-      const { plan, remote, local } = await this.buildPlan(file);
+      const { plan, remote, local, feed } = await this.buildPlan(file);
+      const syncRemote = await this.env.remoteFor(file.pair);
       const name = file.pair.name;
+      // Spec §4.1: the run persists the feed (dry run or apply), cursor and evidence together.
+      // An apply's first executor save carries them; the other paths save them alone.
+      if (feed) storeFeed(file, feed);
+      const saveFeedOnly = async (): Promise<void> => {
+        if (feed) await this.store.save(file);
+      };
       const confirm = input.confirmRemoteTrash ?? false;
       const awaiting = confirm ? [] : plan.actions.filter((a) => a.reason === 'local-deleted');
       const pendingConfirmation = awaiting.map((a) => ({
@@ -172,10 +202,21 @@ export class SyncService {
         if (awaiting.length > 0 && plan.brake.tripped && !plan.brakeUnconfirmed.tripped) {
           r.warnings.push(CONFIRM_NEEDS_MASS_DELETE);
         }
+        if (feed?.unavailable) {
+          r.warnings.push({
+            path: '',
+            code: 'deletion-history-unavailable',
+            message: HISTORY_UNAVAILABLE,
+          });
+        }
         return r;
       };
-      if (!apply) return report({ dryRun: true });
+      if (!apply) {
+        await saveFeedOnly();
+        return report({ dryRun: true });
+      }
       if (input.planId !== undefined && input.planId !== plan.planId) {
+        await saveFeedOnly();
         return report({
           dryRun: true,
           aborted: {
@@ -188,23 +229,26 @@ export class SyncService {
       const brake = confirm ? plan.brake : plan.brakeUnconfirmed;
       if (brake.tripped && !input.allowMassDelete) {
         const { trashRemote, trashLocal, tracked } = brake;
+        await saveFeedOnly();
         return report({
           dryRun: true,
           aborted: {
             reason: 'mass-delete',
-            message: `Would move ${trashRemote} Drive file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
+            message: `Would move ${trashRemote} ${providerLabel(syncRemote.provider)} file(s) and ${trashLocal} local file(s) to the trash out of ${tracked} tracked; nothing was applied. Re-run with allowMassDelete if this is intended.`,
           },
         });
       }
       await this.removeStaleParts(file.pair, local);
       const executor = new Executor(
         {
-          ops: this.ops,
+          remote: syncRemote,
+          digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,
           clock: this.clock,
           save: (f): Promise<void> => this.store.save(f),
           trash: this.deps.trash,
+          ...(feed ? { evidence: feed.evidence } : {}),
         },
         file,
         remote.folders,
@@ -230,6 +274,7 @@ export class SyncService {
         ].sort();
         file.pair.nativeBaselineDone = true;
       }
+      pruneEvidence(file);
       await this.store.save(file);
       const done = new Set(outcomes.filter((o) => o.status === 'done').map((o) => o.path));
       const inSync = new Set(plan.inSync);
@@ -250,7 +295,11 @@ export class SyncService {
     return this.store.withLock(input.name, async () => {
       const file = await this.store.load(input.name);
       await checkRoots(this.env, file.pair);
-      const { input: planInput } = await gatherInput(this.env, file);
+      const { input: planInput } = await gatherInput(
+        this.env,
+        file,
+        all ? 'all' : (input.paths ?? []),
+      );
       const selection = await withoutTrash(
         selectReleasable(planInput, all ? { all } : { paths: input.paths ?? [] }),
         file.pair.localDir,
@@ -272,7 +321,8 @@ export class SyncService {
       }
       const done = await applyRelease(
         {
-          ops: this.ops,
+          remote: await this.env.remoteFor(file.pair),
+          digesters: this.env.digesters,
           audit: this.deps.audit,
           logger: this.log,
           trash: this.deps.trash,

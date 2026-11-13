@@ -12,7 +12,7 @@ import {
 import { MicrosoftAuth } from './auth/microsoft-auth.js';
 import { PendingLoginStore } from './auth/pending-login.js';
 import { FileAuditLog } from './audit/audit-log.js';
-import { AccountRegistry, isMicrosoft } from './config/account-registry.js';
+import { AccountRegistry, isMicrosoft, type AccountRecord } from './config/account-registry.js';
 import { loadClientSecret, type ClientCredentials } from './config/client-secret.js';
 import { loadMicrosoftClientId } from './config/microsoft-client.js';
 import { resolvePaths, type Paths } from './config/paths.js';
@@ -20,8 +20,9 @@ import { DocsService } from './content/docs-service.js';
 import { SheetsService } from './content/sheets-service.js';
 import { SlidesService } from './content/slides-service.js';
 import { DriveClientFactory } from './drive/client-factory.js';
-import { ProviderNotSupportedError } from './errors.js';
 import { PairStore } from './sync/pair-store.js';
+import { OneDriveSyncRemote } from './sync/remote/onedrive-remote.js';
+import type { SyncRemote } from './sync/remote/sync-remote.js';
 import { SyncService } from './sync/sync-service.js';
 import { createLocalTrash } from './sync/trash.js';
 import { FileRouter } from './files/file-router.js';
@@ -42,6 +43,8 @@ export interface App {
   sheets: SheetsService;
   slides: SlidesService;
   sync: SyncService;
+  /** The OneDrive sync remote of a Microsoft account, null for others (also used by the E2E). */
+  openOneDrive: (accountRef: string | undefined) => Promise<SyncRemote | null>;
   watch: WatchService;
 }
 
@@ -97,18 +100,16 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
   const runner = new DriveClientFactory(auth);
   const audit = new FileAuditLog(paths.audit);
   const googleFiles = new FileService({ runner, audit, downloadsDir: paths.downloadsDir });
+  const graphClient = (record: AccountRecord): GraphClient =>
+    new GraphClient({
+      alias: record.alias,
+      accessToken: (tokenOptions): Promise<string> => microsoft.accessToken(record, tokenOptions),
+    });
   const files = new FileRouter({
     registry,
     google: googleFiles,
     microsoft: new OneDriveFileService({
-      clients: async (alias): Promise<GraphClient> => {
-        const record = await registry.resolve(alias);
-        return new GraphClient({
-          alias: record.alias,
-          accessToken: (tokenOptions): Promise<string> =>
-            microsoft.accessToken(record, tokenOptions),
-        });
-      },
+      clients: async (alias): Promise<GraphClient> => graphClient(await registry.resolve(alias)),
       audit,
       downloadsDir: paths.downloadsDir,
     }),
@@ -116,15 +117,19 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
   const docs = new DocsService({ runner, audit });
   const sheets = new SheetsService({ runner, audit });
   const slides = new SlidesService({ runner, audit });
+  // OneDrive sync spec §2.2: sync picks the remote from the account (content and watch keep
+  // refusing Microsoft accounts).
+  const openOneDrive = async (ref: string | undefined): Promise<SyncRemote | null> => {
+    const account = await auth.resolveAccount(ref);
+    if (!isMicrosoft(account)) return null;
+    return new OneDriveSyncRemote(graphClient(account), account.alias);
+  };
   const sync = new SyncService({
     runner,
     audit,
     store: new PairStore({ dir: paths.syncDir }),
     trash: createLocalTrash(),
-    assertSupportedAccount: async (ref): Promise<void> => {
-      const account = await auth.resolveAccount(ref);
-      if (isMicrosoft(account)) throw new ProviderNotSupportedError(account.alias);
-    },
+    openOneDrive,
   });
   const watch = new WatchService({
     store: new WatchStore({ dir: paths.watchDir }),
@@ -135,5 +140,5 @@ export function buildApp(env: NodeJS.ProcessEnv = process.env, options: BuildApp
     }),
     intervalMs: pollIntervalMs(env),
   });
-  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, watch };
+  return { paths, auth, files, googleFiles, docs, sheets, slides, sync, openOneDrive, watch };
 }

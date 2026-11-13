@@ -52,6 +52,67 @@ describe('PairStore', () => {
     expect((await store().load('docs')).pair.nativeBaselineDone).toBe(false);
   });
 
+  it('loads a version-1 file (remoteMd5) as version 2 and saves it as version 2', async () => {
+    const file = makePairFile({}, [record('r1', 'a.pdf'), record('r2', 'b.pdf')]);
+    const v1 = {
+      ...file,
+      version: 1,
+      records: file.records.map(({ remoteHash, ...r }, i) => ({
+        ...r,
+        remoteMd5: i === 0 ? (remoteHash?.value ?? null) : null,
+      })),
+    };
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
+    const s = store();
+    const loaded = await s.load('docs');
+    expect(loaded.version).toBe(2);
+    expect(loaded.records.map((r) => r.remoteHash)).toEqual([
+      { kind: 'md5', value: 'md5-r1' },
+      null,
+    ]);
+    expect(loaded.records[0]).not.toHaveProperty('remoteMd5');
+    await s.save(loaded);
+    const saved = JSON.parse(await readFile(path.join(dir, 'docs.json'), 'utf8'));
+    expect(saved.version).toBe(2);
+    expect(saved.records[0].remoteHash).toEqual({ kind: 'md5', value: 'md5-r1' });
+  });
+
+  it('gives a version-1 pair an empty deletion cursor and evidence', async () => {
+    const file = makePairFile();
+    const pair: Record<string, unknown> = { ...file.pair };
+    delete pair.remoteCursor;
+    delete pair.remoteDeletedIds;
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...file, version: 1, pair }));
+    expect((await store().load('docs')).pair).toMatchObject({
+      remoteCursor: null,
+      remoteDeletedIds: [],
+    });
+  });
+
+  it('reports an invalid version-1 file against the version-1 schema', async () => {
+    const file = makePairFile({}, [record('r1', 'a.pdf')]);
+    const v1 = {
+      ...file,
+      version: 1,
+      records: file.records.map(({ remoteHash: _hash, ...r }) => ({ ...r, remoteMd5: 42 })),
+    };
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify(v1));
+    const load = store().load('docs');
+    await expect(load).rejects.toThrow('remoteMd5');
+    await expect(load).rejects.not.toThrow('version');
+  });
+
+  it('refuses a pair file from a newer version with an update hint', async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'docs.json'), JSON.stringify({ ...makePairFile(), version: 3 }));
+    await expect(store().load('docs')).rejects.toThrow(
+      'this pair was saved by a newer marvin-drive; update it',
+    );
+  });
+
   it('tightens an existing sync dir to 0700', async () => {
     await mkdir(dir, { recursive: true });
     await chmod(dir, 0o755);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CANDIDATE_CAP, planUntracked, type Claims } from '../plan-untracked.js';
+import { plan } from '../planner.js';
 import { buildContext } from '../resolve.js';
 import { localEntry, nativeEntry, remoteEntry } from './fixtures.js';
 import { planInput, type InputOptions } from './plan-input.js';
@@ -276,7 +277,11 @@ describe('review regressions', () => {
       md5s: [['docs/a.pdf', 'm']],
     });
     expect(result.actions).toEqual([]);
-    expect(result.notes[0]).toMatchObject({ code: 'ambiguous', rule: 'U1' });
+    expect(result.notes[0]).toMatchObject({
+      code: 'ambiguous',
+      rule: 'U1',
+      message: 'a Drive folder name differs only in case',
+    });
   });
 
   it('U8 counts ctime: a copied file with an old mtime is still a candidate', () => {
@@ -344,5 +349,96 @@ describe('untracked Google-native files (spec §6.5, §6.6)', () => {
       { kind: 'export-new', rule: 'U3', key: 'Plan.docx', remote: { id: 'g1' }, selection: {} },
     ]);
     expect(result.candidates.remote).toEqual([]);
+  });
+});
+
+describe('remote names (OneDrive sync spec §4.3)', () => {
+  it('U1 on OneDrive: a refused file name is a note, the file stays local', () => {
+    const result = run({
+      selection: ['a:b.txt', 'ok.txt'],
+      local: [localEntry('a:b.txt'), localEntry('ok.txt')],
+      remoteProvider: 'microsoft',
+    });
+    expect(result.actions.map((a) => a.key)).toEqual(['ok.txt']);
+    expect(result.notes).toEqual([
+      {
+        code: 'remote-name-invalid',
+        path: 'a:b.txt',
+        rule: 'U1',
+        message:
+          'cannot be uploaded to OneDrive: the name contains a character OneDrive does not allow (" * : < > ? / \\ |)',
+      },
+    ]);
+  });
+
+  it('U1 on OneDrive: a path of 400 characters or more is a remote-name-invalid note', () => {
+    const key = `${'d'.repeat(200)}/${'f'.repeat(199)}`;
+    const result = run({
+      selection: [key],
+      local: [localEntry(key)],
+      remoteProvider: 'microsoft',
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes).toEqual([
+      {
+        code: 'remote-name-invalid',
+        path: key,
+        rule: 'U1',
+        message:
+          'cannot be uploaded to OneDrive: the path is 400 characters or longer (OneDrive allows fewer than 400)',
+      },
+    ]);
+  });
+
+  it('a refused folder segment is reported once for its subtree', () => {
+    const p = plan(
+      planInput({
+        selection: ['CON/a.txt', 'CON/b.txt', 'CON/deep/c.txt'],
+        local: [localEntry('CON/a.txt'), localEntry('CON/b.txt'), localEntry('CON/deep/c.txt')],
+        remoteProvider: 'microsoft',
+      }),
+    );
+    expect(p.actions).toEqual([]);
+    expect(p.notes.map((n) => [n.code, n.path])).toEqual([['remote-name-invalid', 'CON']]);
+  });
+
+  it('an existing remote folder is not checked; Google checks no names', () => {
+    const onedrive = run({
+      selection: ['Weird/a.txt'],
+      local: [localEntry('Weird/a.txt')],
+      folders: [['fw', 'Weird']],
+      remoteProvider: 'microsoft',
+    });
+    expect(onedrive.actions.map((a) => a.kind)).toEqual(['upload-new']);
+    const google = run({ selection: ['a:b.txt'], local: [localEntry('a:b.txt')] });
+    expect(google.actions.map((a) => a.kind)).toEqual(['upload-new']);
+  });
+
+  it('on a case-sensitive volume a case-only folder mismatch stays ambiguous on OneDrive too', () => {
+    // Reusing the remote spelling would record Docs/a.txt for the local docs/a.txt, which a
+    // case-sensitive volume never resolves again (see the plan's Chunk 3 decisions).
+    const result = run({
+      pair: { caseInsensitive: false },
+      selection: ['docs/a.txt'],
+      local: [localEntry('docs/a.txt')],
+      folders: [['fd', 'Docs']],
+      remoteProvider: 'microsoft',
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.notes[0]).toMatchObject({
+      code: 'ambiguous',
+      rule: 'U1',
+      message: 'a OneDrive folder name differs only in case',
+    });
+  });
+
+  it('on a case-insensitive volume the remote spelling is reused on OneDrive', () => {
+    const result = run({
+      selection: ['docs/a.txt'],
+      local: [localEntry('docs/a.txt')],
+      folders: [['fd', 'Docs']],
+      remoteProvider: 'microsoft',
+    });
+    expect(result.actions[0]).toMatchObject({ kind: 'upload-new', key: 'Docs/a.txt' });
   });
 });

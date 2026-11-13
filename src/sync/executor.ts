@@ -1,12 +1,15 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditOp, AuditSink } from '../audit/audit-log.js';
-import type { OperationRunner } from '../core/operation.js';
-import type { DriveFile } from '../drive/drive-adapter.js';
-import { AppError, ExportTooLargeError, hasErrorCode } from '../errors.js';
-import { escapeQueryValue } from '../files/query.js';
+import {
+  AppError,
+  ExportTooLargeError,
+  FileLockedError,
+  NameConflictError,
+  hasErrorCode,
+} from '../errors.js';
 import type { Logger } from '../logger.js';
-import { remoteUnchangedSince } from './content-compare.js';
+import { remoteUnchangedSince, sameContent } from './content-compare.js';
 import {
   CollisionError,
   LocalEditKeptError,
@@ -19,32 +22,29 @@ import {
   applySelection,
   conflictName,
   dropRecord,
-  fromDrive,
   fromEntry,
+  fromRemote,
   makeRecord,
   need,
   putRecord,
   statOf,
   type LocalFields,
+  type RemoteFields,
 } from './exec-records.js';
+import { pruneEvidence } from './deletion-evidence.js';
 import { exportNew, exportOver, exportReplace, type ExportHost } from './exec-export.js';
-import { md5File } from './local-scanner.js';
+import { defaultDigesters, hashFileDigests, type DigesterFactory } from './local-scanner.js';
 import { absInside, baseName, parentKey, prepareParent } from './paths.js';
 import { RemoteFolders } from './remote-folders.js';
-import { SYNC_LIST_FIELDS } from './remote-scanner.js';
-import {
-  downloadReplace,
-  moveLocal,
-  placeExclusive,
-  updateContent,
-  uploadNew,
-} from './transfer.js';
+import { providerLabel } from './remote/remote-names.js';
+import type { RemoteItem, SyncRemote } from './remote/sync-remote.js';
+import { downloadReplace, moveLocal, placeExclusive, type DownloadCheck } from './transfer.js';
 import type { LocalTrash } from './trash.js';
 import {
-  SYNC_FILE_FIELDS,
   type Action,
   type ActionKind,
   type ActionOutcome,
+  type LocalDigests,
   type LocalEntry,
   type PairFile,
   type RemoteEntry,
@@ -67,13 +67,26 @@ const MAX_CONFLICT_NAMES = 100;
 export { conflictName } from './exec-records.js';
 
 export interface ExecutorDeps {
-  ops: OperationRunner;
+  /** The pair's remote; every remote read and write goes through it. */
+  remote: SyncRemote;
   audit: AuditSink;
   logger: Logger;
   clock: () => Date;
   save: (file: PairFile) => Promise<void>;
   /** Moves local files to the OS trash (tests pass a fake). */
   trash: LocalTrash;
+  /** Local digests of the remote's hash kind (default: built-in digesters). */
+  digesters?: DigesterFactory;
+  /** OneDrive deletion evidence of this run (spec §4.1); empty on Google. */
+  evidence?: ReadonlySet<string>;
+}
+
+/** Outcomes that skip an action with a message instead of failing it (OneDrive sync spec §5). */
+function skipMessage(err: unknown, label: string): string | null {
+  if (err instanceof TargetChangedError) return err.message;
+  if (err instanceof NameConflictError) return `a file with this name appeared on ${label}`;
+  if (err instanceof FileLockedError) return `open in an Office app on ${label}; try again later`;
+  return null;
 }
 
 /** Executes a plan in spec §7 order, persisting the pair file after every success. */
@@ -86,6 +99,10 @@ export class Executor {
     folders: ReadonlyMap<string, string>,
   ) {
     this.folders = new RemoteFolders(deps, file.pair, folders);
+  }
+
+  private get digesters(): DigesterFactory {
+    return this.deps.digesters ?? defaultDigesters;
   }
 
   private get pair(): PairFile['pair'] {
@@ -114,8 +131,9 @@ export class Executor {
           // N5: whatever went wrong after the local edit was moved aside, name the kept copy.
           const kept = caught instanceof LocalEditKeptError ? { conflictCopy: caught.kept } : {};
           const err = caught instanceof LocalEditKeptError ? caught.original : caught;
-          if (err instanceof TargetChangedError) {
-            outcomes.push({ ...base, ...kept, status: 'skipped', message: err.message });
+          const skip = skipMessage(err, this.label);
+          if (skip !== null) {
+            outcomes.push({ ...base, ...kept, status: 'skipped', message: skip });
           } else if (err instanceof ExportTooLargeError) {
             outcomes.push({
               ...base,
@@ -177,6 +195,8 @@ export class Executor {
 
   /** Atomic pair-file save; a failure aborts the run (see PersistenceError). */
   private async persist(): Promise<void> {
+    // Spec §4.1: a dropped record takes its deletion evidence with it.
+    pruneEvidence(this.file);
     try {
       await this.deps.save(this.file);
     } catch (err) {
@@ -210,8 +230,7 @@ export class Executor {
   private host(): ExportHost {
     return {
       file: this.file,
-      ops: this.deps.ops,
-      logger: this.deps.logger,
+      remote: this.deps.remote,
       clock: this.deps.clock,
       commit: (action, mutate) => this.commit(action, mutate),
       audit: (op, action, remoteId) => this.audit(op, action, remoteId),
@@ -234,17 +253,22 @@ export class Executor {
     return { name, md5, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
   }
 
-  private readRemote(id: string): Promise<DriveFile> {
-    return this.deps.ops.exec(this.pair.account, 'idempotent', id, (ctx) =>
-      ctx.drive.getFile(id, SYNC_FILE_FIELDS),
-    );
+  /** "Drive" or "OneDrive", for messages. */
+  private get label(): string {
+    return providerLabel(this.deps.remote.provider);
   }
 
-  /** Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7). */
-  private async verifyRemote(planned: RemoteEntry): Promise<DriveFile> {
-    const current = await this.readRemote(planned.id);
+  /**
+   * Re-reads R and throws TargetChangedError unless it still matches the plan (spec §7);
+   * an item that is gone (404/403) is skipped too (OneDrive sync spec §5).
+   */
+  private async verifyRemote(planned: RemoteEntry): Promise<RemoteItem> {
+    const current = await this.deps.remote.get(planned.id);
+    if (current === null) {
+      throw new TargetChangedError(`${planned.key} is gone from ${this.label} since planning`);
+    }
     if (current.trashed || !remoteUnchangedSince(planned, current)) {
-      throw new TargetChangedError(`${planned.key} changed in Drive since planning`);
+      throw new TargetChangedError(`${planned.key} changed in ${this.label} since planning`);
     }
     return current;
   }
@@ -290,30 +314,57 @@ export class Executor {
 
   // ---- uploads ----------------------------------------------------------------------
 
+  /** A download must match R's hash and size (OneDrive sync spec §3.3). */
+  private check(remote: RemoteEntry): DownloadCheck {
+    return { expected: remote.hash, expectedSize: remote.size, digesters: this.digesters };
+  }
+
+  /** The planned local content; actions built without digests carry the md5 alone. */
+  private plannedDigests(action: Action): LocalDigests {
+    if (action.localDigests) return action.localDigests;
+    const md5 = need(action.localMd5, 'local md5');
+    return {
+      md5,
+      remote: this.deps.remote.hashKind === 'md5' ? { kind: 'md5', value: md5 } : null,
+    };
+  }
+
+  /** Only a hash that differs warns; a missing or other-kind hash is not a warning (§3.2). */
+  private changedDuringUpload(planned: LocalDigests, fields: RemoteFields): string | undefined {
+    return sameContent(planned, fields.hash) === false ? 'changed-during-upload' : undefined;
+  }
+
+  /**
+   * Local record fields after an upload. When the file changed during the upload, the
+   * planned md5 may not be what is on disk (an edit can keep size and mtime), so the
+   * stored stat is made unmatchable and the next run re-hashes the file.
+   */
+  private uploadedLocal(local: LocalEntry, md5: string, warning: string | undefined): LocalFields {
+    const fields = this.localFields(local, md5);
+    return warning ? { ...fields, mtimeMs: -1 } : fields;
+  }
+
   private async upload(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const parentId = await this.folders.folderFor(parentKey(action.key));
     const abs = absInside(this.pair.localDir, local.name);
     const name = baseName(action.key);
-    let uploaded: DriveFile;
+    let uploaded: RemoteItem;
     try {
-      uploaded = await this.deps.ops.exec(this.pair.account, 'create', parentId, (ctx) =>
-        uploadNew(ctx.drive, { abs, name, parentId }),
-      );
+      uploaded = await this.deps.remote.uploadNew(parentId, name, abs);
     } catch (err) {
       if (isAbortError(err)) throw err;
-      const adopted = await this.findDuplicateUpload(parentId, name, planned);
+      const adopted = await this.findDuplicateUpload(parentId, name, planned, local.size);
       if (!adopted) throw err;
       uploaded = adopted;
     }
-    const remote = fromDrive(uploaded, parentId);
-    const warning =
-      remote.md5 !== null && remote.md5 !== planned ? 'changed-during-upload' : undefined;
+    const remote = fromRemote(uploaded, parentId);
+    const warning = this.changedDuringUpload(planned, remote);
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, remote.md5 ?? planned), remote),
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), remote),
         action.rebaseFrom,
       ),
     );
@@ -321,24 +372,26 @@ export class Executor {
     return warning ? { warning } : {};
   }
 
-  /** After an upload error: a same-name, same-md5 file created within 10 minutes is ours (spec §7). */
+  /**
+   * After an upload error: a same-name file with the planned size and content, created
+   * within 10 minutes, is ours (spec §7; OneDrive sync spec §3.2).
+   */
   private async findDuplicateUpload(
     parentId: string,
     name: string,
-    md5: string,
-  ): Promise<DriveFile | null> {
-    const q = `'${escapeQueryValue(parentId)}' in parents and trashed = false and name = '${escapeQueryValue(name)}'`;
+    planned: LocalDigests,
+    size: number,
+  ): Promise<RemoteItem | null> {
     try {
-      const list = await this.deps.ops.exec(this.pair.account, 'idempotent', parentId, (ctx) =>
-        ctx.drive.listFiles({ q, pageSize: 100, fields: SYNC_LIST_FIELDS }),
-      );
+      const list = await this.deps.remote.findChildren(parentId, name);
       const now = this.deps.clock().getTime();
       return (
-        (list.files ?? []).find(
+        list.find(
           (f) =>
-            f.md5Checksum === md5 &&
+            f.size === size &&
+            sameContent(planned, f.hash) === true &&
             f.name === name &&
-            Math.abs(now - Date.parse(f.createdTime ?? '')) <= DUPLICATE_WINDOW_MS,
+            Math.abs(now - Date.parse(f.createdTime)) <= DUPLICATE_WINDOW_MS,
         ) ?? null
       );
     } catch (err) {
@@ -349,20 +402,17 @@ export class Executor {
 
   private async updateRemote(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const remote = need(action.remote, 'remote');
-    await this.verifyRemote(remote);
+    const current = await this.verifyRemote(remote);
     const abs = absInside(this.pair.localDir, local.name);
-    const updated = await this.deps.ops.exec(this.pair.account, 'mutate', remote.id, (ctx) =>
-      updateContent(ctx.drive, { fileId: remote.id, abs }),
-    );
-    const fields = fromDrive(updated, remote.parentId);
-    const warning =
-      fields.md5 !== null && fields.md5 !== planned ? 'changed-during-upload' : undefined;
+    const updated = await this.deps.remote.replaceContent(current, abs);
+    const fields = fromRemote(updated, remote.parentId);
+    const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
       ),
     );
     await this.audit('sync_update', action, remote.id);
@@ -400,11 +450,8 @@ export class Executor {
     // N6: a Google-native file is re-read and exported instead of downloaded.
     const written = remote.native
       ? await exportOver(this.host(), to, expect, remote)
-      : await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-          downloadReplace(to, () => ctx.drive.downloadMedia(remote.id), {
-            expect,
-            expectedMd5: remote.md5,
-          }),
+      : await this.deps.remote.download(remote.id, (open) =>
+          downloadReplace(to, open, { expect, ...this.check(remote) }),
         );
     const after = await this.statFields(action.key, written.md5);
     putRecord(this.file, makeRecord(action.key, after, fromEntry(remote)));
@@ -416,15 +463,10 @@ export class Executor {
   private async downloadNew(action: Action): Promise<Partial<ActionOutcome>> {
     const remote = need(action.remote, 'remote');
     const abs = await prepareParent(this.pair.localDir, action.key);
-    const written = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-      placeExclusive(
-        path.dirname(abs),
-        () => path.basename(abs),
-        () => ctx.drive.downloadMedia(remote.id),
-        {
-          expectedMd5: remote.md5,
-        },
-      ),
+    const written = await this.deps.remote.download(remote.id, (open) =>
+      placeExclusive(path.dirname(abs), () => path.basename(abs), open, {
+        ...this.check(remote),
+      }),
     );
     const local = await this.statFields(action.key, written.md5);
     await this.commit(action, () =>
@@ -438,11 +480,8 @@ export class Executor {
     const local = need(action.local, 'local');
     const remote = need(action.remote, 'remote');
     const abs = absInside(this.pair.localDir, local.name);
-    const written = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-      downloadReplace(abs, () => ctx.drive.downloadMedia(remote.id), {
-        expect: statOf(local),
-        expectedMd5: remote.md5,
-      }),
+    const written = await this.deps.remote.download(remote.id, (open) =>
+      downloadReplace(abs, open, { expect: statOf(local), ...this.check(remote) }),
     );
     const after = await this.statFields(local.name, written.md5);
     await this.commit(action, () =>
@@ -456,17 +495,17 @@ export class Executor {
   private async conflict(action: Action): Promise<Partial<ActionOutcome>> {
     const local = need(action.local, 'local');
     const remote = need(action.remote, 'remote');
-    const planned = need(action.localMd5, 'local md5');
+    const planned = this.plannedDigests(action);
     const abs = absInside(this.pair.localDir, local.name);
     const at = this.deps.clock();
     const base = path.basename(abs);
-    const copy = await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
+    const copy = await this.deps.remote.download(remote.id, (open) =>
       placeExclusive(
         path.dirname(abs),
-        (i) => conflictName(base, at, i),
-        () => ctx.drive.downloadMedia(remote.id),
+        (i) => conflictName(base, at, i, this.deps.remote.provider),
+        open,
         {
-          expectedMd5: remote.md5,
+          ...this.check(remote),
           maxAttempts: MAX_CONFLICT_NAMES,
         },
       ),
@@ -478,7 +517,7 @@ export class Executor {
       await this.commit(action, () =>
         putRecord(this.file, {
           ...record,
-          remoteMd5: remote.md5,
+          remoteHash: remote.hash,
           remoteSize: remote.size,
           remoteModifiedTime: remote.modifiedTime,
           remoteName: remote.name,
@@ -487,24 +526,18 @@ export class Executor {
       );
       return { conflictCopy };
     }
-    await this.verifyRemote(remote);
-    const updated = await this.deps.ops.exec(this.pair.account, 'mutate', remote.id, (ctx) =>
-      updateContent(ctx.drive, { fileId: remote.id, abs }),
-    );
-    const fields = fromDrive(updated, remote.parentId);
+    const current = await this.verifyRemote(remote);
+    const updated = await this.deps.remote.replaceContent(current, abs);
+    const fields = fromRemote(updated, remote.parentId);
+    const warning = this.changedDuringUpload(planned, fields);
     await this.commit(action, () =>
       putRecord(
         this.file,
-        makeRecord(action.key, this.localFields(local, fields.md5 ?? planned), fields),
+        makeRecord(action.key, this.uploadedLocal(local, planned.md5, warning), fields),
       ),
     );
     await this.audit('sync_update', action, remote.id);
-    return {
-      conflictCopy,
-      ...(fields.md5 !== null && fields.md5 !== planned
-        ? { warning: 'changed-during-upload' }
-        : {}),
-    };
+    return { conflictCopy, ...(warning ? { warning } : {}) };
   }
 
   // ---- deletions --------------------------------------------------------------------
@@ -520,21 +553,25 @@ export class Executor {
       },
     );
     if (back) throw new TargetChangedError(`${action.key} exists locally again`);
-    const current = await this.readRemote(remote.id);
-    if (!current.trashed) {
-      if (
-        !remoteUnchangedSince(remote, current) ||
-        (current.parents?.[0] ?? '') !== remote.parentId
-      ) {
-        throw new TargetChangedError(`${action.key} changed or moved in Drive since planning`);
+    const current = await this.deps.remote.get(remote.id);
+    if (current === null) {
+      // Already gone: with deletion evidence it is deleted (drop the record); without, it
+      // may only be unreachable, so nothing is touched (OneDrive sync spec §4.1, §5).
+      // Defence only: in a real run this branch cannot drop a record. trash-remote is planned
+      // only for an item the scan saw present, and E (read before the scan) loses every id
+      // the scan saw present, the item's and its parent folder's alike; the feed is not
+      // re-read during the apply. So a deletion after the scan always lands in the skip.
+      const evidence = this.deps.evidence;
+      if (!evidence?.has(remote.id) && !evidence?.has(record.remoteParentId)) {
+        throw new TargetChangedError(`${action.key} is gone from ${this.label} since planning`);
       }
-      await this.deps.ops.exec(this.pair.account, 'idempotent', remote.id, (ctx) =>
-        ctx.drive.updateFile({
-          fileId: remote.id,
-          requestBody: { trashed: true },
-          fields: 'id, trashed',
-        }),
-      );
+    } else if (!current.trashed) {
+      if (!remoteUnchangedSince(remote, current) || (current.parentId ?? '') !== remote.parentId) {
+        throw new TargetChangedError(
+          `${action.key} changed or moved in ${this.label} since planning`,
+        );
+      }
+      await this.deps.remote.trash(current);
     }
     await this.commit(action, () => dropRecord(this.file, record.remoteId));
     await this.audit('sync_trash_remote', action, remote.id);
@@ -547,7 +584,7 @@ export class Executor {
     const abs = absInside(this.pair.localDir, local.name);
     let md5: string;
     try {
-      md5 = await md5File(abs);
+      md5 = (await hashFileDigests(abs, 'md5', this.digesters)).md5;
     } catch (err) {
       if (hasErrorCode(err, 'ENOENT'))
         throw new TargetChangedError(`${action.key} is already gone`);

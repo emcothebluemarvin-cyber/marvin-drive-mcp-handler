@@ -1,8 +1,20 @@
-import type { DriveFile } from '../drive/drive-adapter.js';
 import { ValidationError } from '../errors.js';
-import type { RemoteEntry, SyncRecord } from './types.js';
+import type { ContentHash, RemoteItem } from './remote/sync-remote.js';
+import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
 
-/** R content vs the record: binary md5 (else size + modifiedTime, `weak`); native modifiedTime. */
+/** Equal hashes, or both missing (record bookkeeping: did the remote's hash change?). */
+export function sameHashOrNone(a: ContentHash | null, b: ContentHash | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.kind === b.kind && a.value === b.value;
+}
+
+/** Both hashes known, of one kind and equal (null when either is missing or kinds differ). */
+function sameHash(a: ContentHash | null, b: ContentHash | null): boolean | null {
+  if (a === null || b === null || a.kind !== b.kind) return null;
+  return a.value === b.value;
+}
+
+/** R content vs the record: the hash (else size + modifiedTime, `weak`); native modifiedTime. */
 export function remoteChanged(
   record: SyncRecord,
   entry: RemoteEntry,
@@ -10,33 +22,50 @@ export function remoteChanged(
   if (entry.native !== null) {
     return { changed: entry.modifiedTime !== record.remoteModifiedTime, weak: false };
   }
-  if (entry.md5 !== null && record.remoteMd5 !== null) {
-    return { changed: entry.md5 !== record.remoteMd5, weak: false };
-  }
+  const same = sameHash(entry.hash, record.remoteHash);
+  if (same !== null) return { changed: !same, weak: false };
   return {
     changed: entry.size !== record.remoteSize || entry.modifiedTime !== record.remoteModifiedTime,
     weak: true,
   };
 }
 
-/** Executor re-verification: binary md5 and modifiedTime equal; native modifiedTime equal. */
-export function remoteUnchangedSince(planned: RemoteEntry, current: DriveFile): boolean {
-  if ((current.modifiedTime ?? '') !== planned.modifiedTime) return false;
-  return planned.native !== null || (current.md5Checksum ?? null) === planned.md5;
+/**
+ * Executor re-verification: binary hash and modifiedTime equal; native modifiedTime equal.
+ * Without a hash, a planned OneDrive eTag must also be unchanged, so an edit that keeps
+ * modifiedTime is still caught (Google entries carry no version: unchanged rule).
+ */
+export function remoteUnchangedSince(planned: RemoteEntry, current: RemoteItem): boolean {
+  if (current.modifiedTime !== planned.modifiedTime) return false;
+  if (planned.native !== null) return true;
+  if (planned.hash === null || current.hash === null) {
+    if (planned.hash !== current.hash) return false;
+    return planned.version === undefined || planned.version === current.version;
+  }
+  return sameHash(planned.hash, current.hash) === true;
 }
 
 /**
- * L equals R: binary by Drive md5 (record unused: U2/B4 adopt); native by the md5 of the
- * last export (record required — untracked natives with a local file are U0b).
+ * L's content vs a remote hash (spec §3.2): null when the remote reports none, the local
+ * digest of its kind was not computed, or the kinds differ.
+ */
+export function sameContent(local: LocalDigests, remote: ContentHash | null): boolean | null {
+  return sameHash(local.remote, remote);
+}
+
+/**
+ * L equals R: binary by the remote hash, never by a weaker fallback (record unused: U2/B4
+ * adopt, release); native by the md5 of the last export (record required — untracked
+ * natives with a local file are U0b).
  */
 export function localMatchesRemote(
-  localMd5: string,
+  local: LocalDigests,
   record: SyncRecord | null,
   entry: RemoteEntry,
 ): boolean {
-  if (entry.native === null) return entry.md5 !== null && localMd5 === entry.md5;
+  if (entry.native === null) return sameContent(local, entry.hash) === true;
   if (record === null) {
     throw new ValidationError(`Internal: comparing ${entry.key} needs its record`);
   }
-  return localMd5 === record.localMd5;
+  return local.md5 === record.localMd5;
 }

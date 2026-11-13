@@ -6,10 +6,14 @@ import {
   PermissionDeniedError,
   QuotaExceededError,
 } from '../../errors.js';
+import { createFakeDrive } from '../../files/__tests__/fakes.js';
 import { GOOGLE_MIME } from '../../files/export-formats.js';
-import { probeRecord, probeRecords, type FileGetter } from '../remote-probe.js';
+import { SYNC_FILE_FIELDS } from '../remote/google-remote.js';
+import { toRemoteItemFromGraph } from '../remote/onedrive-remote.js';
+import { probeRecord, probeRecords, type ItemGetter } from '../remote-probe.js';
 import type { RemoteScan } from '../types.js';
 import { binary } from './drive-tree.js';
+import { googleRemoteOver } from './fake-remote.js';
 
 const ROOT = 'root';
 
@@ -27,16 +31,54 @@ function scan(overrides: Partial<RemoteScan> = {}): RemoteScan {
   };
 }
 
-function getter(files: Record<string, DriveFile | Error>): FileGetter {
-  return async (id) => {
+/** A GoogleSyncRemote whose Drive serves `files` (missing ids are 404). */
+function getter(files: Record<string, DriveFile | Error>): ItemGetter {
+  const drive = createFakeDrive();
+  drive.getFile.mockImplementation(async (id) => {
     const f = files[id];
     if (f === undefined) throw new NotFoundError(id);
     if (f instanceof Error) throw f;
     return f;
-  };
+  });
+  return googleRemoteOver(drive);
 }
 
 describe('probeRecord', () => {
+  it('a OneDrive item that became unsupported is unknown with its text (spec §4.2)', async () => {
+    const remote: ItemGetter = {
+      get: async () => ({
+        ...toRemoteItemFromGraph({ id: 'r', name: 'Notes', package: { type: 'oneNote' } }),
+        parentId: ROOT,
+      }),
+    };
+    expect(await probeRecord('r', scan(), remote)).toEqual({
+      state: 'unknown',
+      reason: 'OneNote notebook, cannot be synced',
+    });
+  });
+
+  it('a missing item is trashed only with deletion evidence (OneDrive sync spec §4.1)', async () => {
+    const get = getter({});
+    expect(await probeRecord('r', scan(), get)).toEqual({ state: 'unavailable' });
+    expect(await probeRecord('r', scan(), get, { evidenced: false })).toEqual({
+      state: 'unavailable',
+    });
+    expect(await probeRecord('r', scan(), get, { evidenced: true })).toEqual({ state: 'trashed' });
+  });
+
+  it('collects the ids it saw present, parents of the walk included', async () => {
+    const seen = new Set<string>();
+    const get = getter({
+      r: binary('r', 'a.pdf', 'elsewhere'),
+      elsewhere: { id: 'elsewhere', parents: ['my-drive'] },
+      'my-drive': { id: 'my-drive' },
+    });
+    expect(await probeRecord('r', scan(), get, { evidenced: true, seen })).toEqual({
+      state: 'moved-out',
+    });
+    expect([...seen]).toEqual(['r', 'elsewhere', 'my-drive']);
+  });
+
   it('reports trashed files', async () => {
     const get = getter({ r: binary('r', 'a.pdf', ROOT, { trashed: true }) });
     expect(await probeRecord('r', scan(), get)).toEqual({ state: 'trashed' });
@@ -63,7 +105,7 @@ describe('probeRecord', () => {
     const doc = { ...binary('r', 'Plan', 'f1'), mimeType: GOOGLE_MIME.document };
     expect(await probeRecord('r', scan(), getter({ r: doc }))).toMatchObject({
       state: 'present',
-      entry: { key: 'docs/Plan.docx', md5: null, native: { exportFormat: 'docx' } },
+      entry: { key: 'docs/Plan.docx', hash: null, native: { exportFormat: 'docx' } },
     });
     const form = { ...binary('r', 'Survey', 'f1'), mimeType: 'application/vnd.google-apps.form' };
     expect(await probeRecord('r', scan(), getter({ r: form }))).toEqual({
@@ -84,6 +126,25 @@ describe('probeRecord', () => {
       state: 'unknown',
       reason: 'inside a Drive folder that was not scanned',
     });
+  });
+
+  it('reads each parent in the walk with the full sync fields (not just id, parents)', async () => {
+    const drive = createFakeDrive();
+    drive.getFile.mockImplementation(async (id) =>
+      id === 'r'
+        ? binary('r', 'a.pdf', 'elsewhere')
+        : id === 'elsewhere'
+          ? { id: 'elsewhere', parents: ['my-drive'] }
+          : { id: 'my-drive' },
+    );
+    expect(await probeRecord('r', scan(), googleRemoteOver(drive))).toEqual({
+      state: 'moved-out',
+    });
+    expect(drive.getFile.mock.calls).toEqual([
+      ['r', SYNC_FILE_FIELDS],
+      ['elsewhere', SYNC_FILE_FIELDS],
+      ['my-drive', SYNC_FILE_FIELDS],
+    ]);
   });
 
   it('reports moved-out when the ancestry leaves the pair', async () => {

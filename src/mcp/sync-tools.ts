@@ -29,7 +29,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_create_pair',
     {
       description:
-        'Create a selective two-way sync pair between a local folder and a Drive folder (synced on demand, never automatically). Pass remoteFolderId of an existing Drive folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. Next step: sync_scan.',
+        'Create a selective two-way sync pair between a local folder and a Google Drive or OneDrive folder (the account decides; synced on demand, never automatically). Pass remoteFolderId of an existing folder, or remoteFolderName (+ optional remoteParentId) to create a new one. Writes a hidden marker file .marvin-sync-<name> into localDir. A localDir inside (or containing) a OneDrive or Google Drive desktop app folder is refused. Next step: sync_scan.',
       inputSchema: {
         name,
         localDir: z
@@ -41,12 +41,12 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           .string()
           .min(1)
           .optional()
-          .describe('Creates a new Drive folder with this name'),
+          .describe('Creates a new Drive / OneDrive folder with this name'),
         remoteParentId: z
           .string()
           .min(1)
           .optional()
-          .describe('Parent for remoteFolderName (default: My Drive)'),
+          .describe('Parent for remoteFolderName (default: My Drive / the OneDrive root)'),
         googleExport: z
           .object({
             document: z.enum(EXPORT_FORMATS).optional(),
@@ -56,7 +56,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
           })
           .optional()
           .describe(
-            'Local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
+            'Google accounts only (rejected on OneDrive): local export format of Google files (read-only copies). Defaults: docx, xlsx, pptx, pdf. Docs: docx/pdf/md/txt/odt/html; Sheets: xlsx/pdf/csv/ods; Slides: pptx/pdf/txt/odp; Drawings: png/pdf/svg/jpg',
           ),
         account,
       },
@@ -68,7 +68,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_list_pairs',
     {
       description:
-        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run.',
+        'List sync pairs with their folders, account, counts (selected, tracked, remote-only, excluded, baseline) and the last applied run. A pair whose folder is inside (or contains) a OneDrive or Google Drive desktop app folder has a warning and cannot be synced; remove it and pick a folder outside.',
       inputSchema: {},
     },
     async () => respond(log, () => sync.listPairs()),
@@ -78,7 +78,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_scan',
     {
       description:
-        'Step 1 of choosing what to sync: lists the local files of a pair (path, size, modifiedTime, mimeType, and a short preview for text files) plus remoteCandidates (Drive files not yet synced). Changes nothing. Open PDFs/Office files with your own file-reading tool when the name and preview are not enough, propose a selection to the user (e.g. "the seafaring files"), confirm it with them, then call sync_select.',
+        'Step 1 of choosing what to sync: lists the local files of a pair (path, size, modifiedTime, mimeType, and a short preview for text files) plus remoteCandidates (Drive / OneDrive files not yet synced). Changes nothing. Open PDFs/Office files with your own file-reading tool when the name and preview are not enough, propose a selection to the user (e.g. "the seafaring files"), confirm it with them, then call sync_select.',
       inputSchema: {
         name,
         onlyUnselected: z
@@ -103,7 +103,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_select',
     {
       description:
-        'Step 2, after the user confirmed: add paths to the pair selection (local files or Drive remoteCandidates; deduped by case/Unicode form) or remove them. remove stops syncing a path and puts it on the excluded list — no file is touched on either side. Rejected paths come back with reasons. Next step: sync_run (dry run).',
+        'Step 2, after the user confirmed: add paths to the pair selection (local files or remoteCandidates; deduped by case/Unicode form) or remove them. remove stops syncing a path and puts it on the excluded list — no file is touched on either side. Rejected paths come back with reasons. Next step: sync_run (dry run).',
       inputSchema: { name, add: relPaths.optional(), remove: relPaths.optional() },
     },
     async (args) => respond(log, () => sync.select(args)),
@@ -113,7 +113,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_run',
     {
       description:
-        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash or the system Trash / Recycle Bin, never permanent; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
+        'Step 3: plan or apply a sync. DRY RUN BY DEFAULT (apply omitted/false): returns the plan — actions by kind, conflicts, collisions, ambiguous/unknown items, warnings, candidates — and a planId; nothing is written. Show it to the user; after they agree call again with apply: true AND that planId (apply without planId is rejected). If anything changed meanwhile nothing is applied and the new plan is returned. Deletions go to the Drive trash / OneDrive recycle bin or the system Trash / Recycle Bin, never permanent; on OneDrive a file counts as deleted only when the OneDrive change history reports it, otherwise it is only reported; conflicts keep both copies. Set allowMassDelete only after the user explicitly confirmed a large deletion. Files the user deleted locally are listed in pendingConfirmation; their Drive copies are NOT trashed unless you pass confirmRemoteTrash: true. For those, ask the user first: delete them in Drive too (pass confirmRemoteTrash: true together with the planId of the dry run the user saw; after an applied run, do a new dry run first), or keep them in Drive only (sync_release with those paths). Confirmation covers every pending path of the run; to keep some, release them first.',
       inputSchema: {
         name,
         apply: z.boolean().optional().describe('Default false (dry run)'),
@@ -146,7 +146,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_release',
     {
       description:
-        'Move to Drive: remove the local copies of synced files and keep them in Drive only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
+        'Move to Drive / OneDrive: remove the local copies of synced files and keep them in the cloud only (they stay selected; sync_select add brings a copy back). DRY RUN BY DEFAULT. Pass paths — e.g. from releasable after an applied sync_run, or from pendingConfirmation for files the user already deleted locally and wants to keep in Drive — or all: true for every file that is in sync. Ask the user first ("Yerel kopyaları silmek ister misiniz? Hepsi / bazıları / hayır"), then call again with apply: true. Local copies go to the system Trash / Recycle Bin, never deleted permanently; every file is re-checked right before removal.',
       inputSchema: {
         name,
         paths: relPaths.optional(),
@@ -161,7 +161,7 @@ export function registerSyncTools(server: McpServer, sync: SyncService, log: Log
     'sync_remove_pair',
     {
       description:
-        'Remove a sync pair: deletes its saved state and the marker file. No local or Drive files are touched.',
+        'Remove a sync pair: deletes its saved state and the marker file. No local, Drive or OneDrive files are touched.',
       inputSchema: { name },
     },
     async (args) => respond(log, () => sync.removePair(args)),

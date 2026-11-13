@@ -63,7 +63,7 @@ Status: ⬜ planned · 🟨 in progress · ✅ done
 - ✅ `FileRouter` picks Google or OneDrive from the account; the `drive_*` tools are unchanged
 - ✅ GraphClient: token only to graph.microsoft.com, retry rules, resumable upload sessions, copy monitor
 - ✅ `drive_upload` name conflicts ask Overwrite / Cancel through MCP elicitation; rename, move and copy conflicts are errors
-- ✅ Microsoft accounts are rejected on the Google-only tools (content, sync, watch)
+- ✅ Microsoft accounts are rejected on the Google-only tools (content, watch); sync supports them since sub-project 2 (section 9)
 - ✅ Live E2E (`MARVIN_E2E_MS_PERSONAL`, `MARVIN_E2E_MS_WORK`), 2026-11-11: personal passed on two personal accounts. Work/school: not live-tested (no work account signed in yet)
 - ✅ Overwrite / Cancel dialog in Claude Code, 2026-11-11: Overwrite answered after about 5 min succeeded with the new content; Cancel returned `cancelled: true`, reason `user`, file unchanged
 - Search: new items on personal OneDrive stayed out of the search index for over 30 minutes; the E2E checks search with an item that existed before the run
@@ -81,8 +81,19 @@ Spec §10 results:
 | A work account in another tenant can consent to an unverified app | n/a | not live-tested |
 | `elicitInput` works on the protocol revision Claude Code negotiates | confirmed | n/a (same client) |
 
+### 9. OneDrive selective sync (spec: `docs/superpowers/specs/2026-11-11-onedrive-sync-design.md`)
+- ✅ `SyncRemote` port with Google and OneDrive implementations; the engine has no Drive or Graph shapes
+- ✅ QuickXorHash digests, pair file v2 (`remoteHash`, deletion cursor and evidence) with v1 migration
+- ✅ Deletions only with root `delta` evidence; `remote-unavailable` without it; `deletion-history-unavailable` for an expired or unusable cursor
+- ✅ `If-Match` on replace and delete; 409 / 412 / 423 skipped, 507 stops the run
+- ✅ OneDrive name rules (`remote-name-invalid`, 255 units per name, 400 per path), ignored OneNote / special / shared items, provider words in reports
+- ✅ Cloud desktop folder guard for both providers (create, repair-marker, list warning, runs refused)
+- ✅ Live OneDrive sync E2E (`tests/e2e/onedrive-sync.e2e.test.ts`, `MARVIN_E2E_MS_PERSONAL`, optional `MARVIN_E2E_MS_SECOND`): passed 2026-11-11 on two personal accounts; Google sync E2E re-run and passed on the same build
+- ⬜ Work/school accounts: supported by the code, not live-tested
+- Known limitation: the pair file does not store the provider (it follows the account alias)
+
 ## Later
-- ⬜ OneDrive: sync, change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
+- ⬜ OneDrive: change watching (Graph `delta`), Office content editing, files shared with the user, SharePoint and Teams libraries
 - ⬜ Remote (HTTP) MCP server for claude.ai connectors / mobile (Drive + content tools; no local sync)
 - ⬜ Sync watch mode (continuous sync)
 - ⬜ GUI with Claude-API file classification for sync selection (plugs into `sync_select`; terminal use keeps Claude Code as the selector)

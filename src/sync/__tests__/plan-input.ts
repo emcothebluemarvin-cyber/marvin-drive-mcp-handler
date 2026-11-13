@@ -1,3 +1,4 @@
+import type { HashKind } from '../remote/sync-remote.js';
 import type { PlanInput } from '../resolve.js';
 import type {
   LocalEntry,
@@ -6,9 +7,10 @@ import type {
   Probe,
   RemoteEntry,
   RemoteIgnored,
+  LocalDigests,
   SyncRecord,
 } from '../types.js';
-import { ROOT_ID, makePair } from './fixtures.js';
+import { ROOT_ID, makePair, md5Hash } from './fixtures.js';
 
 export interface InputOptions {
   pair?: Partial<Pair>;
@@ -19,7 +21,12 @@ export interface InputOptions {
   remote?: RemoteEntry[];
   ignored?: RemoteIgnored[];
   probes?: Array<[string, Probe]>;
+  /** Shorthand: local md5 by on-disk name (its remote digest is the same md5). */
   md5s?: Array<[string, string]>;
+  digests?: Array<[string, LocalDigests]>;
+  remoteHashKind?: HashKind;
+  remoteProvider?: 'google' | 'microsoft';
+  releaseNames?: PlanInput['releaseNames'];
   onDisk?: Array<[string, OnDiskProbe]>;
   blocking?: string[];
   folders?: Array<[string, string]>;
@@ -27,6 +34,11 @@ export interface InputOptions {
   unknownLocal?: string[];
   unknownRemote?: string[];
   unknownFolderIds?: string[];
+}
+
+/** The digests of a file whose md5 is `md5` on an md5 remote. */
+export function md5Digests(md5: string): LocalDigests {
+  return { md5, remote: md5Hash(md5) };
 }
 
 export function planInput(o: InputOptions = {}): PlanInput {
@@ -53,7 +65,13 @@ export function planInput(o: InputOptions = {}): PlanInput {
       unknownFolderIds: o.unknownFolderIds ?? [],
     },
     probes: new Map(o.probes ?? []),
-    md5s: new Map(o.md5s ?? []),
+    digests: new Map([
+      ...(o.md5s ?? []).map(([name, md5]): [string, LocalDigests] => [name, md5Digests(md5)]),
+      ...(o.digests ?? []),
+    ]),
+    remoteHashKind: o.remoteHashKind ?? 'md5',
+    ...(o.remoteProvider ? { remoteProvider: o.remoteProvider } : {}),
+    releaseNames: o.releaseNames ?? null,
     onDisk: new Map(o.onDisk ?? []),
   };
 }

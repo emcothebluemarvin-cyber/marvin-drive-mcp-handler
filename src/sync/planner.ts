@@ -2,7 +2,15 @@ import { createHash } from 'node:crypto';
 import { planTracked } from './plan-tracked.js';
 import { planUntracked } from './plan-untracked.js';
 import { buildContext, type PlanInput } from './resolve.js';
-import type { Action, ActionKind, BrakeInfo, Note, Plan } from './types.js';
+import type { RemoteUnsupported } from './remote/sync-remote.js';
+import {
+  UNSUPPORTED_TEXT,
+  type Action,
+  type ActionKind,
+  type BrakeInfo,
+  type Note,
+  type Plan,
+} from './types.js';
 
 export type { PlanInput } from './resolve.js';
 
@@ -40,7 +48,7 @@ export function brakeFor(actions: readonly Action[], tracked: number): BrakeInfo
 }
 
 /**
- * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote md5)` list of
+ * SHA-256 over the canonical `(kind, remoteId, key, local md5, remote kind:hash)` list of
  * every non-refresh action — no generated names or timestamps (spec §5 step 5).
  */
 export function computePlanId(actions: readonly Action[]): string {
@@ -52,7 +60,7 @@ export function computePlanId(actions: readonly Action[]): string {
         a.record?.remoteId ?? a.remote?.id ?? '',
         a.key,
         a.localMd5 ?? '',
-        a.remote?.md5 ?? '',
+        a.remote?.hash ? `${a.remote.hash.kind}:${a.remote.hash.value}` : '',
       ]),
     )
     .sort();
@@ -93,6 +101,14 @@ export function plan(input: PlanInput): Plan {
         message:
           'Google Forms, Sites, Apps Script and similar files cannot be exported; they are not synced',
       });
+    } else if (UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] !== undefined) {
+      notes.push({
+        code: 'ignored',
+        path: ignored.path,
+        rule: 'ignored',
+        remoteId: ignored.id,
+        message: UNSUPPORTED_TEXT[ignored.reason as RemoteUnsupported] ?? '',
+      });
     } else if (ignored.reason === 'unrepresentable') {
       notes.push({
         code: 'unrepresentable',
@@ -104,6 +120,16 @@ export function plan(input: PlanInput): Plan {
       });
     }
   }
+
+  // A folder name the remote refuses is reported once for its whole subtree (spec §4.3).
+  const reported = new Set<string>();
+  const deduped = notes.filter((n) => {
+    if (n.code !== 'remote-name-invalid') return true;
+    if (reported.has(n.path)) return false;
+    reported.add(n.path);
+    return true;
+  });
+  notes.splice(0, notes.length, ...deduped);
 
   actions.sort(byKindThenKey);
   const tracked = input.records.filter((r) => !r.remoteOnly).length;

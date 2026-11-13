@@ -1,8 +1,8 @@
-import { localMatchesRemote, remoteChanged } from './content-compare.js';
+import { localMatchesRemote, remoteChanged, sameHashOrNone } from './content-compare.js';
 import { foldKey } from './paths.js';
 import type { ActionBase, TrackedResult, TrackedScope } from './plan-shared.js';
 import { isExcluded, localState, type LocalResolution, type RemoteResolution } from './resolve.js';
-import type { RemoteEntry, SyncRecord } from './types.js';
+import type { LocalDigests, RemoteEntry, SyncRecord } from './types.js';
 
 /**
  * Remote-side record fields that differ from R (O3/O4/O6 record refresh). A native's
@@ -13,7 +13,7 @@ function remotePatch(record: SyncRecord, remote: RemoteEntry): Partial<SyncRecor
   const patch: Partial<SyncRecord> = {};
   if (remote.name !== record.remoteName) patch.remoteName = remote.name;
   if (remote.parentId !== record.remoteParentId) patch.remoteParentId = remote.parentId;
-  if (remote.md5 !== record.remoteMd5) patch.remoteMd5 = remote.md5;
+  if (!sameHashOrNone(remote.hash, record.remoteHash)) patch.remoteHash = remote.hash;
   if (remote.size !== record.remoteSize) patch.remoteSize = remote.size;
   if (remote.native === null && remote.modifiedTime !== record.remoteModifiedTime) {
     patch.remoteModifiedTime = remote.modifiedTime;
@@ -31,17 +31,30 @@ export function planRemoteOnly(
   R: RemoteResolution,
 ): TrackedResult {
   const { ctx, record, out, note, act } = s;
+  const bin =
+    ctx.input.remoteProvider === 'microsoft' ? 'the OneDrive recycle bin' : 'the Drive trash';
+  const purged =
+    ctx.input.remoteProvider === 'microsoft'
+      ? 'it is removed by OneDrive after 30 days'
+      : 'it is purged after 30 days';
   const entry = L.kind === 'present' ? L.entry : null;
-  let lMd5: string | null = null;
+  let lDigests: LocalDigests | null = null;
   if (entry) {
     const st = localState(ctx, record, entry);
     if (!st) return note('unknown-state', 'unknown', 'local file could not be hashed');
-    lMd5 = st.md5;
+    lDigests = st.digests;
   }
-  const base: ActionBase = { key: record.path, local: entry, localMd5: lMd5, selection: {} };
+  const base: ActionBase = {
+    key: record.path,
+    local: entry,
+    localMd5: lDigests?.md5 ?? null,
+    localDigests: lDigests,
+    selection: {},
+  };
   const untrack = { remove: [record.path], exclude: [record.path] };
   const present = R.kind === 'present' ? R.entry : null;
-  const same = present !== null && lMd5 !== null && localMatchesRemote(lMd5, record, present);
+  const same =
+    present !== null && lDigests !== null && localMatchesRemote(lDigests, record, present);
   // L is the unmodified last export but the Doc changed since: re-export over it (like N4).
   const stale = same && present.native !== null && remoteChanged(record, present).changed;
   const back = (rule: 'O0' | 'O8', remote: RemoteEntry): TrackedResult =>
@@ -63,6 +76,7 @@ export function planRemoteOnly(
         key: target,
         local: null,
         localMd5: null,
+        localDigests: null,
         kind: present.native ? 'export-new' : 'download-new',
         rule: 'O1',
         remote: present,
@@ -73,7 +87,7 @@ export function planRemoteOnly(
       return note(
         'remote-only-trashed',
         'O2',
-        'cannot restore: the only copy is in the Drive trash; restore it there first',
+        `cannot restore: the only copy is in ${bin}; restore it there first`,
       );
     }
     if (R.kind === 'unavailable') {
@@ -81,11 +95,7 @@ export function planRemoteOnly(
     }
   }
   if (R.kind === 'trashed') {
-    note(
-      'remote-only-trashed',
-      'O5',
-      'the only copy is in the Drive trash; it is purged after 30 days',
-    );
+    note('remote-only-trashed', 'O5', `the only copy is in ${bin}; ${purged}`);
     return record.remoteTrashed
       ? out
       : act({

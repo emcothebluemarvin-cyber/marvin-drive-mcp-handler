@@ -12,8 +12,9 @@ import {
   toKey,
   validateRelPath,
 } from './paths.js';
+import { pruneEvidence, readDeletionFeed, type FeedRead } from './deletion-evidence.js';
 import { probeRecords } from './remote-probe.js';
-import { SYNC_LIST_FIELDS, SYNC_PAGE_SIZE, childrenQuery, scanRemote } from './remote-scanner.js';
+import { scanRemote } from './remote-scanner.js';
 import { hashTargets, onDiskProbeKeys, type PlanInput } from './resolve.js';
 import type { LocalScan, Pair, PairFile, RemoteScan } from './types.js';
 
@@ -74,21 +75,9 @@ async function readPreview(abs: string, chars: number): Promise<string | undefin
   }
 }
 
-/** Breadth-first scan of the pair's Drive folder (no local work). */
-export function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
-  return scanRemote(
-    pair.remoteFolderId,
-    (folderId, pageToken) =>
-      env.ops.exec(pair.account, 'idempotent', folderId, (ctx) =>
-        ctx.drive.listFiles({
-          q: childrenQuery(folderId),
-          pageSize: SYNC_PAGE_SIZE,
-          ...(pageToken ? { pageToken } : {}),
-          fields: SYNC_LIST_FIELDS,
-        }),
-      ),
-    pair.googleExport,
-  );
+/** Breadth-first scan of the pair's remote folder (no local work). */
+export async function scanRemoteTree(env: SyncEnv, pair: Pair): Promise<RemoteScan> {
+  return scanRemote(pair.remoteFolderId, await env.remoteFor(pair));
 }
 
 export async function scanBoth(
@@ -104,8 +93,11 @@ export async function scanBoth(
 export async function gatherInput(
   env: SyncEnv,
   file: PairFile,
-): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan }> {
+  releaseNames: PlanInput['releaseNames'] = null,
+): Promise<{ input: PlanInput; local: LocalScan; remote: RemoteScan; feed: FeedRead | null }> {
   const { pair, records } = file;
+  // The feed is read before the scan: a deletion after this point is never missed.
+  const feed = await readDeletionFeed(await env.remoteFor(pair), pair, env.log);
   const { local, remote } = await scanBoth(env, pair);
   // §6.1: keys without an exact scan match may still exist on disk (through a symlinked
   // parent, or under a spelling the volume folds onto a scanned file) — ask the volume.
@@ -113,19 +105,39 @@ export async function gatherInput(
     pair.localDir,
     onDiskProbeKeys({ pair, records, local, remote }),
   );
-  const base = { pair, records, local, remote, probes: new Map(), onDisk };
-  const { md5s, failed } = await hashLocal(pair.localDir, hashTargets(base));
+  const syncRemote = await env.remoteFor(pair);
+  const base = {
+    pair,
+    records,
+    local,
+    remote,
+    probes: new Map(),
+    onDisk,
+    remoteHashKind: syncRemote.hashKind,
+    remoteProvider: syncRemote.provider,
+    releaseNames,
+  };
+  const { digests, failed } = await hashLocal(
+    pair.localDir,
+    hashTargets(base),
+    syncRemote.hashKind,
+    env.digesters,
+  );
   for (const name of failed) local.unknownSubtrees.push(toKey(name));
   const seen = new Set([...remote.entries.map((e) => e.id), ...remote.ignored.map((i) => i.id)]);
   const missing = records.map((r) => r.remoteId).filter((id) => !seen.has(id));
-  const probes = await probeRecords(
-    missing,
-    remote,
-    (id, fields) =>
-      env.ops.exec(pair.account, 'idempotent', id, (ctx) => ctx.drive.getFile(id, fields)),
-    pair.googleExport,
-  );
-  return { input: { ...base, probes, md5s }, local, remote };
+  // Spec §4.1: E = (stored ∪ feed) − ids seen present; a record's parent in E counts too.
+  const present = new Set([...seen, ...remote.folders.keys(), ...remote.unknownFolderIds]);
+  const evidence = feed?.evidence ?? new Set<string>();
+  for (const id of present) evidence.delete(id);
+  const parentOf = new Map(records.map((r) => [r.remoteId, r.remoteParentId]));
+  // Ids a probe sees present leave E at once, so a later probe never counts a parent an
+  // earlier probe's walk-up found present as evidence.
+  const probes = await probeRecords(missing, remote, syncRemote, {
+    evidenced: (id) => evidence.has(id) || evidence.has(parentOf.get(id) ?? ''),
+    seen: { add: (id) => evidence.delete(id) },
+  });
+  return { input: { ...base, probes, digests }, local, remote, feed };
 }
 
 /** sync_scan: local files (with text previews) and remote candidates for Claude to choose from. */
@@ -256,6 +268,7 @@ export async function selectPaths(env: SyncEnv, input: SelectInput): Promise<Sel
         }
       }
     }
+    pruneEvidence(file);
     await env.store.save(file);
     return {
       ...result,

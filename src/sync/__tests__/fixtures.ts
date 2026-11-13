@@ -5,6 +5,17 @@ import type { LocalTrash } from '../trash.js';
 import type { LocalEntry, Pair, PairFile, RemoteEntry, SyncRecord } from '../types.js';
 import { DEFAULT_GOOGLE_EXPORT } from '../types.js';
 import { foldKey } from '../paths.js';
+import type { ContentHash } from '../remote/sync-remote.js';
+
+/** An md5 ContentHash (null stays null). */
+export function md5Hash(value: string | null): ContentHash | null {
+  return value === null ? null : { kind: 'md5', value };
+}
+
+/** Test shorthand: `md5` sets an md5 `hash`. */
+export type RemoteEntryOverrides = Partial<RemoteEntry> & { md5?: string | null };
+/** Test shorthand: `remoteMd5` sets an md5 `remoteHash`. */
+export type RecordOverrides = Partial<SyncRecord> & { remoteMd5?: string | null };
 
 /** LocalTrash for tests that must never trash anything. */
 export const refuseTrash: LocalTrash = {
@@ -41,12 +52,14 @@ export function makePair(overrides: Partial<Pair> = {}): Pair {
     lastAppliedRunAt: '2026-11-02T00:00:00.000Z',
     firstAppliedRunAt: '2026-11-02T00:00:00.000Z',
     nativeBaselineDone: true,
+    remoteCursor: null,
+    remoteDeletedIds: [],
     ...overrides,
   };
 }
 
 export function makePairFile(pair: Partial<Pair> = {}, records: SyncRecord[] = []): PairFile {
-  return { version: 1, pair: makePair(pair), records };
+  return { version: 2, pair: makePair(pair), records };
 }
 
 export function localEntry(name: string, overrides: Partial<LocalEntry> = {}): LocalEntry {
@@ -66,10 +79,11 @@ export function localEntry(name: string, overrides: Partial<LocalEntry> = {}): L
 export function remoteEntry(
   id: string,
   key: string,
-  overrides: Partial<RemoteEntry> = {},
+  overrides: RemoteEntryOverrides = {},
 ): RemoteEntry {
   const nfc = key.normalize('NFC');
   const slash = nfc.lastIndexOf('/');
+  const { md5, ...rest } = overrides;
   return {
     id,
     key: nfc,
@@ -78,25 +92,22 @@ export function remoteEntry(
     parentId: slash === -1 ? ROOT_ID : `folder:${nfc.slice(0, slash)}`,
     ancestorIds: slash === -1 ? [ROOT_ID] : [`folder:${nfc.slice(0, slash)}`, ROOT_ID],
     mimeType: 'application/pdf',
-    md5: `md5-${id}`,
+    hash: md5Hash(md5 === undefined ? `md5-${id}` : md5),
     size: 10,
     modifiedTime: '2026-11-02T00:00:00.000Z',
     createdTime: '2026-11-01T00:00:00.000Z',
     canEdit: true,
     canTrash: true,
     native: null,
-    ...overrides,
+    ...rest,
   };
 }
 
 /** A record in sync with `localEntry(key)` and `remoteEntry(remoteId, key)`. */
-export function record(
-  remoteId: string,
-  key: string,
-  overrides: Partial<SyncRecord> = {},
-): SyncRecord {
+export function record(remoteId: string, key: string, overrides: RecordOverrides = {}): SyncRecord {
   const nfc = key.normalize('NFC');
   const slash = nfc.lastIndexOf('/');
+  const { remoteMd5, ...rest } = overrides;
   return {
     remoteId,
     path: nfc,
@@ -107,14 +118,14 @@ export function record(
     localSize: 10,
     localMtimeMs: 1000,
     localCtimeMs: 1000,
-    remoteMd5: `md5-${remoteId}`,
+    remoteHash: md5Hash(remoteMd5 === undefined ? `md5-${remoteId}` : remoteMd5),
     remoteSize: 10,
     remoteModifiedTime: '2026-11-02T00:00:00.000Z',
     native: null,
     remoteOnly: false,
     restorePending: false,
     remoteTrashed: false,
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -124,7 +135,7 @@ export const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordproc
 export function nativeEntry(
   id: string,
   key: string,
-  overrides: Partial<RemoteEntry> = {},
+  overrides: RemoteEntryOverrides = {},
 ): RemoteEntry {
   const base = key.slice(key.lastIndexOf('/') + 1);
   return remoteEntry(id, key, {
@@ -141,7 +152,7 @@ export function nativeEntry(
 export function nativeRecord(
   remoteId: string,
   key: string,
-  overrides: Partial<SyncRecord> = {},
+  overrides: RecordOverrides = {},
 ): SyncRecord {
   const base = key.slice(key.lastIndexOf('/') + 1);
   return record(remoteId, key, {
